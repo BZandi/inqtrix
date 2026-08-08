@@ -90,33 +90,43 @@ API/worker cloud identity. Takes { "root": $, "component": string }.
 {{- end -}}
 
 {{/*
-Image references: [registry/]repository:tag, tag defaulting to the appVersion.
+Immutable first-party image reference. Takes:
+  { "root": $, "component": "api"|"web"|"collaboration" }
+Production defaults to fail-loud when a digest is absent. Local development
+must opt into tag-only images with image.allowUnpinned=true.
 */}}
-{{- define "inqtrix.image.api" -}}
-{{- $tag := default .Chart.AppVersion .Values.image.api.tag -}}
-{{- if .Values.image.registry -}}
-{{- printf "%s/%s:%s" .Values.image.registry .Values.image.api.repository $tag -}}
-{{- else -}}
-{{- printf "%s:%s" .Values.image.api.repository $tag -}}
+{{- define "inqtrix.image.reference" -}}
+{{- $root := .root -}}
+{{- $component := .component -}}
+{{- $image := index $root.Values.image $component -}}
+{{- $tag := default $root.Chart.AppVersion $image.tag -}}
+{{- $repository := $image.repository -}}
+{{- if $root.Values.image.registry -}}
+{{- $repository = printf "%s/%s" (trimSuffix "/" $root.Values.image.registry) $repository -}}
 {{- end -}}
+{{- $digest := default "" $image.digest -}}
+{{- if $digest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $digest) -}}
+{{- fail (printf "image.%s.digest must be sha256:<64 lowercase hex characters>, got %q" $component $digest) -}}
+{{- end -}}
+{{- printf "%s:%s@%s" $repository $tag $digest -}}
+{{- else if $root.Values.image.allowUnpinned -}}
+{{- printf "%s:%s" $repository $tag -}}
+{{- else -}}
+{{- fail (printf "image.%s.digest is required for an immutable production image; set the release digest or explicitly set image.allowUnpinned=true for local development" $component) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "inqtrix.image.api" -}}
+{{- include "inqtrix.image.reference" (dict "root" . "component" "api") -}}
 {{- end -}}
 
 {{- define "inqtrix.image.web" -}}
-{{- $tag := default .Chart.AppVersion .Values.image.web.tag -}}
-{{- if .Values.image.registry -}}
-{{- printf "%s/%s:%s" .Values.image.registry .Values.image.web.repository $tag -}}
-{{- else -}}
-{{- printf "%s:%s" .Values.image.web.repository $tag -}}
-{{- end -}}
+{{- include "inqtrix.image.reference" (dict "root" . "component" "web") -}}
 {{- end -}}
 
 {{- define "inqtrix.image.collaboration" -}}
-{{- $tag := default .Chart.AppVersion .Values.image.collaboration.tag -}}
-{{- if .Values.image.registry -}}
-{{- printf "%s/%s:%s" .Values.image.registry .Values.image.collaboration.repository $tag -}}
-{{- else -}}
-{{- printf "%s:%s" .Values.image.collaboration.repository $tag -}}
-{{- end -}}
+{{- include "inqtrix.image.reference" (dict "root" . "component" "collaboration") -}}
 {{- end -}}
 
 {{/*
@@ -159,6 +169,118 @@ envFrom:
 {{- end -}}
 
 {{/*
+Tracing env entries (observability.tracing). Rendered into the API AND
+worker containers so one trace spans the submit and the execution; the
+OTLP headers stay in a Secret because they carry the project keys.
+*/}}
+{{- define "inqtrix.observabilityEnv" -}}
+{{- with (.Values.observability | default dict).tracing }}
+{{- if .enabled }}
+- name: INQTRIX_TRACING
+  value: {{ .mode | default "otlp" | quote }}
+{{- if eq (.mode | default "otlp") "otlp" }}
+- name: OTEL_EXPORTER_OTLP_ENDPOINT
+  value: {{ required "observability.tracing.otlpEndpoint is required for mode otlp" .otlpEndpoint | quote }}
+{{- end }}
+{{- $headersSecret := .headersSecret | default dict }}
+{{- if $headersSecret.name }}
+- name: OTEL_EXPORTER_OTLP_HEADERS
+  valueFrom:
+    secretKeyRef:
+      name: {{ $headersSecret.name }}
+      key: {{ $headersSecret.key | default "OTEL_EXPORTER_OTLP_HEADERS" }}
+{{- end }}
+{{- /* No truthiness test here: an explicit sampleRate of 0 (record
+       nothing) must render, while nil or the "" default must not. */}}
+{{- if and (ne .sampleRate nil) (ne (toString .sampleRate) "") }}
+- name: INQTRIX_TRACE_SAMPLE_RATE
+  value: {{ .sampleRate | toString | quote }}
+{{- end }}
+{{- if .uiUrl }}
+- name: INQTRIX_TRACE_UI_URL
+  value: {{ .uiUrl | quote }}
+{{- end }}
+{{- /* Same nil-vs-"" guard: retentionDays 0 (job off) must render. */}}
+{{- if and (ne .retentionDays nil) (ne (toString .retentionDays) "") }}
+- name: INQTRIX_TRACE_RETENTION_DAYS
+  value: {{ .retentionDays | toString | quote }}
+{{- end }}
+{{- if .spoolClaim }}
+- name: INQTRIX_TRACE_SPOOL_DIR
+  value: "/var/lib/inqtrix/traces"
+{{- end }}
+{{- if .profile }}
+- name: OBSERVABILITY_PROFILE
+  value: {{ .profile | quote }}
+{{- end }}
+{{- if and (ne .maxAttrBytes nil) (ne (toString .maxAttrBytes) "") }}
+- name: INQTRIX_TRACE_MAX_ATTR_BYTES
+  value: {{ .maxAttrBytes | toString | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $observability := .Values.observability | default dict }}
+{{- if $observability.logFormat }}
+- name: INQTRIX_LOG_FORMAT
+  value: {{ $observability.logFormat | quote }}
+{{- end }}
+{{- with $observability.retention }}
+{{- /* Same nil-vs-"" guard as the trace knobs: 0 (keep forever) renders,
+       an unset value must not. */}}
+{{- if and (ne .auditDays nil) (ne (toString .auditDays) "") }}
+- name: INQTRIX_AUDIT_RETENTION_DAYS
+  value: {{ .auditDays | toString | quote }}
+{{- end }}
+{{- if and (ne .usageDays nil) (ne (toString .usageDays) "") }}
+- name: INQTRIX_USAGE_RETENTION_DAYS
+  value: {{ .usageDays | toString | quote }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Shared trace-spool volume entries for mode "file" (see
+observability.tracing.spoolClaim in values.yaml). volume/volumeMount pair
+rendered into api AND worker; empty when no claim is configured. Fails the
+render when file mode runs with a worker but no shared claim — a pod-local
+spool would silently hide every worker span from the admin export.
+*/}}
+{{- define "inqtrix.traceSpoolVolume" -}}
+{{- $tracing := (.Values.observability | default dict).tracing | default dict }}
+{{- if and $tracing.enabled (eq ($tracing.mode | default "otlp") "file") .Values.worker.enabled (not $tracing.spoolClaim) }}
+{{- fail "observability.tracing.mode=file with worker.enabled requires observability.tracing.spoolClaim (an RWX PVC shared by api and worker) — a pod-local spool hides worker spans from the admin trace export" }}
+{{- end }}
+{{- if $tracing.spoolClaim }}
+- name: trace-spool
+  persistentVolumeClaim:
+    claimName: {{ $tracing.spoolClaim }}
+{{- end }}
+{{- end -}}
+
+{{- define "inqtrix.traceSpoolVolumeMount" -}}
+{{- $tracing := (.Values.observability | default dict).tracing | default dict }}
+{{- if $tracing.spoolClaim }}
+- name: trace-spool
+  mountPath: /var/lib/inqtrix/traces
+{{- end }}
+{{- end -}}
+
+{{/*
+Return one explicitly supplied credential or fail before a workload is
+rendered. Empty values and common template placeholders are never valid
+runtime credentials. Takes { "name": string, "value": any }.
+*/}}
+{{- define "inqtrix.requiredCredentialValue" -}}
+{{- $name := .name -}}
+{{- $value := default "" .value | toString -}}
+{{- $normalized := upper (replace "-" "_" $value) -}}
+{{- if or (empty $value) (contains "CHANGE_ME" $normalized) -}}
+{{- fail (printf "%s must be set to a non-placeholder credential when the bundled service is enabled" $name) -}}
+{{- end -}}
+{{- $value -}}
+{{- end -}}
+
+{{/*
 Effective database URL: an explicit secret.data.INQTRIX_DATABASE_URL wins;
 otherwise, when the bundled Postgres is enabled, the in-cluster connection is
 derived. Used by both the chart Secret and the migrate hook so they agree.
@@ -167,10 +289,19 @@ derived. Used by both the chart Secret and the migrate hook so they agree.
 {{- if hasKey .Values.secret.data "INQTRIX_DATABASE_URL" -}}
 {{- .Values.secret.data.INQTRIX_DATABASE_URL -}}
 {{- else if .Values.postgres.enabled -}}
-{{- if not (regexMatch "^[A-Za-z0-9._~-]+$" .Values.postgres.auth.password) -}}
+{{- $password := include "inqtrix.requiredCredentialValue" (dict "name" "postgres.auth.password" "value" .Values.postgres.auth.password) -}}
+{{- $username := default "" .Values.postgres.auth.username | toString -}}
+{{- $database := default "" .Values.postgres.auth.database | toString -}}
+{{- if not (regexMatch "^[A-Za-z0-9._~-]+$" $password) -}}
 {{- fail "postgres.auth.password must use only URL-unreserved characters [A-Za-z0-9._~-] when the bundled Postgres is enabled (it is embedded verbatim into INQTRIX_DATABASE_URL). For an arbitrary password, use an external database and set secret.data.INQTRIX_DATABASE_URL with your own URL-encoding." -}}
 {{- end -}}
-{{- printf "postgresql+asyncpg://%s:%s@%s-postgres:5432/%s" .Values.postgres.auth.username .Values.postgres.auth.password (include "inqtrix.fullname" .) .Values.postgres.auth.database -}}
+{{- if not (regexMatch "^[A-Za-z0-9._~-]+$" $username) -}}
+{{- fail "postgres.auth.username must be non-empty and use only URL-unreserved characters [A-Za-z0-9._~-] when bundled Postgres is enabled" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9._~-]+$" $database) -}}
+{{- fail "postgres.auth.database must be non-empty and use only URL-unreserved characters [A-Za-z0-9._~-] when bundled Postgres is enabled" -}}
+{{- end -}}
+{{- printf "postgresql+asyncpg://%s:%s@%s-postgres:5432/%s" $username $password (include "inqtrix.fullname" .) $database -}}
 {{- end -}}
 {{- end -}}
 
@@ -202,10 +333,11 @@ derived from the bundled Valkey (password embedded in the URL).
 {{- if hasKey .Values.secret.data "INQTRIX_VALKEY_URL" -}}
 {{- .Values.secret.data.INQTRIX_VALKEY_URL -}}
 {{- else if .Values.valkey.enabled -}}
-{{- if not (regexMatch "^[A-Za-z0-9._~-]+$" .Values.valkey.password) -}}
+{{- $password := include "inqtrix.requiredCredentialValue" (dict "name" "valkey.password" "value" .Values.valkey.password) -}}
+{{- if not (regexMatch "^[A-Za-z0-9._~-]+$" $password) -}}
 {{- fail "valkey.password must use only URL-unreserved characters [A-Za-z0-9._~-] when the bundled Valkey is enabled (it is embedded verbatim into INQTRIX_VALKEY_URL). For an arbitrary password, use an external Valkey and set secret.data.INQTRIX_VALKEY_URL with your own URL-encoding." -}}
 {{- end -}}
-{{- printf "redis://:%s@%s-valkey:6379/0" .Values.valkey.password (include "inqtrix.fullname" .) -}}
+{{- printf "redis://:%s@%s-valkey:6379/0" $password (include "inqtrix.fullname" .) -}}
 {{- end -}}
 {{- end -}}
 
@@ -303,25 +435,15 @@ co-location or the S3 object-store backend.
 {{- end -}}
 
 {{/*
-Writable volumes/mounts for the nginx web pod under a read-only root filesystem:
-the PID file and temp paths live under /tmp; the nginx cache dir; and
-/etc/nginx/conf.d, where the entrypoint renders the config template at startup
-(the read-only template itself stays under /etc/nginx/templates).
+The Python web gateway writes no application state. /tmp is its only writable
+path under a read-only root filesystem and also serves arbitrary OpenShift UIDs.
 */}}
 {{- define "inqtrix.webWritableVolumes" -}}
 - name: tmp
-  emptyDir: {}
-- name: nginx-cache
-  emptyDir: {}
-- name: nginx-conf
   emptyDir: {}
 {{- end -}}
 
 {{- define "inqtrix.webWritableVolumeMounts" -}}
 - name: tmp
   mountPath: /tmp
-- name: nginx-cache
-  mountPath: /var/cache/nginx
-- name: nginx-conf
-  mountPath: /etc/nginx/conf.d
 {{- end -}}

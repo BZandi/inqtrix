@@ -1108,7 +1108,7 @@ def test_report_guidance_on_non_plan_gate_is_a_loud_400(monkeypatch):
 def test_tief_tier_escalates_unverified_web_quotes_once(monkeypatch):
     """P7: on the tief tier an unverified web-cited quote flips a passing
     critic verdict to revise EXACTLY once (existing revision budget)."""
-    quote = "Die Compliance-Kosten steigen 2026 um vierzig Prozent"
+    quote = "Die Marktlage bleibt unerwartet dynamisch"
 
     def child_with_excerpt(question: str, **kwargs: Any) -> dict[str, Any]:
         result = fake_child_graph(question, **kwargs)
@@ -1686,9 +1686,7 @@ def test_structured_round_answer_maps_options(monkeypatch):
 
 
 def test_discovery_web_preview_gated_to_autonomous(monkeypatch):
-    """E16 amendment: in Standard/balanced the discovery phase makes NO
-    web contact even with the preview setting on — all web goes through
-    the approved plan. Autonomous keeps the preview."""
+    """Standard discovery makes no web contact; autonomous keeps the preview."""
     balanced = make_agent_client(monkeypatch)
     with balanced:
         run_id = submit_agent(balanced)  # default balanced
@@ -1955,14 +1953,16 @@ def test_web_instant_task_spawns_no_child(monkeypatch):
         )
 
 
-def test_url_only_instant_evidence_reaches_synthesis_and_artifact(monkeypatch):
-    """Azure-shaped URL citations retain grounded, non-quote support."""
+def test_provider_grounded_instant_number_remains_available_to_mission(
+    monkeypatch,
+):
+    """Azure answer context and its cited source survive mission synthesis."""
     synthesis_prompts: list[str] = []
 
     def section_text(prompt: str) -> dict[str, str]:
         synthesis_prompts.append(prompt)
         return {
-            "markdown": "Der Markt erreicht US-$1.5T [W1]; Formel $x$.",
+            "markdown": "Der Markt erreicht US-$1.5T [W1].\n\nFormel $x$.",
         }
 
     class UrlOnlySearch(FakeSearch):
@@ -1996,8 +1996,14 @@ def test_url_only_instant_evidence_reaches_synthesis_and_artifact(monkeypatch):
         wait_status(client, run_id, {"completed"})
         artifacts = client.get(f"/v1/runs/{run_id}/artifacts").json()["data"]
         memo = [item for item in artifacts if item["kind"] == "memo"][0]
+        evidence_artifact = [
+            item for item in artifacts if item["kind"] == "evidence_bundle"
+        ][0]
         detail = client.get(
             f"/v1/runs/{run_id}/artifacts/{memo['artifact_id']}"
+        ).json()
+        evidence_detail = client.get(
+            f"/v1/runs/{run_id}/artifacts/{evidence_artifact['artifact_id']}"
         ).json()
         result = client.get(f"/v1/runs/{run_id}/result").json()
 
@@ -2007,25 +2013,26 @@ def test_url_only_instant_evidence_reaches_synthesis_and_artifact(monkeypatch):
         for prompt in synthesis_prompts
     )
     assert all("Second evidence" not in prompt for prompt in synthesis_prompts)
-    ref = next(
+    ledger_ref = next(
         item
-        for item in detail["refs"]
+        for item in evidence_detail["refs"]
         if item.get("url") == "https://example.com/markt"
     )
-    assert ref.get("excerpt") in (None, "")
-    assert "weltweiten KI-Ausgaben 2025" in ref["grounded_support"]
-    assert "\\$" not in ref["grounded_support"]
-    exported_ref = next(
-        item
-        for item in result["references"]
-        if item.get("url") == "https://example.com/markt"
-    )
-    assert exported_ref["label"] == "W1"
-    assert "weltweiten KI-Ausgaben 2025" in exported_ref[
+    assert ledger_ref.get("excerpt") in (None, "")
+    assert "weltweiten KI-Ausgaben 2025" in ledger_ref["grounded_support"]
+    assert "\\$" not in ledger_ref["grounded_support"]
+    assert [
+        ref["url"] for ref in detail["refs"]
+    ] == ["https://example.com/markt"]
+    assert [
+        ref["url"] for ref in result["references"]
+    ] == ["https://example.com/markt"]
+    assert "US-\\$1.5T" in detail["content_markdown"]
+    assert "$x$" in detail["content_markdown"]
+    assert "Belegstatus" not in detail["content_markdown"]
+    assert "weltweiten KI-Ausgaben 2025" in ledger_ref[
         "grounded_support"
     ]
-    assert r"US-\$1.5T" in detail["content_markdown"]
-    assert "$x$" in detail["content_markdown"]
 
 
 def test_independent_instant_tasks_overlap_and_call_each_query_once(
@@ -2241,10 +2248,13 @@ def test_knowledge_hits_flow_through_capability_layer(monkeypatch):
                     chunk_index=0,
                     chunk_id="ch-1",
                     rank=1,
-                    text="Interner Marktbericht: Anbieter A fuehrt.",
-                    source_text="Interner Marktbericht: Anbieter A fuehrt.",
+                    excerpt="Interner Marktbericht: Anbieter A fuehrt.",
                     page_number=None,
                     score=0.9,
+                    source_span={"start": 0, "end": 44, "unit": "utf8_byte"},
+                    revision_id="rev-1",
+                    generation_id="gen-1",
+                    provenance_status="verified_span",
                 )
             ],
         )
@@ -2355,6 +2365,19 @@ def test_rag_query_task_completes_with_memo_k_references(monkeypatch):
 
         def run(self, request, *, runtime, context):
             answer = "Interne Befunde: Anbieter A fuehrt."
+            assert context.event_sink is not None
+            warning = {
+                "code": "chunks_require_reindex",
+                "message": "Treffer müssen neu indiziert werden.",
+                "reason": "source_unverified",
+                "stage": "canonical_hydration",
+                "count": 2,
+                "recommended_action": "reindex",
+            }
+            context.event_sink(
+                "inqtrix.knowledge.retrieval.warning",
+                warning,
+            )
             return AgentResult(
                 answer=answer,
                 raw={
@@ -2362,6 +2385,7 @@ def test_rag_query_task_completes_with_memo_k_references(monkeypatch):
                     "usage": {"prompt_tokens": 4, "completion_tokens": 3},
                     "result_state": {
                         "answer": answer,
+                        "knowledge_retrieval": {"warnings": [warning]},
                         "report_references": [
                             {
                                 "url": None,
@@ -2402,6 +2426,7 @@ def test_rag_query_task_completes_with_memo_k_references(monkeypatch):
     with client:
         run_id = submit_agent(client, autonomy="autonomous")
         wait_status(client, run_id, {"completed"})
+        events = run_events(client, run_id)
         # A rag_query task never spawns child research runs.
         children = client.get(f"/v1/runs/{run_id}/children").json()["data"]
         assert children == []
@@ -2413,6 +2438,23 @@ def test_rag_query_task_completes_with_memo_k_references(monkeypatch):
         assert any(
             ref.get("document_id") == "doc-9" for ref in detail["refs"]
         )
+        warnings = [
+            event["data"]
+            for event in events
+            if event["type"] == "inqtrix.knowledge.retrieval.warning"
+        ]
+        assert warnings == [
+            {
+                "attempt": 1,
+                "code": "chunks_require_reindex",
+                "count": 2,
+                "query_index": 1,
+                "reason": "source_unverified",
+                "recommended_action": "reindex",
+                "stage": "canonical_hydration",
+                "task_id": "t1",
+            }
+        ]
 
 
 def test_rag_answer_without_references_is_insufficient_evidence(monkeypatch):
@@ -2470,6 +2512,121 @@ def test_rag_answer_without_references_is_insufficient_evidence(monkeypatch):
 
     task = next(item for item in stored["tasks"] if item["task_id"] == "t1")
     assert task["status"] == "insufficient_evidence"
+
+
+def test_rag_grounding_rejection_fails_task_and_reaches_mission_audit(
+    monkeypatch,
+):
+    """A returned Knowledge terminal failure is never a completed RAG task."""
+    from inqtrix.core.results import AgentResult
+    from inqtrix.knowledge.grounding import (
+        GROUNDING_MARKER_FALLBACK,
+        GroundingFailureCode,
+        GroundingStatus,
+    )
+
+    safe_reason = (
+        "Die Antwort wurde nicht veröffentlicht, weil der erforderliche "
+        "Belegblock nicht sicher gelesen und geprüft werden konnte."
+    )
+
+    class _RejectedKnowledgeAlgorithm:
+        id = "knowledge"
+        display_name = "Knowledge grounding rejection (test stub)"
+
+        def capabilities(self) -> dict:
+            return {}
+
+        def run(self, request, *, runtime, context):
+            del request, runtime
+            assert context.event_sink is not None
+            context.event_sink(
+                "inqtrix.knowledge.grounding.checked",
+                {
+                    "marker": GROUNDING_MARKER_FALLBACK,
+                    "status": GroundingStatus.REJECTED_FORMAT.value,
+                    "failure_code": GroundingFailureCode.FORMAT_INVALID.value,
+                    "format_repaired": False,
+                    "quotes_total": 0,
+                    "quotes_verified": 0,
+                },
+            )
+            return AgentResult(
+                answer=safe_reason,
+                result_type="knowledge_result",
+                raw={
+                    "answer": safe_reason,
+                    "usage": {"prompt_tokens": 13, "completion_tokens": 5},
+                    "result_state": {
+                        "answer": safe_reason,
+                        "report_references": [],
+                        "_terminal_failure": {
+                            "type": GroundingFailureCode.FORMAT_INVALID.value,
+                            "message": safe_reason,
+                        },
+                    },
+                },
+            )
+
+    plan = {
+        "summary_markdown": "Interne Evidenz prüfen.",
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Interne Quellen befragen",
+                "tool_kind": "rag_query",
+                "gap_ids": ["g1"],
+                "queries": ["Welche Belege liegen intern vor?"],
+            },
+            {
+                "id": "s",
+                "title": "Synthese",
+                "tool_kind": "synthesis",
+                "depends_on": ["t1"],
+            },
+        ],
+    }
+    client = make_agent_client(
+        monkeypatch,
+        llm=ScriptedLLM(overrides={"ExecutionPlanModel": plan}),
+    )
+    client.container.registry.register(_RejectedKnowledgeAlgorithm())
+    with client:
+        run_id = submit_agent(client, autonomy="autonomous")
+        wait_status(client, run_id, {"failed"})
+        stored = client.get(f"/v1/runs/{run_id}/plan").json()
+        events = run_events(client, run_id)
+
+    task = next(item for item in stored["tasks"] if item["task_id"] == "t1")
+    assert task["status"] == "failed"
+    grounding = [
+        event["data"]
+        for event in events
+        if event["type"] == "inqtrix.knowledge.grounding.checked"
+    ]
+    assert grounding == [
+        {
+            "marker": GROUNDING_MARKER_FALLBACK,
+            "status": GroundingStatus.REJECTED_FORMAT.value,
+            "failure_code": GroundingFailureCode.FORMAT_INVALID.value,
+            "format_repaired": False,
+            "quotes_total": 0,
+            "quotes_verified": 0,
+            "task_id": "t1",
+            "attempt": 1,
+            "query_index": 1,
+        }
+    ]
+    failed = [
+        event["data"]
+        for event in events
+        if event["type"] == "inqtrix.agent.task.failed"
+        and event["data"].get("task_id") == "t1"
+    ]
+    assert failed[0]["failure"]["code"] == (
+        GroundingFailureCode.FORMAT_INVALID.value
+    )
+    assert safe_reason in failed[0]["failure"]["message"]
 
 
 def _put_target_document(client: TestClient, document_id: str) -> None:
@@ -2779,10 +2936,20 @@ def test_operator_token_budget_fails_distinct_from_client_cancel(monkeypatch):
     with client:
         run_id = submit_agent(client, autonomy="autonomous")
         summary = wait_status(client, run_id, {"failed", "cancelled"})
+        events = run_events(client, run_id)
 
     assert summary["status"] == "failed"
     assert summary["error"]["type"] == "token_budget_exceeded"
     assert "Tokenbudget" in summary["error"]["message"]
+    token_limits = [
+        event
+        for event in events
+        if event["type"] == "inqtrix.agent.limit.reached"
+        and event["data"].get("kind") == "tokens"
+    ]
+    assert len(token_limits) == 1
+    assert token_limits[0]["data"]["recoverable"] is False
+    assert token_limits[0]["data"]["extendable"] is False
 
 
 def test_budget_stop_persists_every_finished_parallel_task(monkeypatch):
@@ -2845,9 +3012,7 @@ def test_budget_stop_persists_every_finished_parallel_task(monkeypatch):
 
 
 def test_replan_appends_additive_version_balanced_auto(monkeypatch):
-    """Scenario 9 (E16 amendment): insufficient evidence -> ONE replan,
-    auto-approved in balanced mode because the delta is INTERNAL
-    read-only; plan v2 created by agent."""
+    """An internal read-only delta is auto-approved in balanced mode."""
     sufficiency_calls = {"n": 0}
 
     def sufficiency_script(prompt: str) -> dict[str, Any]:
@@ -2978,9 +3143,11 @@ def test_empty_replan_delta_proceeds_directly_to_synthesis(monkeypatch):
 
 
 def test_replan_with_web_delta_regates_in_balanced(monkeypatch):
-    """E16 amendment (plan M1 S7): a replan that ADDS web queries parks
-    for approval again in Standard/balanced — the approved plan is the
-    web-search consent, unseen queries never run."""
+    """A replan with new web queries parks again in Standard mode.
+
+    The approved plan is the web-search consent, so unseen queries
+    never run.
+    """
     sufficiency_calls = {"n": 0}
 
     def sufficiency_script(prompt: str) -> dict[str, Any]:

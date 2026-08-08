@@ -641,11 +641,14 @@ function MarkdownTable({
   return (
     <MarkdownBlockFrame actions={actions} className="inqtrix-markdown-table my-4">
       <div
+        aria-label={t.markdown.scrollableTable}
         className={cn(
-          'max-w-full overflow-x-auto border border-border [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+          'max-w-full overflow-x-auto border border-border focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
           variant === 'report' ? 'rounded-lg' : 'rounded-md bg-background',
         )}
         ref={exportRef}
+        role="region"
+        tabIndex={0}
       >
         <table
           className={cn(
@@ -702,7 +705,7 @@ function MarkdownCodePre({
     ?? 'text'
   const codeText = textFromReactNode(children)
 
-  // ```mermaid fences render as diagrams app-wide (plan M1 S6): this is
+  // ```mermaid fences render as diagrams app-wide: this is
   // the ONE integration point every MarkdownRenderer consumer flows
   // through (chat, knowledge, reports, agent canvas, answer blocks).
   // The check reads the RAW fence token — the normalized `language`
@@ -758,13 +761,16 @@ function MarkdownCodePre({
         </Button>
       </div>
       <pre
+        aria-label={t.markdown.scrollableCode.replace('{language}', language)}
         className={cn(
-          'max-w-full overflow-x-auto bg-transparent font-mono text-foreground [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+          'max-w-full overflow-x-auto bg-transparent font-mono text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
           variant === 'report' ? 'p-4 leading-6' : 'p-3 leading-[1.45]',
           className,
         )}
         {...props}
         ref={preRef}
+        role="region"
+        tabIndex={0}
       >
         <HighlightedCode code={codeText} language={language} />
       </pre>
@@ -892,7 +898,7 @@ function normalizeLatex(markdown: string) {
     ))
 }
 
-function splitStreamingMarkdown(markdown: string): {
+export function splitStreamingMarkdown(markdown: string): {
   pendingKind: StreamingMarkdownPendingKind
   pendingText: string
   stableMarkdown: string
@@ -990,7 +996,23 @@ function isInlineMathOpenDelimiter(markdown: string, index: number) {
   const previous = markdown[index - 1]
   if (!next || /\s/.test(next)) return false
   if (previous && /[A-Za-z0-9]/.test(previous)) return false
-  return true
+  // A money token like "$5 Millionen" must not open "unclosed math" and
+  // swallow the rest of the text as raw pending output: the delimiter
+  // only opens when the SAME line plausibly closes it. An incomplete
+  // final line stays open — its closing "$" may simply not have
+  // streamed in yet.
+  const lineEnd = markdown.indexOf('\n', index + 1)
+  if (lineEnd < 0) return true
+  for (let current = index + 1; current < lineEnd; current += 1) {
+    if (
+      markdown[current] === '$'
+      && !isEscaped(markdown, current)
+      && isInlineMathCloseDelimiter(markdown, current)
+    ) {
+      return true
+    }
+  }
+  return false
 }
 
 function isInlineMathCloseDelimiter(markdown: string, index: number) {

@@ -198,6 +198,34 @@ def test_streaming_without_progress_skips_progress_and_separator(monkeypatch):
 # ------------------------------------------------------------------ #
 
 
+def test_returned_terminal_failure_is_not_a_chat_completion(monkeypatch):
+    safe_reason = "The required evidence block could not be verified safely."
+
+    def fake_run(*args, **kwargs):
+        result = minimal_agent_result(answer=safe_reason)
+        result["result_state"]["_terminal_failure"] = {
+            "type": "knowledge_grounding_format_invalid",
+            "message": safe_reason,
+        }
+        return result
+
+    monkeypatch.setattr(web_research_module, "run_web_graph", fake_run)
+
+    with make_contract_client() as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "Hallo"}]},
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "error": {
+            "message": safe_reason,
+            "type": "knowledge_grounding_format_invalid",
+        }
+    }
+
+
 def test_invalid_json_body_envelope():
     with make_contract_client() as client:
         response = client.post(

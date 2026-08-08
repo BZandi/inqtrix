@@ -2,11 +2,10 @@
 
 Same gating as the run-store suite (``INQTRIX_TEST_DATABASE_URL``,
 restricted app role, RLS). The parity assertions mirror the in-memory
-:class:`~inqtrix.server.indexing.IndexingJobStore` contract — the
-summary wire shape, gap-free 1-based event sequences, terminal-state
-absorption, and claim fencing — plus the two behaviours the run store
-lacks: one-active-job-per-collection serialization and the
-per-collection history cap.
+:class:`~inqtrix.server.indexing.IndexingJobStore` contract — the summary
+wire shape, gap-free 1-based event sequences, terminal-state absorption,
+claim fencing, collection-generation serialization, immutable-revision
+submission idempotency, and the per-collection history cap.
 """
 
 from __future__ import annotations
@@ -15,30 +14,32 @@ import os
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
 from inqtrix.auth.principal import Principal, UserContext
+from inqtrix.contextualization_circuit import ContextualizationCircuitPermit
 from inqtrix.runs.indexing_postgres import PostgresIndexingJobStore
 from inqtrix.server.indexing import (
     IndexingJobConflict,
     IndexingJobNotFound,
+    IndexingResumeUnavailable,
 )
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.migrate import run_migrations
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 USER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
 USER_B = uuid.UUID("22222222-2222-4222-8222-222222222222")
+USER_C = uuid.UUID("44444444-4444-4444-8444-444444444444")
 COLLECTION_IDS = {
     "col-1",
     "col-2",
@@ -58,6 +59,9 @@ SUMMARY_KEYS = {
     "collection_id",
     "collection_name",
     "embedding_model",
+    "operation_kind",
+    "document_id",
+    "revision_id",
     "index_id",
     "status",
     "queue_position",
@@ -71,7 +75,14 @@ SUMMARY_KEYS = {
     "percent",
     "snapshot",
     "error",
+    "phase",
+    "current_batch",
+    "total_batches",
+    "checkpoint",
+    "generation_id",
+    "fence_token",
     "events_url",
+    "last_event_sequence",
 }
 
 
@@ -109,6 +120,9 @@ async def store(engine):
                 )
             await session.execute(text("DELETE FROM indexing_job_events"))
             await session.execute(text("DELETE FROM indexing_jobs"))
+            await session.execute(
+                text("DELETE FROM contextualization_provider_circuits")
+            )
             for collection_id in COLLECTION_IDS:
                 await session.execute(
                     text(
@@ -137,6 +151,7 @@ async def store(engine):
             for user_id, subject in (
                 (USER_A, "indexing-owner"),
                 (USER_B, "indexing-recipient"),
+                (USER_C, "indexing-unshared"),
             ):
                 await session.execute(
                     text(
@@ -213,6 +228,33 @@ def wait_for_status(store, job_id, statuses, timeout=10.0):
             return summary
         time.sleep(0.05)
     pytest.fail(f"job {job_id} never reached {statuses}")
+
+
+def expire_contextualization_circuit(
+    store,
+    *,
+    provider_key: str,
+    model: str,
+    expire_probe: bool = False,
+) -> None:
+    async def _expire() -> None:
+        async with store._session("default") as session:
+            values = (
+                "probe_lease_until = 0, updated_at = 0"
+                if expire_probe
+                else "cooldown_until = 0, updated_at = 0"
+            )
+            await session.execute(
+                text(
+                    "UPDATE contextualization_provider_circuits "
+                    f"SET {values} "
+                    "WHERE tenant_id = 'default' "
+                    "AND provider_key = :provider_key AND model = :model"
+                ),
+                {"provider_key": provider_key, "model": model},
+            )
+
+    store._call(_expire())
 
 
 def submit_reembed(store, *, collection_id="col-a", work=None, **kwargs):
@@ -324,6 +366,196 @@ def test_submit_executes_and_keeps_the_wire_shape(store):
     assert final["error"] is None
 
 
+def test_in_process_document_job_carries_its_claim_attempt_to_publication(store):
+    observed: dict[str, object] = {}
+
+    def inspect_fence(handle):
+        observed["job_id"] = handle.fence_job_id
+        observed["attempt"] = handle.fence_attempt
+        handle.begin(1)
+        handle.progress(completed_documents=1)
+        handle.complete()
+
+    summary = submit_reembed(
+        store,
+        collection_id="col-doc",
+        operation_kind="document_revision",
+        document_id="kd_claim_fence",
+        revision_id="rev_claim_fence",
+        work=inspect_fence,
+    )
+    wait_for_status(store, summary["job_id"], {"completed"})
+
+    assert observed == {
+        "job_id": summary["job_id"],
+        "attempt": 1,
+    }
+
+
+def test_document_delta_and_generation_coexist_but_generations_serialize(store):
+    document_started = threading.Event()
+    generation_started = threading.Event()
+    release = threading.Event()
+
+    def blocking(started):
+        def work(handle):
+            handle.begin(1)
+            started.set()
+            release.wait(timeout=5)
+            handle.progress(completed_documents=1)
+
+        return work
+
+    document = submit_reembed(
+        store,
+        collection_id="col-doc",
+        operation_kind="document_revision",
+        document_id="kd_postgres_delta",
+        revision_id="rev_postgres_delta",
+        work=blocking(document_started),
+    )
+    assert document_started.wait(timeout=5)
+    generation = submit_reembed(
+        store,
+        collection_id="col-doc",
+        operation_kind="collection_generation",
+        generation_id="gen_postgres_shared",
+        work=blocking(generation_started),
+    )
+    assert generation_started.wait(timeout=5)
+
+    with pytest.raises(IndexingJobConflict):
+        submit_reembed(
+            store,
+            collection_id="col-doc",
+            operation_kind="collection_generation",
+            generation_id="gen_postgres_conflict",
+        )
+
+    release.set()
+    wait_for_status(store, document["job_id"], {"completed"})
+    wait_for_status(store, generation["job_id"], {"completed"})
+
+
+def test_concurrent_revision_retries_return_one_durable_job(store):
+    callers_ready = threading.Barrier(3)
+    work_started = threading.Event()
+    release = threading.Event()
+    result_lock = threading.Lock()
+    results: list[dict] = []
+    errors: list[BaseException] = []
+    work_calls = 0
+
+    def work(handle):
+        nonlocal work_calls
+        work_calls += 1
+        handle.begin(1)
+        work_started.set()
+        release.wait(timeout=5)
+        handle.progress(completed_documents=1)
+
+    def submit_retry():
+        try:
+            callers_ready.wait(timeout=5)
+            summary = submit_reembed(
+                store,
+                collection_id=OWNED_COLLECTION_ID,
+                operation_kind="document_revision",
+                document_id="kd_pg_retry",
+                revision_id="rev_pg_retry",
+                created_by_user_id=USER_A,
+                created_by_tenant_id="default",
+                work=work,
+            )
+            with result_lock:
+                results.append(summary)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            with result_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=submit_retry) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    callers_ready.wait(timeout=5)
+    for thread in threads:
+        thread.join(timeout=5)
+
+    try:
+        assert errors == []
+        assert len(results) == 2
+        assert results[0]["job_id"] == results[1]["job_id"]
+        assert work_started.wait(timeout=5)
+        assert work_calls == 1
+        collaborator_retry = submit_reembed(
+            store,
+            collection_id=OWNED_COLLECTION_ID,
+            operation_kind="document_revision",
+            document_id="kd_pg_retry",
+            revision_id="rev_pg_retry",
+            created_by_user_id=USER_B,
+            created_by_tenant_id="default",
+        )
+        assert collaborator_retry["job_id"] == results[0]["job_id"]
+    finally:
+        release.set()
+    wait_for_status(store, results[0]["job_id"], {"completed"})
+
+
+def test_terminal_revision_failure_and_cancel_release_durable_slot(store):
+    def fail(handle):
+        handle.begin(1)
+        raise RuntimeError("embedding failed")
+
+    failed = submit_reembed(
+        store,
+        collection_id="col-doc",
+        operation_kind="document_revision",
+        document_id="kd_pg_terminal",
+        revision_id="rev_pg_terminal",
+        work=fail,
+    )
+    wait_for_status(store, failed["job_id"], {"failed"})
+    after_failure = submit_reembed(
+        store,
+        collection_id="col-doc",
+        operation_kind="document_revision",
+        document_id="kd_pg_terminal",
+        revision_id="rev_pg_terminal",
+    )
+    assert after_failure["job_id"] != failed["job_id"]
+    wait_for_status(store, after_failure["job_id"], {"completed"})
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def block(handle):
+        handle.begin(1)
+        started.set()
+        release.wait(timeout=5)
+
+    cancelling = submit_reembed(
+        store,
+        collection_id="col-doc",
+        operation_kind="document_revision",
+        document_id="kd_pg_cancel",
+        revision_id="rev_pg_cancel",
+        work=block,
+    )
+    assert started.wait(timeout=5)
+    store.cancel(cancelling["job_id"])
+    release.set()
+    wait_for_status(store, cancelling["job_id"], {"cancelled"})
+    after_cancel = submit_reembed(
+        store,
+        collection_id="col-doc",
+        operation_kind="document_revision",
+        document_id="kd_pg_cancel",
+        revision_id="rev_pg_cancel",
+    )
+    assert after_cancel["job_id"] != cancelling["job_id"]
+    wait_for_status(store, after_cancel["job_id"], {"completed"})
+
+
 def test_event_stream_is_gap_free_with_progress(store):
     summary = submit_reembed(store)
     wait_for_status(store, summary["job_id"], {"completed"})
@@ -387,7 +619,7 @@ def test_per_collection_history_cap_evicts_oldest(store):
     """history_limit=2: only the two newest terminal jobs per collection
     survive the lazy cleanup."""
     ids = []
-    for _ in range(3):
+    for _ in range(2):
         summary = submit_reembed(
             store,
             collection_id=OWNED_COLLECTION_ID,
@@ -398,6 +630,14 @@ def test_per_collection_history_cap_evicts_oldest(store):
         ids.append(summary["job_id"])
 
     cursor = effect_cursor(store)
+    summary = submit_reembed(
+        store,
+        collection_id=OWNED_COLLECTION_ID,
+        created_by_user_id=USER_A,
+        created_by_tenant_id="default",
+    )
+    wait_for_status(store, summary["job_id"], {"completed"})
+    ids.append(summary["job_id"])
     surviving = {
         row["job_id"]
         for row in store.list(collection_id=OWNED_COLLECTION_ID)
@@ -444,9 +684,7 @@ def test_terminal_ttl_deletion_is_audited_and_invalidates_shared_views(
     assert targets == {USER_A, USER_B}
 
 
-def test_stuck_active_job_is_failed_not_deleted_and_requests_local_stop(
-    store,
-) -> None:
+def test_running_job_age_is_not_an_implicit_lifecycle_deadline(store) -> None:
     release = threading.Event()
     cancel_observed = threading.Event()
 
@@ -456,7 +694,7 @@ def test_stuck_active_job_is_failed_not_deleted_and_requests_local_stop(
             pass
         if handle.cancelled:
             cancel_observed.set()
-            handle.cancel("lifecycle_timeout")
+            handle.cancel("client_requested_cancel")
         else:
             handle.complete()
 
@@ -477,18 +715,17 @@ def test_stuck_active_job_is_failed_not_deleted_and_requests_local_stop(
         cursor = effect_cursor(store)
 
         rows = store.list(collection_id=OWNED_COLLECTION_ID)
-        failed = next(row for row in rows if row["job_id"] == summary["job_id"])
-        assert failed["status"] == "failed"
-        assert failed["error"]["type"] == "stuck_job_timeout"
-        assert store.has_active_job(OWNED_COLLECTION_ID) is False
-        assert cancel_observed.wait(2)
+        current = next(row for row in rows if row["job_id"] == summary["job_id"])
+        assert current["status"] == "running"
+        assert current["error"] is None
+        assert store.has_active_job(OWNED_COLLECTION_ID) is True
+        assert cancel_observed.is_set() is False
 
         subscription = store.subscribe(summary["job_id"])
         try:
-            assert subscription.replay[-1]["type"] == "inqtrix.index.failed"
-            assert (
-                subscription.replay[-1]["data"]["error"]["type"]
-                == "stuck_job_timeout"
+            assert all(
+                event["type"] != "inqtrix.index.failed"
+                for event in subscription.replay
             )
         finally:
             subscription.close()
@@ -498,10 +735,143 @@ def test_stuck_active_job_is_failed_not_deleted_and_requests_local_stop(
             resource_id=OWNED_COLLECTION_ID,
             after_event_id=cursor,
         )
-        assert audit_count == 1
-        assert targets == {USER_A, USER_B}
+        assert audit_count == 0
+        assert targets == set()
     finally:
         release.set()
+
+    wait_for_status(store, summary["job_id"], {"completed"})
+
+
+def test_paused_job_survives_age_cleanup_and_resumes_from_checkpoint(
+    store,
+) -> None:
+    executions = 0
+
+    def pause_once(handle):
+        nonlocal executions
+        executions += 1
+        handle.begin(1)
+        if executions == 1:
+            handle.checkpoint_context_batch(
+                "kd_pause_retention",
+                {
+                    "batch_index": 0,
+                    "batch_size": 1,
+                    "contexts": ["retained"],
+                    "document_id": "kd_pause_retention",
+                    "prompt_hash": "prompt-retention",
+                    "total_batches": 2,
+                },
+            )
+            handle.pause_dependency("provider unavailable")
+            return
+        handle.progress(completed_documents=1)
+        handle.complete()
+
+    summary = submit_reembed(
+        store,
+        collection_id=OWNED_COLLECTION_ID,
+        work=pause_once,
+        created_by_user_id=USER_A,
+        created_by_tenant_id="default",
+    )
+    paused = wait_for_status(store, summary["job_id"], {"paused_dependency"})
+    retained_checkpoint = paused["checkpoint"]
+    age_job(
+        store,
+        summary["job_id"],
+        created_at=time.time() - (365 * 86_400),
+    )
+
+    after_cleanup = store.get(summary["job_id"])
+    assert after_cleanup["status"] == "paused_dependency"
+    assert after_cleanup["checkpoint"] == retained_checkpoint
+    assert store.has_active_job(OWNED_COLLECTION_ID) is True
+
+    resumed = store.resume(summary["job_id"])
+    assert resumed["status"] in {"queued", "running"}
+    completed = wait_for_status(store, summary["job_id"], {"completed"})
+    assert completed["checkpoint"] == retained_checkpoint
+    assert executions == 2
+
+
+def test_parallel_document_checkpoints_do_not_overwrite_each_other(store) -> None:
+    observed: dict[str, list[dict]] = {}
+
+    def work(handle):
+        handle.begin(2)
+        barrier = threading.Barrier(3)
+
+        def checkpoint(document_id: str, context: str) -> None:
+            barrier.wait()
+            handle.checkpoint_context_batch(
+                document_id,
+                {
+                    "batch_number": 1,
+                    "batch_size": 1,
+                    "contexts": [context],
+                    "document_id": document_id,
+                    "prompt_hash": f"prompt-{document_id}",
+                    "total_batches": 2,
+                },
+            )
+
+        workers = [
+            threading.Thread(target=checkpoint, args=("kd_pg_parallel_a", "a")),
+            threading.Thread(target=checkpoint, args=("kd_pg_parallel_b", "b")),
+        ]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join()
+
+        observed["a_before"] = handle.context_batch_checkpoints("kd_pg_parallel_a")
+        observed["b_before"] = handle.context_batch_checkpoints("kd_pg_parallel_b")
+        handle.document_progress(
+            "kd_pg_parallel_a",
+            "contextualization",
+            current_batch=1,
+            total_batches=2,
+        )
+        handle.document_progress(
+            "kd_pg_parallel_b",
+            "contextualization",
+            current_batch=1,
+            total_batches=2,
+        )
+        handle.checkpoint_document("kd_pg_parallel_a")
+        observed["a_after"] = handle.context_batch_checkpoints("kd_pg_parallel_a")
+        observed["b_after"] = handle.context_batch_checkpoints("kd_pg_parallel_b")
+        handle.pause_dependency("retain unfinished document")
+
+    summary = submit_reembed(
+        store,
+        collection_id=OWNED_COLLECTION_ID,
+        work=work,
+        created_by_user_id=USER_A,
+        created_by_tenant_id="default",
+    )
+    paused = wait_for_status(store, summary["job_id"], {"paused_dependency"})
+
+    assert len(observed["a_before"]) == 1
+    assert len(observed["b_before"]) == 1
+    assert observed["a_after"] == []
+    assert observed["b_after"] == observed["b_before"]
+    assert paused["checkpoint"]["contextualization"] == {
+        "active_documents": 1,
+        "completed_batches": 1,
+        "document_id": "kd_pg_parallel_b",
+        "total_batches": 2,
+    }
+    assert paused["checkpoint"]["document_progress"] == {
+        "kd_pg_parallel_b": {
+            "current_batch": 1,
+            "phase": "contextualization",
+            "total_batches": 2,
+        }
+    }
 
 
 def test_cancel_of_queued_job_is_immediate(store):
@@ -561,14 +931,15 @@ def test_cancel_running_keeps_collection_reserved_until_worker_exits(store):
 def test_scoped_visibility_denies_with_404_semantics(store):
     summary = submit_reembed(
         store,
-        created_by_user_id=str(USER_A),
+        collection_id=OWNED_COLLECTION_ID,
+        created_by_user_id=USER_A,
         created_by_tenant_id="default",
     )
     wait_for_status(store, summary["job_id"], {"completed"})
 
     foreign = UserContext(
         principal=Principal(
-            user_id=USER_B, kind="oidc_session", tenant_id="default"
+            user_id=USER_C, kind="oidc_session", tenant_id="default"
         ),
         workspace_ids=(),
     )
@@ -636,6 +1007,13 @@ def test_document_completed_event_round_trips(store):
     (no schema column — it lives in the generic event ``data``)."""
     def work(handle):
         handle.begin(1)
+        handle.document_started("kd_round")
+        handle.document_progress(
+            "kd_round",
+            "contextualization",
+            current_batch=2,
+            total_batches=5,
+        )
         handle.document_completed("kd_round")
         handle.complete()
 
@@ -651,6 +1029,21 @@ def test_document_completed_event_round_trips(store):
         event for event in events
         if event["type"] == "inqtrix.index.document_completed"
     ]
+    started_events = [
+        event for event in events
+        if event["type"] == "inqtrix.index.document_started"
+    ]
+    progress_events = [
+        event for event in events
+        if event["type"] == "inqtrix.index.document_progress"
+    ]
+    assert len(started_events) == 1
+    assert started_events[0]["data"] == {"document_id": "kd_round"}
+    assert len(progress_events) == 1
+    assert progress_events[0]["data"]["document_id"] == "kd_round"
+    assert progress_events[0]["data"]["phase"] == "contextualization"
+    assert progress_events[0]["data"]["current_batch"] == 2
+    assert progress_events[0]["data"]["total_batches"] == 5
     assert len(doc_events) == 1
     assert doc_events[0]["data"] == {"document_id": "kd_round", "outcome": "embedded"}
 
@@ -695,8 +1088,216 @@ def test_document_completed_respects_the_claim_fence(store):
         release.set()
 
 
-def test_orphan_sweep_fails_stale_rows_on_first_touch(store):
+@pytest.mark.parametrize("pause_kind", ["dependency", "validation"])
+def test_cancel_wins_concurrent_pause_cas(store, pause_kind: str) -> None:
+    started = threading.Event()
     release = threading.Event()
+
+    def pause_after_cancel(handle):
+        handle.begin(1)
+        started.set()
+        release.wait(10)
+        if pause_kind == "dependency":
+            handle.pause_dependency(
+                "provider unavailable",
+                error_type="contextualization_provider_unavailable",
+            )
+        else:
+            handle.pause_validation("provider response invalid")
+
+    summary = submit_reembed(
+        store,
+        collection_id=OWNED_COLLECTION_ID,
+        work=pause_after_cancel,
+        created_by_user_id=USER_A,
+        created_by_tenant_id="default",
+    )
+    assert started.wait(timeout=2)
+    cancelling = store.cancel(summary["job_id"])
+    assert cancelling["status"] == "cancelling"
+    release.set()
+
+    cancelled = wait_for_status(store, summary["job_id"], {"cancelled"})
+    assert cancelled["error"] is None
+    subscription = store.subscribe(summary["job_id"])
+    try:
+        event_types = [event["type"] for event in subscription.replay]
+    finally:
+        subscription.close()
+    assert "inqtrix.index.cancelled" in event_types
+    assert "inqtrix.index.paused_dependency" not in event_types
+    assert "inqtrix.index.paused_validation" not in event_types
+
+
+def test_provider_model_circuit_grants_one_half_open_probe_across_stores(
+    store,
+) -> None:
+    provider_key = "azure"
+    model = "fast-deployment"
+    initial = store.acquire_contextualization_circuit(
+        provider_key=provider_key,
+        model=model,
+        cooldown_seconds=60,
+        probe_lease_seconds=120,
+    )
+    assert initial is not None
+    store.record_contextualization_circuit_failure(
+        initial,
+        error_type="contextualization_provider_timeout",
+    )
+    assert (
+        store.acquire_contextualization_circuit(
+            provider_key=provider_key,
+            model=model,
+            cooldown_seconds=60,
+            probe_lease_seconds=120,
+        )
+        is None
+    )
+    expire_contextualization_circuit(
+        store,
+        provider_key=provider_key,
+        model=model,
+    )
+
+    peer = PostgresIndexingJobStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=None,
+        recover_orphans=False,
+        max_concurrent=1,
+        max_queue_size=10,
+        completed_ttl_seconds=300,
+        history_limit=2,
+        worker_id="pytest-index-circuit-peer",
+    )
+    barrier = threading.Barrier(2)
+
+    def acquire(authority) -> ContextualizationCircuitPermit | None:
+        barrier.wait()
+        return authority.acquire_contextualization_circuit(
+            provider_key=provider_key,
+            model=model,
+            cooldown_seconds=60,
+            probe_lease_seconds=120,
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(acquire, store)
+            second = executor.submit(acquire, peer)
+            permits = [first.result(timeout=5), second.result(timeout=5)]
+        granted = [permit for permit in permits if permit is not None]
+        assert len(granted) == 1
+        assert granted[0].probe_token is not None
+    finally:
+        peer.close()
+
+
+def test_provider_circuit_reclaims_expired_probe_and_fences_stale_token(
+    store,
+) -> None:
+    provider_key = "anthropic"
+    model = "haiku"
+    initial = store.acquire_contextualization_circuit(
+        provider_key=provider_key,
+        model=model,
+        cooldown_seconds=60,
+        probe_lease_seconds=120,
+    )
+    assert initial is not None
+    store.record_contextualization_circuit_failure(
+        initial,
+        error_type="contextualization_provider_unavailable",
+    )
+    expire_contextualization_circuit(
+        store,
+        provider_key=provider_key,
+        model=model,
+    )
+    crashed = store.acquire_contextualization_circuit(
+        provider_key=provider_key,
+        model=model,
+        cooldown_seconds=60,
+        probe_lease_seconds=120,
+    )
+    assert crashed is not None and crashed.probe_token is not None
+    wrong = replace(crashed, probe_token="not-the-current-probe")
+    store.record_contextualization_circuit_success(wrong)
+    assert (
+        store.acquire_contextualization_circuit(
+            provider_key=provider_key,
+            model=model,
+            cooldown_seconds=60,
+            probe_lease_seconds=120,
+        )
+        is None
+    )
+
+    expire_contextualization_circuit(
+        store,
+        provider_key=provider_key,
+        model=model,
+        expire_probe=True,
+    )
+    replacement = store.acquire_contextualization_circuit(
+        provider_key=provider_key,
+        model=model,
+        cooldown_seconds=60,
+        probe_lease_seconds=120,
+    )
+    assert replacement is not None
+    assert replacement.probe_token != crashed.probe_token
+    store.record_contextualization_circuit_failure(
+        crashed,
+        error_type="contextualization_provider_timeout",
+    )
+    assert (
+        store.acquire_contextualization_circuit(
+            provider_key=provider_key,
+            model=model,
+            cooldown_seconds=60,
+            probe_lease_seconds=120,
+        )
+        is None
+    )
+    store.record_contextualization_circuit_success(replacement)
+    reopened = store.acquire_contextualization_circuit(
+        provider_key=provider_key,
+        model=model,
+        cooldown_seconds=60,
+        probe_lease_seconds=120,
+    )
+    assert reopened is not None
+    assert reopened.probe_token is None
+
+
+def test_restart_recovery_fails_lost_execution_but_preserves_paused_work(store):
+    release = threading.Event()
+
+    def pause_for_dependency(handle):
+        handle.begin(1)
+        handle.checkpoint_context_batch(
+            "kd_restart_pause",
+            {
+                "batch_index": 0,
+                "batch_size": 1,
+                "contexts": ["retained"],
+                "document_id": "kd_restart_pause",
+                "prompt_hash": "prompt-restart",
+                "total_batches": 2,
+            },
+        )
+        handle.pause_dependency("provider unavailable")
+
+    paused = submit_reembed(
+        store,
+        collection_id="col-h",
+        work=pause_for_dependency,
+    )
+    paused_before = wait_for_status(
+        store, paused["job_id"], {"paused_dependency"}
+    )
 
     def slow(handle):
         handle.begin(1)
@@ -732,6 +1333,31 @@ def test_orphan_sweep_fails_stale_rows_on_first_touch(store):
             assert swept["error"]["type"] == "server_restarted"
             assert restarted.get(running["job_id"])["status"] == "failed"
             assert restarted.get(second["job_id"])["status"] == "failed"
+            paused_after = restarted.get(paused["job_id"])
+            assert paused_after["status"] == "paused_dependency"
+            assert paused_after["checkpoint"] == paused_before["checkpoint"]
+            with pytest.raises(IndexingResumeUnavailable):
+                restarted.resume(paused["job_id"])
+            assert restarted.get(paused["job_id"])["status"] == (
+                "paused_dependency"
+            )
+
+            resumed_calls = 0
+
+            def rebound_work(handle):
+                nonlocal resumed_calls
+                resumed_calls += 1
+                handle.begin(1)
+                handle.progress(completed_documents=1)
+                handle.complete()
+
+            resumed = restarted.resume(
+                paused["job_id"],
+                work=rebound_work,
+            )
+            assert resumed["status"] in {"queued", "running"}
+            wait_for_status(restarted, paused["job_id"], {"completed"})
+            assert resumed_calls == 1
             audit_count, targets = maintenance_effects(
                 restarted,
                 action="indexing.server_restarted",

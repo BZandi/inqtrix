@@ -66,10 +66,12 @@ def test_instant_web_task_books_provider_reported_usage() -> None:
             )
 
     events: list[tuple[str, dict[str, Any]]] = []
+    usage_search = UsageSearch()
     deps = SimpleNamespace(
-        capabilities=build_capability_registry(search_provider=UsageSearch()),
+        capabilities=build_capability_registry(search_provider=usage_search),
         context=SimpleNamespace(
             principal=None,
+            providers=SimpleNamespace(search=usage_search),
             run_id="run-usage",
             workspace_id="ws-usage",
         ),
@@ -477,7 +479,7 @@ def test_cancel_requested_child_folds_as_cancelled_not_failed() -> None:
     assert terminal[0].child_run_id == "child-cancel"
 
 
-def test_completed_child_without_references_is_insufficient_evidence() -> None:
+def test_completed_child_provider_report_is_not_discarded_without_references() -> None:
     control = MemoryAgentControlStore()
     child_id = "child-empty"
     research = _task(
@@ -522,9 +524,12 @@ def test_completed_child_without_references_is_insufficient_evidence() -> None:
     )
 
     assert pending == {}
-    assert outcomes["r"].status == "insufficient_evidence"
+    assert outcomes["r"].status == "completed"
+    assert outcomes["r"].answer_markdown == (
+        "Keine belastbare Quelle gefunden."
+    )
     _, tasks = asyncio.run(control.get_plan("run-a"))
-    assert tasks[0].status == "insufficient_evidence"
+    assert tasks[0].status == "completed"
 
 
 def test_cancel_after_child_terminal_preserves_completed_task() -> None:

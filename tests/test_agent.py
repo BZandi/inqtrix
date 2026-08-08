@@ -14,12 +14,14 @@ from inqtrix.report_profiles import ReportProfile
 from inqtrix.result import (
     Claim,
     ClaimMetrics,
+    KnowledgeResultState,
     ReportReference,
     ResearchMetrics,
     ResearchResult,
     ResearchResultExportOptions,
     Source,
     SourceMetrics,
+    merge_knowledge_result_payload,
 )
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.settings import AgentSettings
@@ -241,6 +243,200 @@ class TestResearchResult:
         assert result.answer == "Keine Ergebnisse"
         assert result.metrics.rounds == 0
         assert result.top_sources == []
+
+    def test_from_raw_exports_text_free_knowledge_receipt(self):
+        degradation = {
+            "reason": "vector_overfetch_cap",
+            "retrieval_mode": "hybrid",
+            "stage": "vector_candidate_pool",
+            "requested_candidate_pool": 40,
+            "returned_candidate_pool": 12,
+            "final_top_k": 8,
+            "final_evidence_complete": False,
+            "requested_top_k": 8,
+            "returned_hits": 3,
+            "candidate_cap": 64,
+            # Internal state may carry diagnostic input, but the safe result
+            # receipt must never duplicate it.
+            "query": "private customer question",
+            "source_ids": ["private-source"],
+        }
+        retrieval_warning = {
+            "code": "chunks_require_reindex",
+            "message": "Verifizierbare Quelltexte fehlen.",
+            "reason": "source_unverified",
+            "stage": "canonical_hydration",
+            "count": 2,
+            "recommended_action": "reindex",
+            "source_ids": ["private-source"],
+        }
+        raw = {
+            "answer": "Belegte Antwort [K1].",
+            "usage": {},
+            "result_state": {
+                "queries": ["private customer question"],
+                "knowledge_profile": {
+                    "id": "gruendlich",
+                    "requested": "auto",
+                    "auto_selected": True,
+                    "auto_reason": "strong_enumeration_marker",
+                    "degraded_stages": ["rerank", "rerank"],
+                },
+                "knowledge_gate": {
+                    "enabled": True,
+                    "marker": "_knowledge_gate_parsed",
+                    "sufficient": False,
+                    "coverage": "partial",
+                    "reason": "derived from private evidence prose",
+                    "rounds_used": 1,
+                    "max_rounds": 2,
+                    "second_pass": True,
+                },
+                "knowledge_grounding": {
+                    "enabled": True,
+                    "marker": "_knowledge_grounding_parsed",
+                    "status": "verified",
+                    "failure_code": None,
+                    "format_repaired": False,
+                    "quotes_total": 1,
+                    "quotes_verified": 1,
+                    "quotes": [
+                        {
+                            "label": "K1",
+                            "text": "private document passage",
+                            "verified": True,
+                        }
+                    ],
+                },
+                "knowledge_retrieval": {
+                    "degradations": [degradation, dict(degradation)],
+                    "warnings": [
+                        retrieval_warning,
+                        {**retrieval_warning, "count": 1},
+                    ],
+                },
+                "knowledge_candidates": 12,
+                "knowledge_evidence_used": 3,
+            },
+        }
+
+        result = ResearchResult.from_raw(raw)
+        payload = result.to_export_payload()
+
+        assert isinstance(result.knowledge, KnowledgeResultState)
+        assert payload["knowledge_profile"]["degraded_stages"] == ["rerank"]
+        assert payload["knowledge_gate"] == {
+            "enabled": True,
+            "marker": "_knowledge_gate_parsed",
+            "sufficient": False,
+            "coverage": "partial",
+            "rounds_used": 1,
+            "max_rounds": 2,
+            "second_pass": True,
+        }
+        assert "reason" not in payload["knowledge_gate"]
+        assert payload["knowledge_grounding"]["quotes_total"] == 1
+        assert "quotes" not in payload["knowledge_grounding"]
+        assert payload["knowledge_retrieval"]["degradations"] == [
+            {
+                key: value
+                for key, value in degradation.items()
+                if key not in {"query", "source_ids"}
+            }
+        ]
+        assert payload["knowledge_retrieval"]["warnings"] == [
+            {
+                key: value
+                for key, value in retrieval_warning.items()
+                if key not in {"message", "source_ids"}
+            }
+        ]
+        assert payload["knowledge_candidates"] == 12
+        assert payload["knowledge_evidence_used"] == 3
+        assert "queries" not in payload
+
+        restored = ResearchResult.model_validate_json(result.model_dump_json())
+        assert restored.to_export_payload()["knowledge_retrieval"] == (
+            payload["knowledge_retrieval"]
+        )
+
+    def test_knowledge_result_merge_fails_closed_on_conflicting_receipts(self):
+        with pytest.raises(ValueError, match="conflicting knowledge_gate"):
+            merge_knowledge_result_payload(
+                {
+                    "answer": "answer",
+                    "knowledge_gate": {
+                        "enabled": True,
+                        "sufficient": True,
+                    },
+                },
+                {
+                    "knowledge_gate": {
+                        "enabled": True,
+                        "sufficient": False,
+                    }
+                },
+            )
+
+    def test_knowledge_result_merge_enriches_legacy_retrieval_receipt(self):
+        legacy = {
+            "reason": "vector_overfetch_cap",
+            "retrieval_mode": "hybrid",
+            "requested_top_k": 8,
+            "returned_hits": 3,
+            "candidate_cap": 64,
+        }
+        current = {
+            **legacy,
+            "stage": "vector_candidate_pool",
+            "requested_candidate_pool": 40,
+            "returned_candidate_pool": 10,
+            "final_top_k": 8,
+            "final_evidence_complete": False,
+        }
+
+        payload = merge_knowledge_result_payload(
+            {
+                "knowledge_retrieval": {"degradations": [current]},
+            },
+            {
+                "knowledge_retrieval": {"degradations": [legacy]},
+            },
+        )
+
+        assert payload["knowledge_retrieval"] == {
+            "degradations": [current]
+        }
+
+    def test_legacy_partial_knowledge_receipt_remains_readable(self):
+        result = ResearchResult.from_raw(
+            {
+                "answer": "legacy",
+                "result_state": {
+                    "knowledge_profile": {
+                        "id": "standard",
+                        "auto_selected": True,
+                        "degraded_stages": [],
+                    },
+                    "knowledge_gate": {
+                        "enabled": False,
+                        "rounds_used": 0,
+                        "max_rounds": 0,
+                    },
+                    "knowledge_grounding": {
+                        "enabled": False,
+                        "format_repaired": False,
+                        "quotes_total": 0,
+                        "quotes_verified": 0,
+                    },
+                },
+            }
+        )
+
+        payload = result.to_export_payload()
+        assert "requested" not in payload["knowledge_profile"]
+        assert payload["knowledge_gate"]["rounds_used"] == 0
+        assert payload["knowledge_grounding"]["quotes_total"] == 0
 
     def test_from_raw_top_sources_prioritize_answer_then_visible_allowlist(self):
         raw = {

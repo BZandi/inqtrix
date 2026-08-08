@@ -4,13 +4,15 @@
 
 ## Scope
 
-How to reconstruct an answer end-to-end from forensic logs: which events are emitted, which fields each event carries, and how to follow IDs from `query_record` through `query_summary`, `claim_merge`, answer prompt inputs, generated sections, and finally to `answer_claim_binding`. Use this page when you need to explain "where did sentence X come from" or "why did the run stop in round N".
+How to reconstruct an answer end-to-end from the protected forensic run audit: which events are emitted, which fields each event carries, and how to follow IDs from `query_record` through `query_summary`, `claim_merge`, answer prompt inputs, generated sections, and finally to `answer_claim_binding`. Use this page when you need to explain "where did sentence X come from" or "why did the run stop in round N". Ordinary container/file logs expose only the content-minimized operational projection of these events.
 
-This page is operator-facing. The architectural rationale and ADR list live in [Architecture overview](../architecture/overview.md) and the local `.cursor/memory/architecture-decisions.md` (gitignored).
+This page is operator-facing. Public architectural rationale lives in the
+[Architecture overview](../architecture/overview.md). Local editor or agent
+memory is intentionally outside the versioned documentation contract.
 
 ## Enabling forensic mode
 
-Forensic events ride on the standard logger. For a forensic **file log**, all three switches are required: file logging on, logger threshold at `DEBUG`, and the forensic observability profile:
+Forensic events use the existing run-audit path. To mirror their operational identifiers, states and counters into a **file log**, all three switches are required: file logging on, logger threshold at `DEBUG`, and the forensic observability profile:
 
 ```bash
 export INQTRIX_LOG_ENABLED=true
@@ -18,13 +20,13 @@ export INQTRIX_LOG_LEVEL=DEBUG
 export OBSERVABILITY_PROFILE=forensic
 ```
 
-If `OBSERVABILITY_PROFILE=forensic` is set without `INQTRIX_LOG_LEVEL=DEBUG`, the detailed events are produced inside the run but their `ITERATION ...: {...}` file-log lines remain below the logger threshold. The events are also placed into `state["iteration_logs"]` (`AgentState` key, `list[dict[str, Any]]`) whenever testing mode is active (`TESTING_MODE=true` env, `AgentSettings(testing_mode=True)`, or HTTP `/v1/test/run`). Both sinks share the same allowlist and redaction pipeline (`runtime_logging.sanitize_event_payload`), so URL query parameters such as `api_key=...`, `token=...`, bearer tokens, and provider raw payloads never reach either sink. See [Logging](logging.md) for the redaction details.
+Forensic lineage events are attached to the trace (set `INQTRIX_TRACING=file` or `otlp`), not written as `ITERATION ...` log lines. The complete redacted events are placed into `state["iteration_logs"]` (`AgentState` key, `list[dict[str, Any]]`) whenever testing mode is active (`TESTING_MODE=true` env, `AgentSettings(testing_mode=True)`, or HTTP `/v1/test/run`). Audit payloads first pass through `runtime_logging.sanitize_event_payload`; a separate fail-closed console projection then omits exact queries, provider answers, snippets, claim/evidence text, prompt views and every URL from ordinary logs. See [Logging](logging.md) for the boundary.
 
-There is no required second log artifact. The forensic file log is the audit trail: compact `TRACE ...` lines are human-readable signposts, and structured `ITERATION ...: {...}` lines in the same `logs/inqtrix_*.log` file carry the reconstructable payloads.
+The file log is not the audit trail and cannot reconstruct private evidence by design. Authorized durable run artifacts (including the `web_search_ledger` carried by the evidence artifact) are the production audit source; testing/parity runs expose the same redacted event detail through `iteration_logs`. Compact `TRACE ...` and structured `ITERATION ...: {...}` file lines are content-minimized operational signposts joined through stable IDs.
 
 ## Event catalog
 
-Every forensic event carries a common envelope: `event`, `event_seq`, `node`, `run_id`, `timestamp`. The fields documented below are the per-event payload fields that live alongside the envelope.
+Every protected forensic event carries a common envelope: `event`, `event_seq`, `node`, `run_id`, `timestamp`. The fields documented below describe the authorized audit payload, not the narrower file-log projection.
 
 ### `run_start`
 

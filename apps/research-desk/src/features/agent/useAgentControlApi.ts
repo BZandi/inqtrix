@@ -164,7 +164,14 @@ export function useAgentControlApi({
         const answer = run.artifactOrder
           .map((id) => run.artifacts[id])
           .find((artifact) => artifact?.kind === 'answer')
-        if (answer && answer.contentMarkdown === undefined) {
+        if (
+          answer
+          && answer.status !== 'writing'
+          && (
+            answer.contentMarkdown === undefined
+            || answer.publicationNeedsReconcile === true
+          )
+        ) {
           void refetch(`${run.runId}:answer`, async () => {
             const artifact = await getAgentRunArtifact(
               run.runId,

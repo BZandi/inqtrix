@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from inqtrix.model_routing import resolve_model
 from inqtrix.providers import create_providers
+from inqtrix.services.health_service import provider_label
 from inqtrix.settings import (
     AgentSettings,
     ModelSettings,
@@ -43,8 +44,8 @@ def _capture_inqtrix_warnings(caplog: pytest.LogCaptureFixture):
 def test_default_unset_selectors_build_litellm_perplexity() -> None:
     providers = ProviderSettings(llm_provider="litellm", search_provider="perplexity")
     ctx = create_providers(_settings(providers, reasoning_model="gpt-4o"))
-    assert type(ctx.llm).__name__ == "LiteLLM"
-    assert type(ctx.search).__name__ == "PerplexitySearch"
+    assert provider_label(ctx.llm) == "LiteLLM"
+    assert provider_label(ctx.search) == "PerplexitySearch"
     assert ctx.llm.models.reasoning_model == "gpt-4o"
 
 
@@ -83,7 +84,7 @@ def test_provider_context_window_unset_for_uncarded_model() -> None:
 )
 def test_llm_axis_dispatch(providers: ProviderSettings, expected: str) -> None:
     ctx = create_providers(_settings(providers))
-    assert type(ctx.llm).__name__ == expected
+    assert provider_label(ctx.llm) == expected
 
 
 @pytest.mark.parametrize(
@@ -103,7 +104,7 @@ def test_llm_axis_dispatch(providers: ProviderSettings, expected: str) -> None:
 )
 def test_search_axis_dispatch(providers: ProviderSettings, expected: str) -> None:
     ctx = create_providers(_settings(providers))
-    assert type(ctx.search).__name__ == expected
+    assert provider_label(ctx.search) == expected
 
 
 def test_mix_and_match_axes_are_independent() -> None:
@@ -117,8 +118,8 @@ def test_mix_and_match_axes_are_independent() -> None:
         azure_ai_project_api_key="k",
     )
     ctx = create_providers(_settings(providers))
-    assert type(ctx.llm).__name__ == "AnthropicLLM"
-    assert type(ctx.search).__name__ == "AzureFoundryWebSearch"
+    assert provider_label(ctx.llm) == "AnthropicLLM"
+    assert provider_label(ctx.search) == "AzureFoundryWebSearch"
 
 
 def test_search_timeout_and_foundry_concurrency_reach_provider() -> None:
@@ -229,8 +230,8 @@ def test_providers_none_defaults_to_litellm_perplexity() -> None:
         ),
     )
     ctx = create_providers(settings)
-    assert type(ctx.llm).__name__ == "LiteLLM"
-    assert type(ctx.search).__name__ == "PerplexitySearch"
+    assert provider_label(ctx.llm) == "LiteLLM"
+    assert provider_label(ctx.search) == "PerplexitySearch"
     assert ctx.llm.selectable_models == []  # empty catalogue not passed -> provider default
 
 
@@ -260,7 +261,7 @@ def test_perplexity_empty_key_allowed_at_factory_time() -> None:
         ),
     )
     ctx = create_providers(settings)
-    assert type(ctx.search).__name__ == "PerplexitySearch"
+    assert provider_label(ctx.search) == "PerplexitySearch"
 
 
 def test_inapplicable_temperature_warns_for_litellm(caplog: pytest.LogCaptureFixture) -> None:
@@ -270,5 +271,5 @@ def test_inapplicable_temperature_warns_for_litellm(caplog: pytest.LogCaptureFix
         ctx = create_providers(_settings(providers))
     finally:
         logger.removeHandler(caplog.handler)
-    assert type(ctx.llm).__name__ == "LiteLLM"
+    assert provider_label(ctx.llm) == "LiteLLM"
     assert any("INQTRIX_TEMPERATURE" in r.message for r in caplog.records)

@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import time
 from queue import Empty, Queue
-from typing import Any, Iterator
+from typing import Iterator
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -421,12 +421,13 @@ class AgentConfig(BaseModel):
             "the compact INFO/DEBUG behavior, ``debug`` is reserved for "
             "future mid-level diagnostics, and ``forensic`` emits "
             "provider-neutral source, citation, claim, stop, and answer "
-            "lineage events through the existing sanitized logger. "
-            "Forensic mode is semantically complete but does not log raw "
-            "provider request bodies, headers, SDK responses, or secrets."
+            "lineage into the protected run audit. Ordinary logs receive "
+            "only its content-minimized operational projection; exact "
+            "queries, URLs, evidence, prompts, and provider prose stay out "
+            "of container/file logs."
         ),
     )
-    """Controls structured runtime event detail. ``summary`` keeps the compact INFO/DEBUG behavior, ``debug`` is reserved for future mid-level diagnostics, and ``forensic`` emits provider-neutral source, citation, claim, stop, and answer lineage events through the existing sanitized logger. Forensic mode is semantically complete but does not log raw provider request bodies, headers, SDK responses, or secrets."""
+    """Control protected audit detail and its content-minimized log projection."""
 
 
 # ------------------------------------------------------------------ #
@@ -623,7 +624,11 @@ class ResearchAgent:
                 except Empty:
                     continue
                 except Exception as exc:
-                    log.warning("Progress-Queue deaktiviert nach unerwartetem Fehler: %s", exc)
+                    log.warning(
+                        "Progress-Queue deaktiviert nach unerwartetem Fehler "
+                        "(error_code=%s)",
+                        type(exc).__name__,
+                    )
                     break
 
             # Drain remaining progress
@@ -636,7 +641,10 @@ class ResearchAgent:
                     break
                 except Exception as exc:
                     log.warning(
-                        "Restliche Progress-Meldungen konnten nicht gelesen werden: %s", exc)
+                        "Restliche Progress-Meldungen konnten nicht gelesen werden "
+                        "(error_code=%s)",
+                        type(exc).__name__,
+                    )
                     break
 
             raw = future.result()
@@ -738,7 +746,17 @@ class ResearchAgent:
                 ),
             )
 
-        self._providers = ProviderContext(llm=llm, search=search)
+        # Library callers inject providers directly; instrument them
+        # exactly like the factory path so spans, call metrics and
+        # ledger rows do not depend on the construction route. The
+        # wrappers are idempotent.
+        from inqtrix.providers import instrument_providers
+        from inqtrix.settings import Settings as _Settings
+
+        self._providers = instrument_providers(
+            ProviderContext(llm=llm, search=search),
+            _Settings(agent=settings),
+        )
 
         # -- Strategies --
         from inqtrix.strategies import create_default_strategies, resolve_claim_extract_model

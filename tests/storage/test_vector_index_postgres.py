@@ -8,6 +8,7 @@ import uuid
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.pagination import decode_cursor
 from inqtrix.project.scoped_upsert import ResourceScope
@@ -15,8 +16,10 @@ from inqtrix.project.vector_index_postgres import PostgresVectorIndexStore
 from inqtrix.project.vector_index_ports import (
     VectorIndexHistoryEntry,
     VectorIndexMember,
+    VectorIndexNotFound,
 )
 from inqtrix.storage.db import build_engine, build_session_factory
+from inqtrix.storage.asset_records_orm import asset_records, asset_sections
 from inqtrix.storage.migrate import run_migrations
 from inqtrix.storage.vector_index_orm import (
     vector_index_history,
@@ -30,10 +33,7 @@ from tests.storage._canonical_users import (
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 USER_ID = canonical_user_id("vector-index-user")
@@ -65,6 +65,8 @@ async def store():
             await session.execute(vector_index_history.delete())
             await session.execute(vector_index_members.delete())
             await session.execute(vector_index_records.delete())
+            await session.execute(asset_records.delete())
+            await session.execute(asset_sections.delete())
             await ensure_canonical_users(
                 session,
                 (USER_ID, USER_1_ID, USER_2_ID, OTHER_USER_ID),
@@ -83,6 +85,11 @@ async def _save(
     members=(),
     history=(),
 ):
+    await _ensure_member_assets(
+        store,
+        owner,
+        tuple(member.file_id for member in members),
+    )
     return await store.upsert_index(
         id=iid, title="Idx", handle="idx", model="text-embedding-3-large",
         dims=3072, status="ready", server_collection_id=None,
@@ -90,6 +97,49 @@ async def _save(
         members=members, history=history, created_at=created_at, updated_at=created_at,
         created_by_user_id=owner, workspace_id=None,
     )
+
+
+async def _ensure_member_assets(store, owner: uuid.UUID, asset_ids: tuple[str, ...]):
+    if not asset_ids:
+        return
+    section_id = f"sec_{owner.hex}"
+    async with store._session() as session:
+        await session.execute(
+            pg_insert(asset_sections)
+            .values(
+                id=section_id,
+                tenant_id="default",
+                created_by_user_id=owner,
+                workspace_id=None,
+                kind="custom",
+                title="Fixture",
+                created_at=1.0,
+                updated_at=1.0,
+            )
+            .on_conflict_do_nothing(index_elements=[asset_sections.c.id])
+        )
+        for asset_id in asset_ids:
+            await session.execute(
+                pg_insert(asset_records)
+                .values(
+                    id=asset_id,
+                    tenant_id="default",
+                    created_by_user_id=owner,
+                    workspace_id=None,
+                    section_id=section_id,
+                    title=asset_id,
+                    label=asset_id,
+                    file_name=f"{asset_id}.txt",
+                    mime_type="text/plain",
+                    origin="library",
+                    size_bytes=1,
+                    extracted_text="x",
+                    lifecycle_status="active",
+                    created_at=1.0,
+                    updated_at=1.0,
+                )
+                .on_conflict_do_nothing(index_elements=[asset_records.c.id])
+            )
 
 
 @pytest.mark.asyncio
@@ -149,6 +199,7 @@ async def test_upsert_preserves_created_at_and_replaces_children(store) -> None:
         members=(VectorIndexMember("fa_1", "embedded"), VectorIndexMember("fa_2", "embedded")),
         history=(VectorIndexHistoryEntry("ok", 2, 10, None, 1.0, 2.0),),
     )
+    await _ensure_member_assets(store, USER_1_ID, ("fa_3",))
     await store.upsert_index(
         id="vix_1", title="renamed", handle="idx", model="text-embedding-3-large",
         dims=3072, status="stale", server_collection_id="kc_9",

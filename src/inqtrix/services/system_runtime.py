@@ -9,7 +9,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from inqtrix.urls import sanitize_log_message
 
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
@@ -108,6 +107,67 @@ def system_runtime_payload(
             "backend": settings.storage.backend,
             "durable": settings.storage.backend == "postgres",
         },
+        "observability": _observability_payload(settings),
+    }
+
+
+def _observability_payload(settings: Any) -> dict[str, Any]:
+    """Tracing status: configured mode vs. effectively installed.
+
+    ``tracing_active`` is the truth the admin needs when traces are
+    missing: a non-off mode with a missing ``observability`` extra
+    degrades loudly to no tracer — configured and effective then
+    differ. No endpoints or credentials are exposed here. getattr-
+    defensive throughout: capability/test containers pass settings
+    doubles without the observability group, and telemetry status must
+    never break the manifest they actually asked for.
+    """
+    from inqtrix.observability.otel import tracing_installed
+
+    observability = getattr(settings, "observability", None)
+    mode = str(getattr(observability, "tracing", "off") or "off")
+    try:
+        from inqtrix.observability.content import build_content_policy
+
+        content_capture = build_content_policy(settings).capture_content
+    except Exception:  # noqa: BLE001 — partial settings double
+        # Fail-safe, never fail-SILENT: in production this firing means
+        # a real settings defect the operator must see.
+        log.warning(
+            "Content-Capture-Status nicht bestimmbar - Settings ohne "
+            "vollstaendige Observability-Gruppe; zeige 'aus'.",
+            exc_info=True,
+        )
+        content_capture = False
+    return {
+        "tracing": mode,
+        "tracing_active": tracing_installed() if mode != "off" else False,
+        "content_capture": content_capture,
+        "sample_rate": float(
+            getattr(observability, "trace_sample_rate", 1.0) or 0.0
+        ),
+        "spool": mode == "file",
+        # None whenever NO cleanup job runs — including the documented
+        # retention_days=0 opt-out. Rendering "0 days (cleanup job)"
+        # would assert the opposite of reality (traces kept forever).
+        # retention_enforced additionally tells the panel whether ANY
+        # process actually runs the prune job: all three retention jobs
+        # (trace/audit/ledger) live in the worker, so a worker-less
+        # deployment keeps rows forever no matter what the days say.
+        "retention_enforced": bool(
+            getattr(getattr(settings, "queue", None), "backend", "")
+            == "valkey"
+        ),
+        "retention_days": (
+            int(getattr(observability, "trace_retention_days", 0) or 0)
+            if mode == "otlp"
+            and int(getattr(observability, "trace_retention_days", 0) or 0)
+            > 0
+            else None
+        ),
+        "ui_link_configured": bool(
+            str(getattr(observability, "trace_ui_url", "") or "").strip()
+        ),
     }
 
 
@@ -404,14 +464,10 @@ async def _bounded_probe(
         )
         return False
     except Exception as exc:  # noqa: BLE001 - status payload degrades visibly.
-        # Name the exception type: it rescues diagnostics for exception
-        # classes whose ``str`` form is empty. ``name`` is a static label
-        # and the message is sanitized — no endpoint/bucket/secret leaks.
         log.warning(
-            "Runtime availability probe failed for %s: %s: %s",
+            "Runtime availability probe failed for %s (error_type=%s)",
             name,
             type(exc).__name__,
-            sanitize_log_message(exc),
         )
         return False
 

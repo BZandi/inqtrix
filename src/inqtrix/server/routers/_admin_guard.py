@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Callable
 from fastapi import Request
 from starlette.responses import JSONResponse
 
+from inqtrix.auth.log_redaction import log_authorization_denial
 from inqtrix.services.request_parsing import error_response
 
 if TYPE_CHECKING:
@@ -96,13 +97,14 @@ async def require_instance_admin(
         # session a hair before the purge landed. The pre-auth branches above
         # (no session / expired) are deliberately not logged: they are
         # high-volume authentication outcomes, not authorization denials.
-        log.warning(
-            "instance-admin denied: user_id=%s kind=%s reason=%s",
-            principal.user_id,
-            principal.kind,
-            "disabled"
-            if mirror is not None and mirror.disabled_at is not None
-            else ("non_admin" if mirror is not None else "no_mirror"),
+        log_authorization_denial(
+            log,
+            action="instance_admin",
+            principal_kind=principal.kind,
+            actor_user_id=principal.user_id,
+            tenant_id=principal.tenant_id,
+            resource_type="admin_surface",
+            resource_id=TENANT,
         )
         return None, error_response(404, "Nicht gefunden", "not_found")
     return (principal, session, mirror), None

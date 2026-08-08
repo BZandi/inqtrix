@@ -95,6 +95,396 @@ describe('server editor hydration (M6b)', () => {
     expect(next.editorDocuments.ed_1.contentMarkdown).toBe('loaded body') // body kept
   })
 
+  it('removes revoked shared documents while preserving local owner work', () => {
+    const revoked = doc('ed_revoked', {
+      access: {
+        mode: 'shared',
+        owner: { id: 'user_admin', name: 'Admin' },
+        permission: 'edit',
+      },
+    })
+    const kept = doc('ed_kept', {
+      access: {
+        mode: 'shared',
+        owner: { id: 'user_admin', name: 'Admin' },
+        permission: 'suggest',
+      },
+    })
+    const local = doc('ed_local', {
+      access: { mode: 'owner', permission: 'edit' },
+      contentMarkdown: 'offline owner work',
+    })
+    const base = createEmptyProjectState()
+    const state: ProjectState = {
+      ...base,
+      dirty: false,
+      editorCommentOutbox: {
+        revoked_comment: {
+          documentId: revoked.id,
+          operation: 'upsert',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      editorComments: {
+        kept_comment: comment('kept_comment', kept.id),
+        revoked_comment: comment('revoked_comment', revoked.id),
+      },
+      editorDocumentOrder: [revoked.id, kept.id, local.id],
+      editorDocuments: {
+        [kept.id]: kept,
+        [local.id]: local,
+        [revoked.id]: revoked,
+      },
+      editorSuggestionGroups: {
+        revoked_group: {
+          createdAt: '2026-01-01T00:00:00.000Z',
+          documentId: revoked.id,
+          id: 'revoked_group',
+          origin: { kind: 'global_run' },
+        },
+      },
+      editorSuggestions: {
+        revoked_suggestion: {
+          anchor: {
+            from: 0,
+            quoteAfter: '',
+            quoteBefore: '',
+            selectedText: 'x',
+            to: 1,
+          },
+          blockId: 'block-1',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          documentId: revoked.id,
+          groupId: 'revoked_group',
+          id: 'revoked_suggestion',
+          originalText: 'x',
+          origin: { kind: 'global_run' },
+          proposedText: 'y',
+          status: 'pending',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      editorUi: {
+        ...base.editorUi,
+        activeDocumentId: revoked.id,
+        openDocumentIds: [revoked.id, kept.id],
+        selectedCommentId: 'revoked_comment',
+      },
+      ui: {
+        ...base.ui,
+        pinnedExplorer: {
+          ...base.ui.pinnedExplorer,
+          editorDocumentIds: [revoked.id, kept.id],
+        },
+      },
+    }
+
+    const next = researchDeskReducer(state, {
+      documents: [{
+        ...kept,
+        title: 'Kept from server',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+      }],
+      type: 'reconcileServerEditorDocuments',
+    })
+
+    expect(next.editorDocuments.ed_revoked).toBeUndefined()
+    expect(next.editorDocuments.ed_kept.title).toBe('Kept from server')
+    expect(next.editorDocuments.ed_local.contentMarkdown).toBe('offline owner work')
+    expect(next.editorDocumentOrder).toEqual(['ed_kept', 'ed_local'])
+    expect(next.editorComments.revoked_comment).toBeUndefined()
+    expect(next.editorComments.kept_comment).toBeDefined()
+    expect(next.editorCommentOutbox?.revoked_comment).toBeUndefined()
+    expect(next.editorSuggestionGroups.revoked_group).toBeUndefined()
+    expect(next.editorSuggestions.revoked_suggestion).toBeUndefined()
+    expect(next.editorUi).toMatchObject({
+      activeDocumentId: 'ed_kept',
+      openDocumentIds: ['ed_kept'],
+      selectedCommentId: null,
+    })
+    expect(next.ui.pinnedExplorer.editorDocumentIds).toEqual(['ed_kept'])
+    expect(next.dirty).toBe(false)
+  })
+
+  it('removes a missing server owner document while preserving a never-synced local draft', () => {
+    const removedOwner = doc('ed_removed_owner', {
+      access: { mode: 'owner', permission: 'edit' },
+      contentMarkdown: 'server-confirmed body',
+      serverSynced: true,
+    })
+    const localDraft = doc('ed_local_draft', {
+      contentMarkdown: 'never-synced local work',
+      revision: 0,
+    })
+    const retainedServerDocument = doc('ed_retained', {
+      access: { mode: 'owner', permission: 'edit' },
+      serverSynced: true,
+    })
+    const base = createEmptyProjectState()
+    const state: ProjectState = {
+      ...base,
+      dirty: false,
+      editorCommentOutbox: {
+        removed_comment: {
+          documentId: removedOwner.id,
+          operation: 'upsert',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      editorComments: {
+        removed_comment: comment('removed_comment', removedOwner.id),
+      },
+      editorDocumentOrder: [
+        removedOwner.id,
+        localDraft.id,
+        retainedServerDocument.id,
+      ],
+      editorDocuments: {
+        [localDraft.id]: localDraft,
+        [removedOwner.id]: removedOwner,
+        [retainedServerDocument.id]: retainedServerDocument,
+      },
+      editorSuggestionGroups: {
+        removed_group: {
+          createdAt: '2026-01-01T00:00:00.000Z',
+          documentId: removedOwner.id,
+          id: 'removed_group',
+          origin: { kind: 'global_run' },
+        },
+      },
+      editorSuggestions: {
+        removed_suggestion: {
+          anchor: {
+            from: 0,
+            quoteAfter: '',
+            quoteBefore: '',
+            selectedText: 'server-confirmed body',
+            to: 4,
+          },
+          blockId: 'block-removed',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          documentId: removedOwner.id,
+          groupId: 'removed_group',
+          id: 'removed_suggestion',
+          originalText: 'server',
+          origin: { kind: 'global_run' },
+          proposedText: 'local',
+          status: 'pending',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      editorUi: {
+        ...base.editorUi,
+        activeDocumentId: removedOwner.id,
+        openDocumentIds: [removedOwner.id, retainedServerDocument.id],
+        selectedCommentId: 'removed_comment',
+      },
+      ui: {
+        ...base.ui,
+        pinnedExplorer: {
+          ...base.ui.pinnedExplorer,
+          editorDocumentIds: [removedOwner.id],
+        },
+      },
+    }
+
+    const next = researchDeskReducer(state, {
+      documents: [retainedServerDocument],
+      type: 'reconcileServerEditorDocuments',
+    })
+
+    expect(next.editorDocuments.ed_removed_owner).toBeUndefined()
+    expect(next.editorDocuments.ed_local_draft).toMatchObject({
+      contentMarkdown: 'never-synced local work',
+      revision: 0,
+    })
+    expect(next.editorComments.removed_comment).toBeUndefined()
+    expect(next.editorCommentOutbox?.removed_comment).toBeUndefined()
+    expect(next.editorSuggestionGroups.removed_group).toBeUndefined()
+    expect(next.editorSuggestions.removed_suggestion).toBeUndefined()
+    expect(next.editorUi).toMatchObject({
+      activeDocumentId: retainedServerDocument.id,
+      openDocumentIds: [retainedServerDocument.id],
+      selectedCommentId: null,
+    })
+    expect(next.ui.pinnedExplorer.editorDocumentIds).toEqual([])
+    expect(next.dirty).toBe(false)
+  })
+
+  it('moves only unconfirmed local work into a separate recovery document', () => {
+    const removedOwner = doc('ed_removed_owner', {
+      access: { mode: 'owner', permission: 'edit' },
+      collaboration: {
+        generation: 3,
+        persistedSequence: 12,
+        projectionSequence: 12,
+        schemaVersion: 1,
+      },
+      contentMarkdown: 'last confirmed projection',
+      contentMode: 'collaboration',
+      metadataRevision: 4,
+      serverSynced: true,
+    })
+    const pendingComment = comment('pending_comment', removedOwner.id)
+    pendingComment.suggestionDraft = {
+      anchorVersion: 1,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      groupId: 'pending_group',
+      patchId: '00000000-0000-4000-8000-000000000003',
+      proposedText: 'recovered',
+      publicationCommandId: '00000000-0000-4000-8000-000000000002',
+      revision: 1,
+      suggestionId: 'pending_suggestion',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }
+    const confirmedComment = comment('confirmed_comment', removedOwner.id)
+    const base = createEmptyProjectState()
+    const state: ProjectState = {
+      ...base,
+      dirty: false,
+      editorCommentOutbox: {
+        [pendingComment.id]: {
+          documentId: removedOwner.id,
+          operation: 'upsert',
+          updatedAt: pendingComment.updatedAt,
+        },
+      },
+      editorComments: {
+        [confirmedComment.id]: confirmedComment,
+        [pendingComment.id]: pendingComment,
+      },
+      editorDocumentOrder: [removedOwner.id],
+      editorDocuments: { [removedOwner.id]: removedOwner },
+      editorSuggestionGroups: {
+        pending_group: {
+          createdAt: '2026-01-01T00:00:00.000Z',
+          documentId: removedOwner.id,
+          id: 'pending_group',
+          origin: {
+            commentId: pendingComment.id,
+            kind: 'inline_edit',
+          },
+        },
+      },
+      editorSuggestions: {
+        pending_suggestion: {
+          anchor: pendingComment.anchor,
+          blockId: 'pending-block',
+          collaborationPublication: {
+            commandId: 'old-command',
+            patchId: 'old-patch',
+            sequence: 13,
+            suggestionIds: ['pending_suggestion'],
+          },
+          createdAt: '2026-01-01T00:00:00.000Z',
+          documentId: removedOwner.id,
+          groupId: 'pending_group',
+          id: 'pending_suggestion',
+          originalText: 'server',
+          origin: {
+            commentId: pendingComment.id,
+            kind: 'inline_edit',
+          },
+          privateDraft: {
+            patchId: '00000000-0000-4000-8000-000000000003',
+            publicationCommandId: '00000000-0000-4000-8000-000000000002',
+            revision: 1,
+          },
+          proposedText: 'recovered',
+          status: 'pending',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+      editorUi: {
+        ...base.editorUi,
+        activeDocumentId: removedOwner.id,
+        openDocumentIds: [removedOwner.id],
+        selectedCommentId: pendingComment.id,
+      },
+    }
+
+    const recovered = researchDeskReducer(state, {
+      documents: [],
+      recoveryCaptures: [{
+        capturedAt: '2026-01-02T00:00:00.000Z',
+        contentMarkdown: 'unconfirmed local document state',
+        documentId: removedOwner.id,
+      }],
+      type: 'reconcileServerEditorDocuments',
+    })
+    const recoveryId = recovered.editorDocumentOrder[0]
+    const recovery = recovered.editorDocuments[recoveryId]
+    const recoveredComments = Object.values(recovered.editorComments)
+
+    expect(recoveryId).not.toBe(removedOwner.id)
+    expect(recovery).toMatchObject({
+      contentMarkdown: 'unconfirmed local document state',
+      recovery: {
+        capturedAt: '2026-01-02T00:00:00.000Z',
+        originalDocumentId: removedOwner.id,
+        reason: 'remote_deleted',
+      },
+      revision: 0,
+      title: removedOwner.title,
+    })
+    expect(recovery.access).toBeUndefined()
+    expect(recovery.collaboration).toBeUndefined()
+    expect(recovery.contentMode).toBeUndefined()
+    expect(recovery.metadataRevision).toBeUndefined()
+    expect(recovery.serverSynced).toBeUndefined()
+    expect(recoveredComments).toHaveLength(1)
+    expect(recoveredComments[0]).toMatchObject({
+      commentMarkdown: pendingComment.commentMarkdown,
+      documentId: recoveryId,
+    })
+    expect(recoveredComments[0].id).not.toBe(pendingComment.id)
+    expect(recoveredComments[0].suggestionDraft).toBeUndefined()
+    expect(recovered.editorCommentOutbox).toEqual({})
+    const recoveredSuggestionGroups = Object.values(
+      recovered.editorSuggestionGroups,
+    )
+    const recoveredSuggestions = Object.values(recovered.editorSuggestions)
+    expect(recoveredSuggestionGroups).toHaveLength(1)
+    expect(recoveredSuggestionGroups[0]).toMatchObject({
+      documentId: recoveryId,
+      origin: {
+        commentId: recoveredComments[0].id,
+        kind: 'inline_edit',
+      },
+    })
+    expect(recoveredSuggestions).toHaveLength(1)
+    expect(recoveredSuggestions[0]).toMatchObject({
+      documentId: recoveryId,
+      groupId: recoveredSuggestionGroups[0].id,
+      origin: {
+        commentId: recoveredComments[0].id,
+        kind: 'inline_edit',
+      },
+    })
+    expect(recoveredSuggestions[0]).not.toHaveProperty(
+      'collaborationPublication',
+    )
+    expect(recoveredSuggestions[0]).not.toHaveProperty('privateDraft')
+    expect(recovered.editorUi).toMatchObject({
+      activeDocumentId: recoveryId,
+      openDocumentIds: [recoveryId],
+      selectedCommentId: recoveredComments[0].id,
+    })
+    expect(recovered.dirty).toBe(true)
+
+    const promoted = researchDeskReducer(recovered, {
+      documentId: recoveryId,
+      type: 'promoteEditorRecoveryDocument',
+    })
+
+    expect(promoted.editorDocuments[recoveryId].recovery).toBeUndefined()
+    expect(promoted.editorDocuments[recoveryId].revision).toBe(0)
+    expect(promoted.editorCommentOutbox?.[recoveredComments[0].id]).toMatchObject({
+      documentId: recoveryId,
+      operation: 'upsert',
+    })
+  })
+
   it('sets a document body on load-on-open WITHOUT dirtying or bumping updatedAt', () => {
     const local = doc('ed_1', { updatedAt: '2026-01-01T00:00:00.000Z' })
     const next = researchDeskReducer(withDoc(local), {
@@ -161,6 +551,120 @@ describe('server editor hydration (M6b)', () => {
     expect(next.editorComments['local-comment']).toBe(state.editorComments['local-comment'])
     expect(next.editorComments['server-deleted']).toBeUndefined()
     expect(next.editorComments['server-kept']).toEqual(refreshed)
+    expect(next.dirty).toBe(false)
+  })
+
+  it('materializes and clears a persisted private suggestion draft during server reconciliation', () => {
+    const base = withDoc(doc('ed_1', { contentMode: 'collaboration' }))
+    const privateComment: EditorCommentThreadRecord = {
+      ...comment('private-comment', 'ed_1'),
+      kind: 'inline_edit',
+      suggestionDraft: {
+        anchorVersion: 1,
+        changeSummary: ['Clearer wording'],
+        createdAt: '2026-01-01T00:00:01.000Z',
+        groupId: 'private-group',
+        patchId: '00000000-0000-4000-8000-000000000003',
+        proposedText: 'replacement',
+        publicationCommandId: '00000000-0000-4000-8000-000000000002',
+        revision: 2,
+        suggestionId: 'private-suggestion',
+        updatedAt: '2026-01-01T00:00:02.000Z',
+      },
+    }
+
+    const hydrated = researchDeskReducer(base, {
+      comments: [privateComment],
+      documentId: 'ed_1',
+      preserveCommentIds: [],
+      type: 'reconcileServerEditorComments',
+    })
+
+    expect(hydrated.editorSuggestionGroups['private-group']).toMatchObject({
+      documentId: 'ed_1',
+      origin: { commentId: 'private-comment', kind: 'inline_edit' },
+    })
+    expect(hydrated.editorSuggestions['private-suggestion']).toMatchObject({
+      documentId: 'ed_1',
+      privateDraft: {
+        patchId: '00000000-0000-4000-8000-000000000003',
+        publicationCommandId: '00000000-0000-4000-8000-000000000002',
+        revision: 2,
+      },
+      proposedText: 'replacement',
+      status: 'pending',
+    })
+    expect(hydrated.dirty).toBe(false)
+
+    const accepted = researchDeskReducer(hydrated, {
+      collaborationPublication: {
+        commandId: privateComment.suggestionDraft!.publicationCommandId,
+        patchId: privateComment.suggestionDraft!.patchId,
+        sequence: 9,
+        suggestionIds: ['shared-suggestion'],
+      },
+      suggestionId: 'private-suggestion',
+      type: 'acceptEditorSuggestion',
+    })
+    const staleReplay = researchDeskReducer(accepted, {
+      comments: [privateComment],
+      documentId: 'ed_1',
+      preserveCommentIds: [],
+      type: 'reconcileServerEditorComments',
+    })
+    expect(staleReplay.editorSuggestions['private-suggestion'].status).toBe('accepted')
+    expect(staleReplay.editorSuggestions['private-suggestion'].privateDraft).toBeUndefined()
+    expect(staleReplay.editorComments['private-comment'].suggestionDraft).toBeUndefined()
+
+    const cleared = researchDeskReducer(hydrated, {
+      comments: [{ ...privateComment, suggestionDraft: undefined }],
+      documentId: 'ed_1',
+      preserveCommentIds: [],
+      type: 'reconcileServerEditorComments',
+    })
+
+    expect(cleared.editorComments['private-comment'].suggestionDraft).toBeUndefined()
+    expect(cleared.editorSuggestionGroups['private-group']).toBeUndefined()
+    expect(cleared.editorSuggestions['private-suggestion']).toBeUndefined()
+    expect(cleared.dirty).toBe(false)
+  })
+
+  it('adopts the server-confirmed relative anchor with a private suggestion draft', () => {
+    const base = withDoc(doc('ed_1', { contentMode: 'collaboration' }))
+    const privateComment: EditorCommentThreadRecord = {
+      ...comment('private-comment', 'ed_1'),
+      kind: 'inline_edit',
+    }
+    const relativeAnchor: EditorCommentThreadRecord['anchor'] = {
+      ...privateComment.anchor,
+      relativeFrom: 'relative-from',
+      relativeTo: 'relative-to',
+      relativeVersion: 'yjs-relative-position-base64-v1',
+    }
+    const state: ProjectState = {
+      ...base,
+      editorComments: { [privateComment.id]: privateComment },
+    }
+
+    const next = researchDeskReducer(state, {
+      anchor: relativeAnchor,
+      commentId: privateComment.id,
+      suggestionDraft: {
+        anchorVersion: 1,
+        createdAt: '2026-01-01T00:00:01.000Z',
+        groupId: 'private-group',
+        patchId: '00000000-0000-4000-8000-000000000003',
+        proposedText: 'replacement',
+        publicationCommandId: '00000000-0000-4000-8000-000000000002',
+        revision: 1,
+        suggestionId: 'private-suggestion',
+        updatedAt: '2026-01-01T00:00:02.000Z',
+      },
+      type: 'adoptEditorCommentSuggestionDraft',
+    })
+
+    expect(next.editorComments[privateComment.id].anchor).toEqual(relativeAnchor)
+    expect(next.editorSuggestions['private-suggestion'].anchor).toEqual(relativeAnchor)
     expect(next.dirty).toBe(false)
   })
 

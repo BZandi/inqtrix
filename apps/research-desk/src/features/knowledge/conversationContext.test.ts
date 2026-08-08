@@ -13,6 +13,7 @@ function item(
       ? {
         answerMarkdown,
         degradedStages: [],
+        retrievalDegradations: [],
         quotes: [],
         references: [],
         refusal: false,

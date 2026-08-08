@@ -10,25 +10,46 @@ Storage adapters.
 
 ## Choose one authentication model
 
+The dotenv blocks below are complete target states. When starting from
+`deploy/.env.stack.example`, edit or replace the existing canonical assignment
+for each key; never paste a second assignment at the end of the file.
+
 ### Static or temporary credentials
 
 Use this for bundled SeaweedFS/MinIO and providers that issue S3 keys —
-including on-premise S3-compatible stores such as Nutanix Objects (its
-S3-compatible endpoint with an access-key pair, `path` addressing, an
-`existing` bucket, and the private CA mounted per the TLS section below):
+including on-premise S3-compatible stores such as Nutanix Objects. Put the
+topology in the visible stack config:
 
 ```dotenv
 INQTRIX_OBJECT_STORE_BACKEND=s3
 INQTRIX_S3_AUTH_MODE=static
 INQTRIX_S3_ENDPOINT_URL=https://s3.example.com
 INQTRIX_S3_BUCKET=inqtrix-files
-INQTRIX_S3_ACCESS_KEY=...
-INQTRIX_S3_SECRET_KEY=...
-INQTRIX_S3_SESSION_TOKEN=... # optional STS token
 INQTRIX_S3_REGION=us-east-1
 INQTRIX_S3_ADDRESSING_STYLE=path
 INQTRIX_S3_BUCKET_PROVISIONING=existing
 ```
+
+Keep credentials in the selected stack secret file:
+
+```dotenv
+INQTRIX_S3_ACCESS_KEY=...
+INQTRIX_S3_SECRET_KEY=...
+# INQTRIX_S3_SESSION_TOKEN=...  # optional STS token
+```
+
+For the bundled `--profile s3`, Compose maps that pair to SeaweedFS'
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` contract. No generated JSON
+credential file exists. The service refuses to start when either value is
+missing, so it cannot silently run anonymously.
+
+The bundled topology uses `http://seaweedfs:8333`, the conventional
+`us-east-1` signing region, `path` addressing, and `create_if_missing`
+provisioning. For local SeaweedFS, the region is only the AWS Signature-V4
+compatibility scope; it does not describe a physical storage location.
+`us-east-1` is already the application default, so an explicit assignment is
+optional. These are the values shown in the single S3 field block of
+`deploy/.env.stack.example`.
 
 ### SDK default credential chain
 

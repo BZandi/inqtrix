@@ -2,7 +2,6 @@
 
 Revision ID: 0042_agent_session_integrity
 Revises: 0041_skill_templates
-Create Date: 2026-07-10
 
 Only a root ``kind='agent'`` run occupies the session execution lease.
 Queued, running, and every parked waiting status retain it; terminal rows and

@@ -170,6 +170,13 @@ def classify_execution_failure(
         ):
             return "temporary_transport"
         return "provider_error"
+    # Kernel loop ceilings, matched by NAME: importing langgraph or the
+    # kernel middleware here would pull the optional agent extra into
+    # every worker startup (and create an import cycle via RunService).
+    if type(exc).__name__ == "GraphRecursionError":
+        return "iteration_limit"
+    if type(exc).__name__ == "KernelToolBudgetExceeded":
+        return "tool_budget_exceeded"
     if type(exc).__name__ in _PROVIDER_TIMEOUT_TYPES:
         return "provider_timeout"
     if type(exc).__name__ in _RETRYABLE_TRANSPORT_TYPES:
@@ -199,4 +206,14 @@ def terminate_native_run(
         handle.cancel("client_requested_cancel")
     else:
         handle.fail(sanitize_error(exc), error_type=error_type)
+        # The run root span is still current here (the worker's finally
+        # closes it AFTER this terminal write, without exception info) —
+        # mark it so a failed segment never renders as a clean run.
+        from inqtrix.observability.otel import (
+            enrich_current_span,
+            mark_current_span_error,
+        )
+
+        mark_current_span_error(error_type)
+        enrich_current_span({"inqtrix.outcome": "failed"})
     return error_type

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { resolvePinnedExplorerFromManifest, resolveVectorIndexesFromManifest } from './fileSystem'
-import type { FileAssetRecord } from './types'
+import { loadProject, resolvePinnedExplorerFromManifest, resolveVectorIndexesFromManifest } from './fileSystem'
+import { serializeEditorDocument, serializeProjectManifest } from './markdown'
+import { createEmptyProjectState } from './seedProject'
+import type {
+  EditorCommentThreadRecord,
+  EditorDocumentRecord,
+  FileAssetRecord,
+} from './types'
 
 function makeAsset(id: string): FileAssetRecord {
   return {
@@ -59,6 +65,144 @@ describe('resolvePinnedExplorerFromManifest', () => {
       knowledgeSessionIds: ['ks-server'],
       agentSessionIds: [],
     })
+  })
+})
+
+describe('detached editor-document import', () => {
+  it('preserves manifest order and semantic selection while replacing collaboration identities', async () => {
+    const sourceState = createEmptyProjectState()
+    const documents: EditorDocumentRecord[] = [
+      makeCollaborationDocument('source-a', 'Marker A 🦋', '2026-03-03T00:00:00.000Z'),
+      makeCollaborationDocument('source-b', 'Marker B 🦋', '2026-01-01T00:00:00.000Z'),
+      makeCollaborationDocument('source-c', 'Marker C 🦋', '2026-02-02T00:00:00.000Z'),
+    ]
+    const selectedComment: EditorCommentThreadRecord = {
+      anchor: {
+        from: 2,
+        quoteAfter: ' after',
+        quoteBefore: 'before ',
+        selectedText: 'Marker',
+        to: 8,
+      },
+      commentMarkdown: 'Ausgewählter Kommentar 🧭',
+      createdAt: '2026-03-04T00:00:00.000Z',
+      documentId: 'source-c',
+      id: 'source-comment-c',
+      kind: 'collect',
+      status: 'open',
+      updatedAt: '2026-03-04T00:00:00.000Z',
+    }
+    sourceState.editorDocuments = Object.fromEntries(
+      documents.map((document) => [document.id, document]),
+    )
+    sourceState.editorDocumentOrder = ['source-b', 'source-a', 'source-c']
+    sourceState.editorComments = { [selectedComment.id]: selectedComment }
+    sourceState.editorUi = {
+      ...sourceState.editorUi,
+      activeDocumentId: 'source-c',
+      openDocumentIds: ['source-b', 'source-c'],
+      selectedCommentId: selectedComment.id,
+    }
+    sourceState.ui = {
+      ...sourceState.ui,
+      pinnedExplorer: {
+        ...sourceState.ui.pinnedExplorer,
+        editorDocumentIds: ['source-a', 'source-c'],
+      },
+    }
+
+    const manifest = serializeProjectManifest(sourceState).contents
+    const documentFiles = documents.map((document) => markdownFileHandle(
+      `${document.id}.md`,
+      serializeEditorDocument(document, sourceState).contents,
+    ))
+    const root = projectDirectoryHandle(manifest, [
+      documentFiles[2],
+      documentFiles[0],
+      documentFiles[1],
+    ])
+    const imported = await loadFromProjectDirectory(root)
+    const idByMarker = Object.fromEntries(
+      Object.values(imported.editorDocuments).map((document) => [
+        document.contentMarkdown.trim(),
+        document.id,
+      ]),
+    )
+    const importedComment = Object.values(imported.editorComments).find(
+      (comment) => comment.commentMarkdown === selectedComment.commentMarkdown,
+    )
+
+    expect(Object.keys(imported.editorDocuments)).toHaveLength(3)
+    expect(Object.keys(imported.editorDocuments).some((importedId) => (
+      documents.some((document) => document.id === importedId)
+    ))).toBe(false)
+    expect(imported.editorDocumentOrder).toEqual([
+      idByMarker['Marker B 🦋'],
+      idByMarker['Marker A 🦋'],
+      idByMarker['Marker C 🦋'],
+    ])
+    expect(imported.editorUi.activeDocumentId).toBe(idByMarker['Marker C 🦋'])
+    expect(imported.editorUi.openDocumentIds).toEqual([
+      idByMarker['Marker B 🦋'],
+      idByMarker['Marker C 🦋'],
+    ])
+    expect(imported.ui.pinnedExplorer.editorDocumentIds).toEqual([
+      idByMarker['Marker A 🦋'],
+      idByMarker['Marker C 🦋'],
+    ])
+    expect(importedComment?.id).not.toBe(selectedComment.id)
+    expect(imported.editorUi.selectedCommentId).toBe(importedComment?.id)
+  })
+
+  it('falls back deterministically instead of guessing between duplicate source ids', async () => {
+    const sourceState = createEmptyProjectState()
+    const newer = makeCollaborationDocument(
+      'duplicate-source',
+      'Newer duplicate',
+      '2026-03-03T00:00:00.000Z',
+    )
+    const older = makeCollaborationDocument(
+      'duplicate-source',
+      'Older duplicate',
+      '2026-01-01T00:00:00.000Z',
+    )
+    sourceState.editorDocuments = { [newer.id]: newer }
+    sourceState.editorDocumentOrder = [newer.id]
+    sourceState.editorUi = {
+      ...sourceState.editorUi,
+      activeDocumentId: newer.id,
+      openDocumentIds: [newer.id],
+    }
+    sourceState.ui = {
+      ...sourceState.ui,
+      pinnedExplorer: {
+        ...sourceState.ui.pinnedExplorer,
+        editorDocumentIds: [newer.id],
+      },
+    }
+
+    const root = projectDirectoryHandle(
+      serializeProjectManifest(sourceState).contents,
+      [newer, older].map((document, index) => markdownFileHandle(
+        `duplicate-${index}.md`,
+        serializeEditorDocument(document, sourceState).contents,
+      )),
+    )
+    const imported = await loadFromProjectDirectory(root)
+    const idByMarker = Object.fromEntries(
+      Object.values(imported.editorDocuments).map((document) => [
+        document.contentMarkdown.trim(),
+        document.id,
+      ]),
+    )
+
+    expect(imported.editorDocumentOrder).toEqual([
+      idByMarker['Newer duplicate'],
+      idByMarker['Older duplicate'],
+    ])
+    expect(imported.editorUi.activeDocumentId).toBe(idByMarker['Newer duplicate'])
+    expect(imported.editorUi.openDocumentIds).toEqual([idByMarker['Newer duplicate']])
+    expect(imported.ui.pinnedExplorer.editorDocumentIds).toEqual([])
   })
 })
 
@@ -165,3 +309,77 @@ describe('resolveVectorIndexesFromManifest', () => {
     expect(idx.history?.[1]).toMatchObject({ error: 'backend down', result: 'error' })
   })
 })
+
+function makeCollaborationDocument(
+  id: string,
+  contentMarkdown: string,
+  updatedAt: string,
+): EditorDocumentRecord {
+  return {
+    contentMarkdown,
+    contentMode: 'collaboration',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    folderId: null,
+    id,
+    revision: 7,
+    source: 'blank',
+    title: 'Identischer Titel 🦋.md',
+    updatedAt,
+  }
+}
+
+function markdownFileHandle(name: string, contents: string): FileSystemFileHandle {
+  return {
+    getFile: async () => ({ text: async () => contents }) as File,
+    kind: 'file',
+    name,
+  } as FileSystemFileHandle
+}
+
+function projectDirectoryHandle(
+  manifest: string,
+  documents: FileSystemFileHandle[],
+): FileSystemDirectoryHandle {
+  const documentsDirectory = {
+    async *entries() {
+      for (const document of documents) yield [document.name, document] as const
+    },
+    kind: 'directory',
+    name: 'documents',
+  } as unknown as FileSystemDirectoryHandle
+  const manifestHandle = markdownFileHandle('project.md', manifest)
+
+  return {
+    getDirectoryHandle: async (name: string) => {
+      if (name === 'documents') return documentsDirectory
+      throw new Error(`Missing directory: ${name}`)
+    },
+    getFileHandle: async (name: string) => {
+      if (name === 'project.md') return manifestHandle
+      throw new Error(`Missing file: ${name}`)
+    },
+    kind: 'directory',
+    name: 'Detached Import Fixture',
+  } as FileSystemDirectoryHandle
+}
+
+async function loadFromProjectDirectory(directory: FileSystemDirectoryHandle) {
+  const previousWindow = globalThis.window
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { showDirectoryPicker: async () => directory },
+  })
+
+  try {
+    return await loadProject()
+  } finally {
+    if (previousWindow === undefined) {
+      Reflect.deleteProperty(globalThis, 'window')
+    } else {
+      Object.defineProperty(globalThis, 'window', {
+        configurable: true,
+        value: previousWindow,
+      })
+    }
+  }
+}

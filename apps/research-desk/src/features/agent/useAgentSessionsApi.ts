@@ -19,11 +19,13 @@ import {
   type SyncLifecycleToken,
 } from '@/features/project/useProjectSyncLifecycle'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
+import { useSessionDeletionApi } from '@/features/project/useSessionDeletionApi'
 import type { AgentSessionGroupRecord, AgentSessionRecord } from './model'
 import {
   agentSessionFingerprint,
   persistableAgentSessionsInOrder,
   serverAgentSessionGroupPayload,
+  serverAgentSessionFingerprint,
   serverAgentSessionPayload,
 } from './agentSessionSync'
 
@@ -55,7 +57,13 @@ export function useAgentSessionsApi({
   sessions: Record<string, AgentSessionRecord>
   syncActive: boolean
   workspaceId: string
-}): { error: string | null; settled: boolean } {
+}): {
+  createSession: (session: AgentSessionRecord) => Promise<boolean>
+  deleteSession: (sessionId: string) => Promise<void>
+  error: string | null
+  retrySessionDeletion: (sessionId: string) => Promise<void>
+  settled: boolean
+} {
   const [error, setError] = useState<string | null>(null)
   const [hydrated, setHydrated] = useState(false)
   // "Settled", not "succeeded": the initial listing finished either way.
@@ -80,6 +88,26 @@ export function useAgentSessionsApi({
   const syncedGroupsRef = useRef(new Map<string, string>())
   const flushingRef = useRef(false)
   const flushPendingRef = useRef(false)
+
+  const {
+    deleteSession,
+    error: deletionError,
+    retrySession: retrySessionDeletion,
+  } = useSessionDeletionApi({
+    enabled: syncActive,
+    onComplete: (sessionId, operationId) => {
+      syncedRef.current.delete(sessionId)
+      dispatch({ operationId, sessionId, type: 'deleteAgentSession' })
+    },
+    onState: (sessionId, deletion) => {
+      dispatch({ deletion, sessionId, type: 'setAgentSessionDeletionState' })
+    },
+    options: { apiKey, workspaceId },
+    scopeKey: `${workspaceId}:${projectEpoch}:${syncActive ? 'on' : 'off'}`,
+    sessions,
+    start: deleteAgentSession,
+    targetKind: 'agent_session',
+  })
 
   const reset = useCallback(() => {
     syncedRef.current.clear()
@@ -108,10 +136,10 @@ export function useAgentSessionsApi({
             syncedGroupsRef.current.set(group.id, String(group.updated_at))
           }
           for (const wire of serverSessions) {
-            const record = sessionsRef.current[wire.id]
-            if (record?.persistable !== false) {
-              syncedRef.current.set(wire.id, agentSessionFingerprint(record))
-            }
+            syncedRef.current.set(
+              wire.id,
+              serverAgentSessionFingerprint(wire),
+            )
           }
           setHydrated(true)
           setSettled(true)
@@ -166,6 +194,7 @@ export function useAgentSessionsApi({
         currentSessions,
         sessionOrderRef.current,
       )) {
+        if (session.deletion) continue
         const sessionId = session.id
         const fingerprint = agentSessionFingerprint(session)
         if (syncedRef.current.get(sessionId) !== fingerprint) {
@@ -181,7 +210,7 @@ export function useAgentSessionsApi({
         const current = currentSessions[sessionId]
         if (!current) {
           await deleteTolerant404(
-            () => deleteAgentSession(sessionId, optionsRef.current),
+            async () => { await deleteAgentSession(sessionId, optionsRef.current) },
           )
           syncedRef.current.delete(sessionId)
         } else if (current.persistable === false) {
@@ -202,6 +231,41 @@ export function useAgentSessionsApi({
     }
   }, [hydrated])
 
+  /** Confirm a new row on the server before it becomes visible locally.
+   * First-message submit uses the same path, so a failed create cannot leave
+   * a phantom session id attached to a durable run. */
+  const createSession = useCallback(async (session: AgentSessionRecord) => {
+    if (!syncActiveRef.current || session.persistable === false) return false
+    try {
+      const wire = await saveAgentSession(
+        session.id,
+        serverAgentSessionPayload(session),
+        optionsRef.current,
+      )
+      // Seed before dispatch: reducer state from the confirmed response must
+      // not schedule an immediate duplicate autosave PUT.
+      syncedRef.current.set(session.id, agentSessionFingerprint({
+        ...session,
+        title: wire.title,
+        groupId: wire.group_id,
+        createdAt: new Date(wire.created_at * 1000).toISOString(),
+        updatedAt: new Date(wire.updated_at * 1000).toISOString(),
+        persistable: true,
+      }))
+      dispatch({
+        groups: [],
+        selectSessionId: session.id,
+        sessions: [wire],
+        type: 'upsertServerAgentSessions',
+      })
+      setError(null)
+      return true
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+      return false
+    }
+  }, [dispatch])
+
   useEffect(() => {
     if (!syncActive || !hydrated) return undefined
     const timer = window.setTimeout(() => {
@@ -214,6 +278,7 @@ export function useAgentSessionsApi({
   // items_json so its source policy is hydrated before the user submits.
   useEffect(() => {
     if (!syncActive || !hydrated || !selectedSessionId) return undefined
+    if (sessionsRef.current[selectedSessionId]?.deletion) return undefined
     if (sessionsRef.current[selectedSessionId]?.persistable === false) {
       return undefined
     }
@@ -249,5 +314,11 @@ export function useAgentSessionsApi({
       document.removeEventListener('visibilitychange', onVisibilityChange)
   }, [flush, syncActive])
 
-  return { error, settled }
+  return {
+    createSession,
+    deleteSession,
+    error: deletionError ?? error,
+    retrySessionDeletion,
+    settled,
+  }
 }

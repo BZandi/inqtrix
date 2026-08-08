@@ -93,6 +93,10 @@ chat_threads = Table(
         ForeignKey("chat_thread_groups.id", ondelete="SET NULL"),
         nullable=True,
     ),
+    # The model picked inside this thread, as client-owned JSON (the
+    # ``items_json`` pattern): the client normalizes defensively on read,
+    # the server only length-caps. '' means "nothing picked here".
+    Column("model_selection", Text, nullable=False, server_default=text("''")),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
     # Keyset-pagination index for the owner-scoped thread list (newest

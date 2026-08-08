@@ -142,6 +142,19 @@ import { useScrollRestoration } from '@/features/scroll/useScrollRestoration'
 import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
 import type { ChatRetryMode, ChatRetryOptions } from './retry'
 
+export function shouldClearAcceptedChatDraft(
+  accepted: boolean,
+  currentInstruction: string,
+  submittedInstruction: string,
+  currentRefKeys: readonly string[],
+  submittedRefKeys: readonly string[],
+): boolean {
+  return accepted
+    && currentInstruction === submittedInstruction
+    && currentRefKeys.length === submittedRefKeys.length
+    && currentRefKeys.every((key, index) => key === submittedRefKeys[index])
+}
+
 type ChatWorkspaceProps = {
   activeAssistantMessageId: string | null
   chatModelOptions: ChatModelOption[]
@@ -197,6 +210,7 @@ type ChatWorkspaceProps = {
   onRenameThread: (threadId: string, title: string) => void
   onRenameThreadGroup: (groupId: string, title: string) => void
   onRemoveContext: (ref: ChatContextReferenceRecord) => void
+  onRetryAttachment: (chip: ChatAttachmentChipModel) => void
   onReorderContext: (fromIndex: number, toIndex: number) => void
   pendingReorderKeys: string[]
   pillKeys: string[]
@@ -204,7 +218,7 @@ type ChatWorkspaceProps = {
     contentMarkdown: string,
     refs?: ChatContextReferenceRecord[],
     options?: ChatSendOptions,
-  ) => void
+  ) => Promise<boolean>
   onSelectThread: (threadId: string) => void
   onTogglePinnedThread: (threadId: string) => void
   onSelectedModelTierChange: (tier: ChatModelTier | null) => void
@@ -295,6 +309,7 @@ export default function ChatWorkspace({
   onRenameThread,
   onRenameThreadGroup,
   onRemoveContext,
+  onRetryAttachment,
   onReorderContext,
   pendingReorderKeys,
   pillKeys,
@@ -373,11 +388,15 @@ export default function ChatWorkspace({
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [isMobileHistoryOpen, setIsMobileHistoryOpen] = useState(false)
   const [isMessageSelectionMode, setIsMessageSelectionMode] = useState(false)
+  const [isSubmitPending, setIsSubmitPending] = useState(false)
   const [messageEditDraft, setMessageEditDraft] = useState('')
   const [pillRefs, setPillRefs] = useState<ChatContextReferenceRecord[]>([])
   const [selectedMessageIds, setSelectedMessageIds] = useState<ReadonlySet<string>>(() => new Set())
   const [titleDraft, setTitleDraft] = useState('')
   const composerRef = useRef<MentionComposerHandle | null>(null)
+  const pillRefsRef = useRef(pillRefs)
+  pillRefsRef.current = pillRefs
+  const submitPendingRef = useRef(false)
   const didRestoreDraftRef = useRef(false)
   const messageEditTextareaRef = useRef<HTMLTextAreaElement | null>(null)
   const messageAppendSnapshotRef = useRef<ConversationContentSnapshot | null>(null)
@@ -419,7 +438,11 @@ export default function ChatWorkspace({
     && lastMessage.role === 'user'
     && !isSending,
   )
-  const canSend = draft.trim().length > 0 && !isSending
+  const hasUnreadyAttachment = pendingChips.some((chip) => chip.readiness !== 'ready')
+  const canSend = draft.trim().length > 0
+    && !isSending
+    && !isSubmitPending
+    && !hasUnreadyAttachment
   const selectedMessageCount = selectedMessageIds.size
   const canManageMessages = Boolean(selectedThread && selectedThread.messages.length > 0 && !isSending)
   const mentionCategoryLabels = useMemo(() => ({
@@ -634,7 +657,7 @@ export default function ChatWorkspace({
       setOverflowConfirmOpen(true)
       return
     }
-    sendDraft()
+    void sendDraft()
   }
 
   function handleComposerChange() {
@@ -664,9 +687,12 @@ export default function ChatWorkspace({
     window.requestAnimationFrame(() => composerRef.current?.focus())
   }
 
-  function sendDraft() {
+  async function sendDraft() {
     const instruction = composerRef.current?.getInstructionText().trim() ?? ''
-    if (!instruction || isSending) return
+    if (!instruction || isSending || submitPendingRef.current) return
+    submitPendingRef.current = true
+    setIsSubmitPending(true)
+    const submittedRefs = [...pillRefs]
     chatScroll.scrollToBottom()
     const knowledgeCollectionIds = (knowledgeIndexOptions ?? [])
       .filter((option) => selectedKnowledgeIndexIds.includes(option.id))
@@ -676,18 +702,36 @@ export default function ChatWorkspace({
       : selectedModelTier
         ? { modelTier: selectedModelTier }
         : undefined
-    onSendMessage(
-      instruction,
-      pillRefs,
-      knowledgeCollectionIds.length > 0
-        ? { ...modelOptions, knowledgeCollectionIds }
-        : modelOptions,
-    )
-    composerRef.current?.clear()
-    setDraft('')
-    setPillRefs([])
-    onChatDraftChange('')
-    setComposerNotice(null)
+    try {
+      const accepted = await onSendMessage(
+        instruction,
+        submittedRefs,
+        knowledgeCollectionIds.length > 0
+          ? { ...modelOptions, knowledgeCollectionIds }
+          : modelOptions,
+      )
+      const currentInstruction =
+        composerRef.current?.getInstructionText().trim() ?? ''
+      const currentRefKeys = pillRefsRef.current.map(chatContextRefKey)
+      const submittedRefKeys = submittedRefs.map(chatContextRefKey)
+      if (!shouldClearAcceptedChatDraft(
+        accepted,
+        currentInstruction,
+        instruction,
+        currentRefKeys,
+        submittedRefKeys,
+      )) return
+      composerRef.current?.clear()
+      setDraft('')
+      setPillRefs([])
+      onChatDraftChange('')
+      setComposerNotice(null)
+    } catch (error) {
+      setComposerNotice(messageFromUnknown(error))
+    } finally {
+      submitPendingRef.current = false
+      setIsSubmitPending(false)
+    }
   }
 
   function handleComposerRefsChange(refs: ChatContextReferenceRecord[]) {
@@ -1046,12 +1090,16 @@ export default function ChatWorkspace({
                 <ContextChipLegend
                   chips={pendingChips}
                   labels={{
+                    attachmentFailed: t.chat.attachmentContextFailed,
+                    attachmentPending: t.chat.attachmentContextPending,
+                    attachmentRetry: t.chat.attachmentContextRetry,
                     removeContext: t.chat.removeContextAttachment,
                     reorderHint: t.chat.reorderContextHint,
                   }}
                   onRemove={handleRemoveChip}
                   onReorderPending={onReorderContext}
                   onReorderPill={(from, to) => composerRef.current?.reorderPill(from, to)}
+                  onRetry={onRetryAttachment}
                   pendingKeys={pendingReorderKeys}
                   pillKeys={pillKeys}
                 />

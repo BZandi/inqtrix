@@ -1,7 +1,7 @@
-"""The cognitive kernel algorithm (plan M2 step 5 — walking skeleton).
+"""The cognitive kernel algorithm.
 
 ``mode=agent_kernel`` is a SECOND registered ``AgentAlgorithm`` next to
-the deterministic phase machine (ADR-PLAT-2): an LLM tool-calling loop
+the deterministic phase machine: an LLM tool-calling loop
 on deepagents, executed strictly through the platform seams — same
 RunService -> queue -> worker path, park/resume against control rows
 (R5), sync ``graph.stream`` only, shared checkpointer with
@@ -17,14 +17,16 @@ system prompt stays a minimal interim constant until
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
+import re
 import threading
+from dataclasses import replace as dataclass_replace
 from typing import TYPE_CHECKING, Any
 
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.agents.checkpoint_guard import ensure_checkpoint_restart_safe
 from inqtrix.agents.control_ports import ApprovalNotFound, ApprovalRecord
-from inqtrix.agents.evidence import enrich_instant_evidence
 from inqtrix.agents.kernel.chat_bridge import build_tool_chat_model
 from inqtrix.agents.kernel.deps import (
     KernelDeps,
@@ -40,6 +42,19 @@ from inqtrix.agents.kernel.interrupts import (
 )
 from inqtrix.agents.kernel.policy import interrupt_config_for
 from inqtrix.agents.kernel.tools import build_kernel_tools
+from inqtrix.agents.limit_contract import (
+    LIMIT_CHOICE_CANCEL,
+    LIMIT_CHOICE_PARTIAL,
+    LIMIT_DECIDED_EVENT,
+    LIMIT_REACHED_EVENT,
+    QUICK_WEB_SEARCH_LIMIT,
+    AgentLimitGate,
+    LimitChoice,
+    create_or_get_limit_gate,
+    effective_extended_limit,
+    latest_terminal_limit_choice,
+    next_extended_limit,
+)
 from inqtrix.agents.markdown import normalize_agent_markdown
 from inqtrix.agents.patterns._structured import observe_structured_retries
 from inqtrix.agents.telemetry import model_retry_activity, provider_retry_activity
@@ -49,11 +64,13 @@ from inqtrix.agents.skills_runtime import (
 )
 from inqtrix.agents.web_execution_policy import derive_web_research_policy
 from inqtrix.execution_authority import pinned_knowledge_collection_ids
+from inqtrix.i18n import detect_ui_language
 from inqtrix.model_routing import (
     describe_resolution,
     describe_unresolved_resolution,
 )
 from inqtrix.providers.base import observe_provider_retries
+from inqtrix.urls import normalize_url, scrub_credential_urls
 
 if TYPE_CHECKING:
     from inqtrix.agents.checkpointing import CheckpointerHandle
@@ -81,6 +98,86 @@ NARRATION_EVENT = "inqtrix.agent.narration"
 
 _ARGS_PREVIEW_LIMIT = 200
 """Character cap of the redacted tool-args preview in events."""
+
+def _tool_intent_narration(
+    tool_calls: list[dict[str, Any]],
+    *,
+    language: str,
+) -> str:
+    """Build one localized status from tool identity, never model prose.
+
+    Provider messages may attach a short factual answer or a complete
+    Markdown draft to a tool request.  Neither is trustworthy process
+    narration.  The transcript therefore derives its status solely from the
+    capability names already accepted by the kernel policy; the answer body
+    remains owned exclusively by the answer publisher.
+    """
+
+    names = {
+        str(call.get("name", "") or "")
+        for call in tool_calls
+        if isinstance(call, dict)
+    }
+    if names and names <= {
+        "search_project_knowledge",
+        "read_project_document",
+        "web_instant",
+    }:
+        return (
+            "Ich prüfe jetzt die benötigten Quellen."
+            if language == "de"
+            else "I’m checking the required sources now."
+        )
+    if names and names <= {"write_canvas", "read_canvas", "propose_editor_patch"}:
+        return (
+            "Ich bearbeite jetzt den angeforderten Arbeitsstand."
+            if language == "de"
+            else "I’m working on the requested artifact now."
+        )
+    if names and names <= {"run_web_research", "run_deep_mission", "delegate_batch"}:
+        return (
+            "Ich vertiefe jetzt die erforderlichen Arbeitsstränge."
+            if language == "de"
+            else "I’m expanding the required workstreams now."
+        )
+    return (
+        "Ich führe jetzt den nächsten erforderlichen Arbeitsschritt aus."
+        if language == "de"
+        else "I’m carrying out the next required step now."
+    )
+
+_SUPERSTEPS_PER_TOOL_TURN = 8
+"""LangGraph super-steps consumed by ONE model turn that calls a tool.
+
+The kernel's ``recursion_limit`` counts super-steps, not model turns, and
+every middleware hook is its own graph node: ``before_model`` (skill
+inputs, sufficiency) -> model -> ``after_model`` (child-batch guard, tool
+budget, todo, and HITL when the policy gates) -> the tool node. Measured
+against the compiled production graph: 8 per tool turn, identical across
+the policy variants (the HITL node does not change the price).
+
+Budgets below are expressed as TOOL TURNS multiplied by this constant,
+so the ceilings say what they mean. ``tests/agents/
+test_harness_kernel_contract.py::test_supersteps_per_tool_turn_is_pinned``
+measures the compiled graph and fails when a middleware change makes this
+value wrong — the number is derived, never guessed (the sufficiency
+middleware raised it from 7 to 8 exactly this way)."""
+
+_ANSWER_TURN_SUPERSTEPS = 9
+"""Super-steps of the bare final answer turn (measured alongside the
+per-tool-turn price; the answer turn carries the graph's entry/exit
+overhead, so it costs ONE more than a tool turn). A ceiling formula is
+always ``_ANSWER_TURN_SUPERSTEPS + turns * _SUPERSTEPS_PER_TOOL_TURN``
+— pinned by the same contract test."""
+
+_SCHNELL_TOOL_TURNS = 3
+"""Tool turns the ``schnell`` tier may spend BESIDE the answer turn:
+the ONE published ``web_instant`` call, one knowledge/todo turn (both
+allowed in schnell), and one slack turn for a failed or blocked call.
+The tier publishes ``web_instant_budget=1``; a clamp that cannot afford
+that call plus the answer would make every schnell tool run a
+guaranteed ``GraphRecursionError`` (published != enforced) — the
+pre-recalibration literal ``8`` did exactly that."""
 
 
 def _emit_kernel_model_retry(
@@ -139,7 +236,7 @@ class _DepsChatProvider:
 
 
 class KernelAgentAlgorithm:
-    """The conversational kernel over the platform seams (ADR-PLAT-2).
+    """The conversational kernel over the platform seams.
 
     Args:
         control_store: Clarification/approval rows (park truth, R5).
@@ -174,6 +271,7 @@ class KernelAgentAlgorithm:
         run_service: Any = None,
         resolver: Any = None,
         skill_service: Any = None,
+        agent_memory_service: Any = None,
     ) -> None:
         self._control = control_store
         self._checkpointer = checkpointer
@@ -183,8 +281,11 @@ class KernelAgentAlgorithm:
         self._run_service = run_service
         self._resolver = resolver
         self._skill_service = skill_service
+        # The SAME long-term memory service the mission engine uses (F9):
+        # one memory stack, opt-in per user, never evidentiary.
+        self._memory = agent_memory_service
         # One compiled graph per policy: interrupt_on is compile-time
-        # and the policy is fixed per run (plan M2 `2.2`).
+        # and the policy is fixed per run.
         self._graphs: dict[tuple[str, str, str, str, int], Any] = {}
         self._graph_lock = threading.Lock()
 
@@ -251,13 +352,22 @@ class KernelAgentAlgorithm:
             depth=depth,
         )
         deps.depth = depth
-        deps.question = request.question
+        deps.question = scrub_credential_urls(request.question)
         deps.session_id = request.session_id or ""
         deps.run_service = self._run_service
         deps.resolver = self._resolver
         deps.principal = context.principal
         deps.autonomy = autonomy
         deps.skill_service = self._skill_service
+        deps.stack_name = getattr(context, "stack_name", "") or ""
+        # Long-term memory (F9): the mission engine's service + opt-in
+        # semantics — resolved once per segment; a preference-read error
+        # degrades to False inside opt_in_enabled (never silently on).
+        deps.memory = self._memory
+        if self._memory is not None and context.principal is not None:
+            deps.memory_opt_in = run_coro(
+                self._memory.opt_in_enabled(context.principal)
+            )
         from inqtrix.agents.source_policy import effective_source_policy
 
         deps.source_policy = effective_source_policy(
@@ -271,9 +381,13 @@ class KernelAgentAlgorithm:
             tier=tier or None,
         )
         deps.tier = tier
-        deps.explicit_web_research = research_policy.allowed
+        deps.web_research_allowed = research_policy.allowed
         deps.web_research_profile = research_policy.profile
         deps.hydrate_evidence()
+        deps.capability_context = dataclass_replace(
+            deps.capability_context,
+            question=deps.question,
+        )
         for record in skill_records:
             deps.activate_skill(record)
         if (
@@ -308,41 +422,82 @@ class KernelAgentAlgorithm:
                 )
             ):
                 return self._run_quick_web(request, context, deps)
+        (
+            base_tool_limit,
+            tool_ceiling,
+            base_step_limit,
+            step_ceiling,
+        ) = configured_kernel_limits(self._platform, depth=depth, tier=tier)
+        deps.tool_call_ceiling = tool_ceiling
+        deps.tool_call_limit = effective_extended_limit(
+            self._control,
+            run_id=run_id,
+            kind="tool_calls",
+            base=base_tool_limit,
+            ceiling=tool_ceiling,
+            run_async=run_coro,
+        )
+        deps.step_ceiling = step_ceiling
+        deps.step_limit = effective_extended_limit(
+            self._control,
+            run_id=run_id,
+            kind="steps",
+            base=base_step_limit,
+            ceiling=step_ceiling,
+            run_async=run_coro,
+        )
         graph = self._compiled_graph(
             autonomy,
             source_policy=deps.source_policy,
             execution_directive=request.execution_directive,
-            max_tool_calls=(
-                self._platform.kernel_max_tool_calls_deep
-                if depth == "deep"
-                else self._platform.kernel_max_tool_calls
-            ),
+            max_tool_calls=deps.tool_call_limit,
         )
-        config = {
-            "configurable": {"thread_id": run_id},
-            # Hard iteration bound (plan M2 `2.7`): deepagents lifts
-            # langgraph's default to 9999 — a runaway tool loop must
-            # fail LOUDLY (GraphRecursionError -> failed run) instead.
-            # Deep raises the ceiling (M4), it never removes it.
-            # The schnell tier additionally clamps the ceiling: a
-            # seconds-scale run has no business iterating dozens of
-            # times (deterministic budget, never prompt-only).
-            "recursion_limit": (
-                self._platform.kernel_max_iterations_deep
-                if depth == "deep"
-                else min(
-                    self._platform.kernel_max_iterations,
-                    8 if tier == "schnell" else (
-                        self._platform.kernel_max_iterations
-                    ),
-                )
-            ),
-        }
-
-        existing = graph.get_state(config)
+        state_config = {"configurable": {"thread_id": run_id}}
+        existing = graph.get_state(state_config)
         deps.prior_usage = _checkpointed_usage(existing)
         deps.tool_use_counts = _checkpointed_tool_use_counts(existing)
+        deps.tool_calls_used = _checkpointed_tool_call_count(existing)
+        (
+            deps.emitted_tool_start_ids,
+            deps.emitted_tool_finish_ids,
+        ) = _checkpointed_tool_event_ids(existing)
+        deps.checkpointed_steps = _checkpointed_steps(existing)
         self._reactivate_loaded_skills(deps, existing)
+
+        terminal_limit = latest_terminal_limit_choice(
+            self._control, run_id=run_id, run_async=run_coro
+        )
+        if terminal_limit is not None:
+            gate, choice, record = terminal_limit
+            return self._apply_terminal_limit_choice(
+                request,
+                deps,
+                gate=gate,
+                choice=choice,
+                clarification_id=record.clarification_id,
+            )
+
+        remaining_steps = deps.step_limit - deps.checkpointed_steps
+        if remaining_steps <= 0 and bool(getattr(existing, "next", ())):
+            gate = AgentLimitGate(
+                kind="steps",
+                current=deps.step_limit,
+                proposed=next_extended_limit(
+                    current=deps.step_limit,
+                    ceiling=deps.step_ceiling,
+                ),
+                ceiling=deps.step_ceiling,
+                used=deps.checkpointed_steps,
+            )
+            return self._park_for_limit(request, context, deps, gate=gate)
+
+        config = {
+            "configurable": {"thread_id": run_id},
+            # LangGraph applies this bound to one invocation. Subtracting
+            # the checkpoint's cumulative step coordinate turns it into the
+            # published run-wide allowance across approvals and resumes.
+            "recursion_limit": max(1, remaining_steps),
+        }
         graph_input = self._graph_input(request, run_id, existing, deps)
 
         from inqtrix.exceptions import AgentCancelled, AgentTokenBudgetExceeded
@@ -380,6 +535,35 @@ class KernelAgentAlgorithm:
             # Cancel/budget stop at the model boundary: the segment's
             # spend is returned (execute_run_request books it before
             # cancelling), the checkpoint stays for post-mortems.
+            if isinstance(exc, AgentTokenBudgetExceeded):
+                token_used = sum(deps.prior_usage.values()) + sum(
+                    deps.usage.values()
+                )
+                token_payload = {
+                    "kind": "tokens",
+                    "used": max(0, token_used),
+                    "limit": deps.token_budget,
+                    "ceiling": deps.token_budget,
+                    "extendable": False,
+                    "recoverable": False,
+                    "reason": "operator_ceiling_exactly_once_required",
+                    "state": "failed_at_model_boundary",
+                }
+                deps.emit(LIMIT_REACHED_EVENT, token_payload)
+                deps.emit(
+                    NARRATION_EVENT,
+                    {
+                        "narration_id": f"n-limit-tokens-{deps.run_id[-12:]}",
+                        "kind": "limit",
+                        "text": (
+                            "Das feste serverseitige Tokenlimit ist erreicht. "
+                            "Der Lauf wurde ohne automatische Teilantwort beendet; "
+                            "eine Erweiterung ist für diesen Lauf nicht möglich."
+                        ),
+                        "phase": "execution",
+                        "final": True,
+                    },
+                )
             return AgentResult(
                 answer="",
                 result_type="agent_kernel_result",
@@ -401,6 +585,57 @@ class KernelAgentAlgorithm:
                     },
                 },
             )
+        except Exception as exc:
+            # Both loop ceilings stop at checkpoint-safe boundaries. They
+            # therefore reuse the native clarification wait/resume contract
+            # instead of becoming a generic failure or a silent partial.
+            from langgraph.errors import GraphRecursionError
+
+            from inqtrix.agents.kernel.middleware import (
+                KernelToolBudgetExceeded,
+            )
+
+            if isinstance(exc, GraphRecursionError):
+                stopped = graph.get_state(state_config)
+                deps.checkpointed_steps = max(
+                    deps.step_limit, _checkpointed_steps(stopped)
+                )
+                return self._park_for_limit(
+                    request,
+                    context,
+                    deps,
+                    gate=AgentLimitGate(
+                        kind="steps",
+                        current=deps.step_limit,
+                        proposed=next_extended_limit(
+                            current=deps.step_limit,
+                            ceiling=deps.step_ceiling,
+                        ),
+                        ceiling=deps.step_ceiling,
+                        used=deps.checkpointed_steps,
+                    ),
+                )
+            if isinstance(exc, KernelToolBudgetExceeded):
+                deps.tool_calls_used = max(
+                    0, exc.attempted - exc.batch_size
+                )
+                return self._park_for_limit(
+                    request,
+                    context,
+                    deps,
+                    gate=AgentLimitGate(
+                        kind="tool_calls",
+                        current=deps.tool_call_limit,
+                        proposed=next_extended_limit(
+                            current=deps.tool_call_limit,
+                            ceiling=deps.tool_call_ceiling,
+                            required=exc.attempted,
+                        ),
+                        ceiling=deps.tool_call_ceiling,
+                        used=deps.tool_calls_used,
+                    ),
+                )
+            raise
         finally:
             set_kernel_deps(None)
 
@@ -408,7 +643,7 @@ class KernelAgentAlgorithm:
             if len(interrupts) > 1:
                 # Parallel gates have no defined resume mapping yet —
                 # parking would strand the run half-answered (loud
-                # failure beats an undefined resume, plan M2 skeleton).
+                # failure is safer than an undefined resume).
                 raise RuntimeError(
                     "Mehrere parallele Kernel-Interrupts in einem "
                     "Segment werden noch nicht unterstuetzt."
@@ -443,6 +678,8 @@ class KernelAgentAlgorithm:
             )
 
         state = graph.get_state(config)
+        deps.checkpointed_steps = _checkpointed_steps(state)
+        deps.tool_calls_used = _checkpointed_tool_call_count(state)
         answer = _final_answer(state.values.get("messages") or [])
         if not answer:
             self._checkpointer.delete_thread(run_id)
@@ -493,6 +730,17 @@ class KernelAgentAlgorithm:
                         },
                     },
                 )
+        answer = _validate_kernel_answer_citations(
+            deps,
+            answer,
+            list(deps.evidence_refs.values()),
+        )
+        answer_claim_bindings: list[dict[str, Any]] = []
+        # Answer-artifact persistence belongs to the native RunService
+        # publisher.  The kernel returns the post-verify Markdown and its
+        # reference state; publication begins only after this algorithm has
+        # completed, so no client can observe the final body before streaming.
+        _stage_kernel_memory(deps, answer)
         self._checkpointer.delete_thread(run_id)
         deps.emit(
             PHASE_CHANGED_EVENT,
@@ -508,6 +756,14 @@ class KernelAgentAlgorithm:
                 },
             },
         )
+        # F5: the surfaced reference list follows the answer's citations
+        # (cited-only, basis fallback via _result_references).  The central
+        # publisher persists this exact exported projection on the answer
+        # artifact. all/allowed_citations stay the FULL ledger URLs: they are
+        # source-ordering inputs, not the user-facing reference list.
+        report_references = _result_references(
+            answer, list(deps.evidence_refs.values())
+        )
         return AgentResult(
             answer=answer,
             result_type="agent_kernel_result",
@@ -517,9 +773,8 @@ class KernelAgentAlgorithm:
                 "result_state": {
                     "answer": answer,
                     "cancelled": False,
-                    "report_references": list(
-                        deps.evidence_refs.values()
-                    ),
+                    "report_references": report_references,
+                    "answer_claim_bindings": answer_claim_bindings,
                     "all_citations": [
                         str(item.get("url") or "")
                         for item in deps.evidence_refs.values()
@@ -537,6 +792,166 @@ class KernelAgentAlgorithm:
             },
         )
 
+    def _park_for_limit(
+        self,
+        request: "RunRequest",
+        context: "RunContext",
+        deps: KernelDeps,
+        *,
+        gate: AgentLimitGate,
+    ) -> "AgentResult":
+        """Park one checkpoint-safe limit through the native input gate."""
+        from inqtrix.core.results import AgentResult
+
+        record, created = create_or_get_limit_gate(
+            self._control,
+            run_id=deps.run_id,
+            gate=gate,
+            run_async=run_coro,
+        )
+        payload = gate.payload(clarification_id=record.clarification_id)
+        deps.emit(LIMIT_REACHED_EVENT, {**payload, "state": "waiting_for_input"})
+        if created:
+            deps.emit(
+                "inqtrix.agent.clarification.requested",
+                {
+                    "clarification_id": record.clarification_id,
+                    "question": record.question,
+                    "options": [dict(item) for item in record.options],
+                    "question_count": 1,
+                },
+            )
+            deps.emit(
+                NARRATION_EVENT,
+                {
+                    "narration_id": f"n-limit-{record.clarification_id}",
+                    "kind": "limit",
+                    "text": record.question,
+                    "phase": "execution",
+                    "final": True,
+                },
+            )
+        context.park("waiting_for_input")
+        return AgentResult(
+            answer="",
+            result_type="agent_kernel_parked",
+            raw={
+                "answer": "",
+                "usage": dict(deps.usage),
+                "result_state": {
+                    "parked": True,
+                    "cancelled": False,
+                    "limit": payload,
+                    "execution": self._execution_payload(
+                        request,
+                        deps,
+                        consent_reason=_kernel_consent_reason(deps),
+                    ),
+                },
+            },
+        )
+
+    def _apply_terminal_limit_choice(
+        self,
+        request: "RunRequest",
+        deps: KernelDeps,
+        *,
+        gate: AgentLimitGate,
+        choice: LimitChoice,
+        clarification_id: str,
+    ) -> "AgentResult":
+        """Apply an explicit partial/cancel choice exactly once on resume."""
+        from inqtrix.core.results import AgentResult
+
+        payload = {
+            **gate.payload(clarification_id=clarification_id),
+            "choice": choice,
+            "state": "decided",
+        }
+        deps.emit(LIMIT_DECIDED_EVENT, payload)
+        if choice == LIMIT_CHOICE_CANCEL:
+            self._checkpointer.delete_thread(deps.run_id)
+            return AgentResult(
+                answer="",
+                result_type="agent_kernel_result",
+                raw={
+                    "answer": "",
+                    "usage": dict(deps.usage),
+                    "result_state": {
+                        "cancelled": True,
+                        "cancel_reason": "limit_cancelled_by_user",
+                        "limit": payload,
+                        "execution": self._execution_payload(
+                            request,
+                            deps,
+                            consent_reason=_kernel_consent_reason(deps),
+                        ),
+                    },
+                },
+            )
+        if choice != LIMIT_CHOICE_PARTIAL:
+            raise RuntimeError(f"Unbekannte terminale Limit-Entscheidung: {choice!r}")
+
+        answer = _partial_limit_answer(gate, list(deps.evidence_refs.values()))
+        answer = _validate_kernel_answer_citations(
+            deps,
+            answer,
+            list(deps.evidence_refs.values()),
+        )
+        answer_claim_bindings: list[dict[str, Any]] = []
+        deps.effective_response_form = "chat"
+        self._checkpointer.delete_thread(deps.run_id)
+        deps.emit(
+            PHASE_CHANGED_EVENT,
+            {
+                "phase": "done",
+                "previous_phase": "execution",
+                "snapshot": {
+                    "current_node": _KERNEL_NODE,
+                    "phase": "done",
+                    "execution": self._execution_payload(
+                        request,
+                        deps,
+                        consent_reason=_kernel_consent_reason(deps),
+                    ),
+                    "limit": payload,
+                },
+            },
+        )
+        references = _result_references(answer, list(deps.evidence_refs.values()))
+        return AgentResult(
+            answer=answer,
+            result_type="agent_kernel_result",
+            raw={
+                "answer": answer,
+                "usage": dict(deps.usage),
+                "result_state": {
+                    "answer": answer,
+                    "cancelled": False,
+                    "partial": True,
+                    "partial_reason": "limit_reached",
+                    "limit": payload,
+                    "report_references": references,
+                    "answer_claim_bindings": answer_claim_bindings,
+                    "all_citations": [
+                        str(item.get("url") or "")
+                        for item in deps.evidence_refs.values()
+                        if item.get("url")
+                    ],
+                    "allowed_citations": [
+                        str(item.get("url") or "")
+                        for item in deps.evidence_refs.values()
+                        if item.get("url")
+                    ],
+                    "execution": self._execution_payload(
+                        request,
+                        deps,
+                        consent_reason=_kernel_consent_reason(deps),
+                    ),
+                },
+            },
+        )
+
     def _execution_payload(
         self,
         request: "RunRequest",
@@ -546,6 +961,43 @@ class KernelAgentAlgorithm:
     ) -> dict[str, object]:
         """Canonical Agent Desk execution block for this kernel run."""
         from inqtrix.agents.source_policy import execution_payload
+
+        limits: dict[str, object] = {}
+        if request.execution_directive == "quick_web":
+            limits["web_searches"] = {
+                "used": max(0, int(deps.tool_use_counts.get("web", 0) or 0)),
+                "limit": QUICK_WEB_SEARCH_LIMIT,
+                "ceiling": QUICK_WEB_SEARCH_LIMIT,
+                "recoverable": False,
+                "extendable": False,
+                "reason": "direct_route_single_search",
+            }
+        if deps.tool_call_limit > 0:
+            limits["tool_calls"] = {
+                "used": max(0, deps.tool_calls_used),
+                "limit": deps.tool_call_limit,
+                "ceiling": max(deps.tool_call_limit, deps.tool_call_ceiling),
+                "recoverable": True,
+                "extendable": deps.tool_call_limit < deps.tool_call_ceiling,
+            }
+        if deps.step_limit > 0:
+            limits["steps"] = {
+                "used": max(0, deps.checkpointed_steps),
+                "limit": deps.step_limit,
+                "ceiling": max(deps.step_limit, deps.step_ceiling),
+                "recoverable": True,
+                "extendable": deps.step_limit < deps.step_ceiling,
+            }
+        token_used = sum(deps.prior_usage.values()) + sum(deps.usage.values())
+        if deps.token_budget > 0:
+            limits["tokens"] = {
+                "used": max(0, token_used),
+                "limit": deps.token_budget,
+                "ceiling": deps.token_budget,
+                "recoverable": False,
+                "extendable": False,
+                "reason": "operator_ceiling_exactly_once_required",
+            }
 
         return execution_payload(
             execution_directive=request.execution_directive,
@@ -564,6 +1016,7 @@ class KernelAgentAlgorithm:
             source_policy=deps.source_policy,
             consent_reason=consent_reason,
             tool_use_counts=deps.tool_use_counts,
+            limits=limits,
         )
 
     def _run_quick_web(
@@ -624,10 +1077,14 @@ class KernelAgentAlgorithm:
                 query, recency = self._derive_quick_web_query(
                     request, deps, structured_call, QuickWebQuery
                 )
+                # The action args must match the web_instant tool schema
+                # (query only) so an edit re-validates cleanly; recency is a
+                # quick-web search refinement, not a tool arg, so it rides in
+                # the approval payload where an args-only edit can't strip it.
                 actions = [
                     {
                         "tool": "web_instant",
-                        "args": {"query": query, "recency": recency},
+                        "args": {"query": query},
                         "summary": "Eine direkte Websuche ausfuehren.",
                     }
                 ]
@@ -637,7 +1094,7 @@ class KernelAgentAlgorithm:
                             approval_id=approval_id,
                             run_id=deps.run_id,
                             kind="tool",
-                            payload={"actions": actions},
+                            payload={"actions": actions, "recency": recency},
                             interrupt_key="quick_web",
                         )
                     )
@@ -689,7 +1146,11 @@ class KernelAgentAlgorithm:
                 if approval.decision == "edit"
                 else approval.payload.get("actions")
             )
-            query, recency = _validated_quick_web_action(action_set)
+            query, action_recency = _validated_quick_web_action(action_set)
+            # recency lives in the approval payload (not the tool args), so an
+            # edited query keeps the originally-derived recency; the action-arg
+            # value is only a fallback for any legacy pre-fix approval row.
+            recency = str(approval.payload.get("recency") or action_recency or "")
             consent_reason = "strict_approval"
         else:
             query, recency = self._derive_quick_web_query(
@@ -715,6 +1176,7 @@ class KernelAgentAlgorithm:
         )
         deps.book_usage(output.prompt_tokens, output.completion_tokens)
         deps.record_source_tool_use("web")
+        all_references = deps.register_instant_web_search(output)
         deps.emit(
             TOOL_FINISHED_EVENT,
             {
@@ -727,19 +1189,7 @@ class KernelAgentAlgorithm:
             },
         )
 
-        references = deps.register_references(
-            enrich_instant_evidence(
-                str(output.answer or ""),
-                [
-                    {
-                        "url": source.url,
-                        "title": source.title or None,
-                        "excerpt": source.snippet or None,
-                    }
-                    for source in output.sources
-                ],
-            )
-        )
+        references = all_references
         answer = self._synthesize_quick_web_answer(
             request=request,
             deps=deps,
@@ -771,7 +1221,7 @@ class KernelAgentAlgorithm:
             "aktuelle Nutzerfrage. Nutze den Verlauf nur zur Aufloesung von "
             "Bezugnahmen. Setze recency auf day/week/month/year nur bei "
             "einem ausdruecklich aktuellen Zeitbezug, sonst auf ''.\n\n"
-            f"AKTUELLE FRAGE:\n{request.question}\n\n"
+            f"AKTUELLE FRAGE:\n{deps.question}\n\n"
             f"RELEVANTER VERLAUF:\n{context_block or '(kein Verlauf)'}"
         )
         outcome = structured_call(
@@ -812,7 +1262,7 @@ class KernelAgentAlgorithm:
                     "fallback": "original_question",
                 },
             )
-            return request.question.strip(), ""
+            return deps.question.strip(), ""
         return value.query.strip(), value.recency
 
     def _synthesize_quick_web_answer(
@@ -831,12 +1281,21 @@ class KernelAgentAlgorithm:
             if item.get("excerpt"):
                 support_label = "Quellenauszug"
                 support = item["excerpt"]
+            elif item.get("provider_snippet"):
+                support_label = "Vom Websuchdienst geliefertes Snippet"
+                support = item["provider_snippet"]
             elif item.get("grounded_support"):
-                support_label = "Geerdeter Antwortkontext (kein Quellenauszug)"
+                support_label = (
+                    "Dieser URL im Azure-Suchergebnis zugeordneter "
+                    "Antwortkontext"
+                )
                 support = item["grounded_support"]
             else:
-                support_label = "Quellenauszug"
-                support = "(nicht vorhanden)"
+                support_label = "Zuordnungsstatus"
+                support = (
+                    "Azure lieferte die URL, aber keinen eindeutig dieser "
+                    "Quelle zuordenbaren Einzelabschnitt."
+                )
             source_parts.append(
                 f"[{item['label']}] {item.get('title') or item['url']}\n"
                 f"URL: {item['url']}\n{support_label}: {support}"
@@ -848,24 +1307,46 @@ class KernelAgentAlgorithm:
                 deps, "agent_quick_web_answer", notice
             ),
         ):
+            from inqtrix.agents.prompts import (
+                _KERNEL_SECURITY,
+                untrusted_fence,
+            )
+
+            # Built before the prompt: a backslash inside a nested f-string
+            # expression is a syntax error on the minimum supported Python.
+            fenced_web_content = untrusted_fence(
+                f"{provider_answer}\n\n{source_block}", "web"
+            )
+
             response = deps.llm.complete_with_metadata(
                 (
                     "Beantworte die Nutzerfrage knapp und direkt in ihrer "
                     "Sprache. Verwende ausschliesslich das abgegrenzte "
-                    "Websuchergebnis und die gelieferten Quellen. Verlinke "
-                    "Tatsachen mit den passenden URLs; benenne fehlende oder "
-                    "widerspruechliche Evidenz offen.\n\n"
-                    f"NUTZERFRAGE:\n{request.question}\n\n"
+                    "Azure-Websuchergebnis und die von Azure gelieferten "
+                    "Quellen. Die Provider-Antwort ist das geerdete Ergebnis "
+                    "dieser Suche und darf einschließlich darin genannter "
+                    "Zahlen, Preise und Daten verwendet werden. Erfinde "
+                    "nichts hinzu. Verlinke Aussagen nur mit URLs, die im "
+                    "Suchergebnis vorkommen. Wenn Azure mehrere Links einem "
+                    "gemeinsamen Antwortabschnitt zuordnet, behaupte keine "
+                    "exklusive Eins-zu-eins-Herkunft. Benenne echte Lücken "
+                    "oder Widersprüche offen, aber entferne vorhandene "
+                    "Providerinformationen nicht allein wegen einer "
+                    "Quellenklassifikation. Leite aus fehlenden Treffern "
+                    "niemals Abwesenheit ab.\n\n"
+                    f"NUTZERFRAGE:\n{deps.question}\n\n"
                     f"RELEVANTER VERLAUF:\n"
                     f"{deps.session_history[-4000:] or '(kein Verlauf)'}\n\n"
                     f"SUCHANFRAGE:\n{query}\n\n"
-                    "BEGINN WEBSUCHERGEBNIS\n"
-                    f"{provider_answer}\n\n{source_block}\n"
-                    "ENDE WEBSUCHERGEBNIS"
+                    # Same fence + SICHERHEIT anchor as the graph lane: the
+                    # quick lane synthesizes DIRECTLY from external content
+                    # and must not be the one unfenced injection surface.
+                    f"{fenced_web_content}"
                 ),
                 system=(
                     "Du formulierst eine direkt belegte Schnell-Web-Antwort. "
-                    "Fuehre kein eigenes Wissen als Fakt ein."
+                    "Fuehre kein eigenes Wissen als Fakt ein.\n\n"
+                    f"{_KERNEL_SECURITY}"
                 ),
                 model=deps.model,
                 reasoning_effort=deps.reasoning_effort,
@@ -885,7 +1366,11 @@ class KernelAgentAlgorithm:
                     "fallback": "provider_answer",
                 },
             )
-            answer = provider_answer.strip()
+            answer = (
+                "Die eigenständige Aufbereitung ist fehlgeschlagen. "
+                "Hier ist das von Azure gelieferte Websuchergebnis:\n\n"
+                + provider_answer.strip()
+            )
         source_lines = "\n".join(
             f"- [{item.get('title') or item['url']}]({item['url']})"
             for item in references
@@ -911,6 +1396,15 @@ class KernelAgentAlgorithm:
             request, deps, consent_reason=consent_reason
         )
 
+        answer = _validate_kernel_answer_citations(deps, answer, references)
+        answer_claim_bindings: list[dict[str, Any]] = []
+
+        # The native RunService publisher materializes this answer after the
+        # algorithm returns, including strict-reject receipts.
+        if consent_reason != "strict_rejected":
+            # A reject receipt is no memory substrate — staging would spend
+            # an LLM call on "Die direkte Websuche wurde nicht freigegeben."
+            _stage_kernel_memory(deps, answer)
         deps.emit(
             PHASE_CHANGED_EVENT,
             {
@@ -923,6 +1417,9 @@ class KernelAgentAlgorithm:
                 },
             },
         )
+        # Same cited-only/basis contract as the normal lane.  The central
+        # publisher consumes this exported list without reinterpreting it.
+        report_references = _result_references(answer, references)
         return AgentResult(
             answer=answer,
             result_type="agent_kernel_result",
@@ -932,7 +1429,8 @@ class KernelAgentAlgorithm:
                 "result_state": {
                     "answer": answer,
                     "cancelled": False,
-                    "report_references": references,
+                    "report_references": report_references,
+                    "answer_claim_bindings": answer_claim_bindings,
                     "all_citations": [
                         str(item.get("url") or "")
                         for item in references
@@ -1015,6 +1513,7 @@ class KernelAgentAlgorithm:
             )
 
         from inqtrix.agents.kernel.middleware import (
+            SKILL_INPUTS_RESOLVED_FLAG,
             SKILL_INPUTS_RESOLVED_MARKER,
         )
 
@@ -1024,9 +1523,17 @@ class KernelAgentAlgorithm:
             if not isinstance(content, str):
                 continue
             message_type = type(message).__name__
+            # F3 hardening: trust is anchored on SERVER-SET metadata —
+            # the middleware's additional_kwargs flag or the load_skill
+            # tool identity — never on user-forgeable content text. A
+            # user question containing the literal marker is inert here.
             trusted_resolved_block = (
                 message_type == "HumanMessage"
-                and content.startswith(SKILL_INPUTS_RESOLVED_MARKER)
+                and bool(
+                    (getattr(message, "additional_kwargs", None) or {}).get(
+                        SKILL_INPUTS_RESOLVED_FLAG
+                    )
+                )
             ) or (
                 message_type == "ToolMessage"
                 and getattr(message, "name", "") == "load_skill"
@@ -1107,9 +1614,9 @@ class KernelAgentAlgorithm:
             # that already HAS its answer — the pass is an upgrade, not
             # a dependency.
             log.warning(
-                "Deep-Review-Aufruf fehlgeschlagen (%s) — die Antwort "
+                "Deep-Review-Aufruf fehlgeschlagen (error_type=%s) — die Antwort "
                 "bleibt unveraendert.",
-                exc,
+                type(exc).__name__,
             )
             _review_narration(
                 "Providerfehler — bestehende Outputs bleiben unveraendert.",
@@ -1190,9 +1697,9 @@ class KernelAgentAlgorithm:
             )
         except Exception as exc:  # noqa: BLE001 — keep the finished answer
             log.warning(
-                "Deep-Revision fehlgeschlagen (%s) — die urspruengliche "
+                "Deep-Revision fehlgeschlagen (error_type=%s) — die urspruengliche "
                 "Antwort bleibt bestehen.",
-                exc,
+                type(exc).__name__,
             )
             _review_narration(
                 f"{len(findings)} Befund(e), Ueberarbeitung "
@@ -1306,14 +1813,20 @@ class KernelAgentAlgorithm:
                 )
             )
         except (ArtifactNotFound, ArtifactRevisionConflict) as exc:
-            log.warning("Deep-Revision CAS-Konflikt: %s", exc)
+            log.warning(
+                "Deep-Revision CAS-Konflikt (error_type=%s).",
+                type(exc).__name__,
+            )
             _review_narration(
                 "CAS-Konflikt — bestehende Outputs bleiben unveraendert.",
                 final=True,
             )
             return answer
         except Exception as exc:  # noqa: BLE001 — preserve reviewed outputs
-            log.warning("Deep-Revision Store-Fehler: %s", exc)
+            log.warning(
+                "Deep-Revision Store-Fehler (error_type=%s).",
+                type(exc).__name__,
+            )
             _review_narration(
                 "Storefehler — bestehende Outputs bleiben unveraendert.",
                 final=True,
@@ -1356,7 +1869,7 @@ class KernelAgentAlgorithm:
         requested_tier = requested_tier or pin_tier
         requested_effort = requested_effort or pin_effort
         if depth == "deep" and not requested_effort:
-            # Deep (plan M4 `4.1.1`): the kernel node runs on high
+            # Deep mode: the kernel node runs on high
             # reasoning effort unless the request or a skill pin chose
             # one — the tier stays with the tier map (agent_kernel is
             # high-tier already).
@@ -1387,6 +1900,15 @@ class KernelAgentAlgorithm:
             capability_context=self._capability_context(context, request),
             cancel_token=context.cancel_token,
             token_budget=int(context.token_budget or 0),
+        )
+        # Context management is resolved per run (the compiled graph is
+        # shared): the compaction trigger follows the RESOLVED model's
+        # card, the offload threshold is a platform constant.
+        deps.context_trigger_tokens = resolve_context_trigger_tokens(
+            self._platform, deps.model
+        )
+        deps.context_offload_chars = int(
+            getattr(self._platform, "kernel_context_offload_chars", 0) or 0
         )
         deps.emit("inqtrix.node.model_resolution", desc)
         return deps
@@ -1545,10 +2067,11 @@ class KernelAgentAlgorithm:
                         ),
                     )
                 )
-            except Exception:  # noqa: BLE001 — a lookup outage costs the list
+            except Exception as exc:  # noqa: BLE001 — a lookup outage costs the list
                 log.warning(
-                    "Skill-Disclosure nicht verfuegbar (Lookup-Fehler).",
-                    exc_info=True,
+                    "Skill-Disclosure nicht verfuegbar "
+                    "(error_type=%s).",
+                    type(exc).__name__,
                 )
                 visible = []
             activated = {skill.id for skill in deps.skills}
@@ -1615,7 +2138,9 @@ class KernelAgentAlgorithm:
             visible_to=visible_to,
             workspace_id=context.workspace_id,
             run_id=context.run_id,
+            question=request.question,
             knowledge_collection_ids=knowledge_collection_ids,
+            search_provider=context.providers.search,
             authority_check=context.authority_check,
             on_provider_retry=(
                 lambda notice: context.event_sink(
@@ -1684,11 +2209,12 @@ class KernelAgentAlgorithm:
         from inqtrix.agents.skills_runtime import build_tool_directives_line
 
         message = build_kernel_user_message(
-            request.question,
+            deps.question,
             history_block=history_block,
             artifact_registry=registry,
             last_response_form=last_form,
             prior_evidence_count=prior_evidence_count,
+            memory_briefing=deps.memory_briefing,
             response_form=request.response_form or "",
             autonomy=deps.autonomy,
             depth=deps.depth,
@@ -1740,6 +2266,70 @@ class KernelAgentAlgorithm:
         deps.artifact_registry = registry
         deps.last_response_form = last_form
         deps.prior_evidence_count = prior_evidence_count
+        self._recall_memory_briefing(request, deps)
+
+    def _recall_memory_briefing(
+        self, request: "RunRequest", deps: KernelDeps
+    ) -> None:
+        """Load the non-evidentiary K5 memory briefing (mission parity).
+
+        Same gates as ``_load_memory_briefing`` in the mission engine:
+        service wired, principal present, per-user opt-in (privacy
+        default OFF), provider available and eligible. Every outcome is
+        visible — ``deps.memory_status`` mirrors the mission vocabulary
+        and a recall failure narrates instead of silently disabling.
+        """
+        if deps.memory_recalled:
+            # Once per segment: _hydrate_session_context runs again for
+            # the deep-verify assignment rebuild — a second recall would
+            # double the briefing round-trip for every deep run.
+            return
+        deps.memory_recalled = True
+        service = deps.memory
+        principal = deps.principal
+        if service is None or principal is None or not deps.memory_opt_in:
+            deps.memory_status = "disabled"
+            return
+        status = service.status(principal)
+        if not status.get("available") or not status.get(
+            "principal_eligible"
+        ):
+            deps.memory_status = "disabled"
+            return
+        from inqtrix.agents.memory_ports import AgentMemoryUnavailable
+
+        try:
+            briefing, memory_status = run_coro(
+                service.recall_briefing(
+                    principal=principal,
+                    query=deps.question or "",
+                    limit=5,
+                )
+            )
+        except AgentMemoryUnavailable:
+            briefing, memory_status = "", "unavailable"
+        deps.memory_briefing = briefing
+        deps.memory_status = memory_status
+        if memory_status == "used":
+            log.info("Kernel-Memory-Briefing geladen (K5, nicht zitierbar).")
+        elif memory_status == "unavailable":
+            log.warning(
+                "Kernel-Memory nicht verfuegbar — Lauf ohne "
+                "Langzeit-Kontext."
+            )
+            deps.emit(
+                NARRATION_EVENT,
+                {
+                    "narration_id": "kernel_memory_recall",
+                    "kind": "status",
+                    "phase": "intake",
+                    "text": (
+                        "Langzeit-Memory ist fuer diesen Lauf nicht "
+                        "nutzbar."
+                    ),
+                    "final": True,
+                },
+            )
 
     def _resume_value(self, run_id: str, snapshot: Any) -> Any:
         """Resolve the resume payload from the control store (rule R5)."""
@@ -1893,6 +2483,12 @@ class KernelAgentAlgorithm:
                     interrupt_on=interrupt_config_for(autonomy),
                     checkpointer=self._checkpointer.saver(),
                     max_tool_calls=max_tool_calls,
+                    # Summarization is graph-compile-time; its TRIGGER is
+                    # per-run via the deps ContextVar, so the cache key
+                    # stays model-independent.
+                    context_keep_messages=(
+                        self._platform.kernel_context_keep_messages
+                    ),
                 )
             return self._graphs[key]
 
@@ -1905,6 +2501,467 @@ def _final_answer(messages: list[Any]) -> str:
             if isinstance(content, str) and content.strip():
                 return normalize_agent_markdown(content)
     return ""
+
+
+def configured_kernel_limits(
+    platform: Any, *, depth: str, tier: str
+) -> tuple[int, int, int, int]:
+    """Return base/ceiling pairs from operator settings for one run.
+
+    The ``schnell`` tier remains intentionally non-extendable: extending its
+    step budget would silently turn the advertised seconds-scale route into a
+    normal research run. Users can still accept the explicit partial result
+    or cancel and submit with another tier.
+    """
+    deep = depth == "deep"
+    tool_base = int(
+        platform.kernel_max_tool_calls_deep
+        if deep
+        else platform.kernel_max_tool_calls
+    )
+    tool_ceiling = max(
+        tool_base,
+        int(
+            getattr(
+                platform,
+                (
+                    "kernel_max_tool_calls_extension_ceiling_deep"
+                    if deep
+                    else "kernel_max_tool_calls_extension_ceiling"
+                ),
+                tool_base,
+            )
+        ),
+    )
+    step_base = int(
+        platform.kernel_max_iterations_deep
+        if deep
+        else platform.kernel_max_iterations
+    )
+    step_ceiling = max(
+        step_base,
+        int(
+            getattr(
+                platform,
+                (
+                    "kernel_max_iterations_extension_ceiling_deep"
+                    if deep
+                    else "kernel_max_iterations_extension_ceiling"
+                ),
+                step_base,
+            )
+        ),
+    )
+    if tier == "schnell":
+        step_base = min(
+            step_base,
+            _ANSWER_TURN_SUPERSTEPS
+            + _SUPERSTEPS_PER_TOOL_TURN * _SCHNELL_TOOL_TURNS,
+        )
+        step_ceiling = step_base
+        tool_ceiling = tool_base
+    return tool_base, tool_ceiling, step_base, step_ceiling
+
+
+def _partial_limit_answer(
+    gate: AgentLimitGate, references: list[dict[str, Any]]
+) -> str:
+    """Build a non-generative, explicitly incomplete answer receipt.
+
+    A limit choice must not trigger another unbounded model call. The receipt
+    therefore reports only persisted evidence metadata; it makes no new claim
+    and points users to the complete evidence ledger for inspection.
+    """
+    limit_name = (
+        "Werkzeuglimit" if gate.kind == "tool_calls" else "Schrittlimit"
+    )
+    lines = [
+        "## Teilstand – ausdrücklich übernommen",
+        "",
+        (
+            f"Der Lauf wurde auf deine Entscheidung als Teilstand beendet, "
+            f"nachdem das konfigurierte {limit_name} erreicht wurde. "
+            "Es wurde keine vollständige Synthese vorgetäuscht."
+        ),
+        "",
+        "### Gesicherte Belegbasis",
+        "",
+    ]
+    if not references:
+        lines.append(
+            "Bis zu diesem Punkt wurde noch keine zitierfähige Quelle gespeichert."
+        )
+    else:
+        for reference in references[:30]:
+            label = str(reference.get("label") or "Quelle").strip()
+            title = str(
+                reference.get("title")
+                or reference.get("document_title")
+                or reference.get("url")
+                or "Quelle ohne Titel"
+            )
+            title = " ".join(title.split()).replace("[", "\\[").replace(
+                "]", "\\]"
+            )
+            lines.append(f"- [{label}] {title}")
+        omitted = len(references) - 30
+        if omitted > 0:
+            lines.append(
+                f"- Weitere {omitted} Quellen bleiben im Belegprotokoll erhalten."
+            )
+    lines.extend(
+        [
+            "",
+            "### Offene Lücke",
+            "",
+            (
+                "Bewertung, Widerspruchsprüfung und finale Antwort wurden nicht "
+                "vollständig abgeschlossen. Für eine belastbare Endantwort muss "
+                "der Auftrag mit einem ausreichend hohen, vom Betreiber erlaubten "
+                "Limit fortgesetzt oder neu eingegrenzt werden."
+            ),
+        ]
+    )
+    return normalize_agent_markdown("\n".join(lines))
+
+
+_CONTEXT_TRIGGER_FLOOR_TOKENS = 128_000
+"""Auto-trigger floor AND the no-card fallback: compacting earlier than
+128k would churn the prompt cache for runs that fit comfortably, and a
+model without a card gets a conservative threshold instead of the
+deepagents 170k default that the kernel's ceilings never reach."""
+
+
+def resolve_context_trigger_tokens(
+    platform: Any, model_id: str | None
+) -> int:
+    """Per-run compaction threshold: explicit pin > model card > floor.
+
+    Pure resolver (no I/O): an explicit
+    ``kernel_context_trigger_tokens`` pin wins verbatim; otherwise the
+    resolved model's card yields ``context_window_tokens x fraction``
+    bounded below by the floor; an unknown model uses the floor.
+    """
+    pinned = int(getattr(platform, "kernel_context_trigger_tokens", 0) or 0)
+    if pinned > 0:
+        return pinned
+    fraction = float(
+        getattr(platform, "kernel_context_trigger_fraction", 0.75) or 0.75
+    )
+    from inqtrix.model_cards import resolve_model_card
+
+    card = resolve_model_card(model_id) if model_id else None
+    window = int(getattr(card, "context_window_tokens", 0) or 0)
+    if window <= 0:
+        return _CONTEXT_TRIGGER_FLOOR_TOKENS
+    if window <= _CONTEXT_TRIGGER_FLOOR_TOKENS:
+        # A floor at/above the model's whole window would mean "never
+        # compact before provider overflow" — small-window models use the
+        # plain fraction instead.
+        return int(window * fraction)
+    return max(_CONTEXT_TRIGGER_FLOOR_TOKENS, int(window * fraction))
+
+
+def _stage_kernel_memory(deps: KernelDeps, answer: str) -> None:
+    """Stage candidate-only long-term memories after a successful run.
+
+    Mission parity (``_stage_memory_candidates``): candidates only —
+    nothing is written to memory without the user's later review. The
+    kernel's substrate is its final answer (it has no memo); the shared
+    ``run_memory_reflection`` + ``stage_candidates`` path is reused, so
+    there is exactly ONE reflection/staging implementation. Optional by
+    contract: every failure logs and returns, it can never fail a run
+    that already has its answer.
+    """
+    service = deps.memory
+    principal = deps.principal
+    if (
+        service is None
+        or principal is None
+        or not deps.memory_opt_in
+        or not answer.strip()
+    ):
+        return
+    status = service.status(principal)
+    if (
+        status.get("provider") == "none"
+        or status.get("mode") == "off"
+        or not status.get("principal_eligible")
+    ):
+        return
+    from inqtrix.agents import memory_reflection
+    from inqtrix.agents.phase_models import MemoryReflection
+
+    provider_models = getattr(deps.llm, "models", None)
+    model: str | None = None
+    effort: str | None = None
+    if provider_models is not None:
+        desc = describe_resolution(
+            "agent_memory_reflection",
+            provider_models,
+            "",
+            requested_model="",
+            requested_effort="",
+        )
+        model = desc.get("model") or None
+        effort = desc.get("effort") or None
+    try:
+        outcome = memory_reflection.run_memory_reflection(
+            deps.llm,
+            question=deps.question,
+            memo_markdown=answer,
+            critic_digest="",
+            task_digest="",
+            model=model,
+            reasoning_effort=effort,
+            timeout=deps.timeout,
+        )
+    except Exception as exc:  # noqa: BLE001 - candidate staging is optional
+        log.warning(
+            "Kernel-Memory-Reflection fehlgeschlagen (error_type=%s).",
+            type(exc).__name__,
+        )
+        # Mission parity: the failure is an EVENT, not just a log line
+        # (_stage_memory_candidates emits the same activity kind).
+        deps.emit(
+            "inqtrix.agent.activity",
+            {
+                "kind": "memory_unavailable",
+                "label": "Memory unavailable",
+                "detail": "Memory-Kandidaten konnten nicht erzeugt werden.",
+            },
+        )
+        return
+    deps.book_usage(
+        outcome.usage.get("prompt_tokens", 0),
+        outcome.usage.get("completion_tokens", 0),
+    )
+    reflection = outcome.value
+    if not isinstance(reflection, MemoryReflection):
+        return
+    if not reflection.candidates:
+        return
+    try:
+        staged = run_coro(
+            service.stage_candidates(
+                principal=principal,
+                candidates=[
+                    candidate.model_dump()
+                    for candidate in reflection.candidates
+                ],
+                source_run_id=deps.run_id,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - candidate staging is optional
+        log.warning(
+            "Kernel-Memory-Staging fehlgeschlagen (error_type=%s).",
+            type(exc).__name__,
+        )
+        return
+    log.info(
+        "Kernel-Memory: %d Kandidaten zur Pruefung vorgemerkt.",
+        len(staged) if isinstance(staged, list) else 0,
+    )
+
+
+_INLINE_CITATION_LABEL = re.compile(r"\[([KW]\d+)\]")
+_INLINE_MARKDOWN_URL = re.compile(r"\[[^\]\n]+\]\((https?://[^\s)]+)\)")
+_UNRESOLVED_CITATION_MARKER = re.compile(
+    r"\[(?:unbelegt|unsupported):\s*[KW]\d+\]",
+    re.IGNORECASE,
+)
+_UNRESOLVED_HARD_CLAIM_MARKER = re.compile(
+    r"\[(?:unbelegt:\s*harte\s+aussage|unsupported:\s*hard\s+claim)\]",
+    re.IGNORECASE,
+)
+
+
+def _result_references(
+    answer: str, ledger: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """References the final answer surfaces: cited-only when it cites.
+
+    An answer that carries ``[K#]/[W#]`` labels lists EXACTLY the cited
+    subset (F5: no read-everything reference dumps). An answer without
+    citation labels keeps the full trusted ledger — those sources were
+    the basis of the work, and an empty list would hide them (quick and
+    conversational answers rarely cite inline). One helper for both the
+    answer artifact and ``result_state.report_references`` so the run
+    result and the rendered artifact can never disagree.  Any presence of
+    unknown inline labels disables the uncited-answer basis fallback: mixed
+    answers retain only their known cited subset, and unknown-only answers
+    surface no falsely attributed references.
+    """
+    from inqtrix.agents.report_quality import (
+        cited_references,
+        unknown_citation_labels,
+    )
+
+    unknown = unknown_citation_labels(answer, ledger)
+    unresolved_marker = bool(
+        _UNRESOLVED_CITATION_MARKER.search(answer)
+        or _UNRESOLVED_HARD_CLAIM_MARKER.search(answer)
+    )
+    if unknown:
+        log.warning(
+            "Antwort zitiert unbekannte Belege-Labels "
+            "(unknown_count=%d).",
+            len(unknown),
+        )
+    cited = cited_references(answer, ledger)
+    if unknown or unresolved_marker:
+        return cited
+    linked_urls = {
+        normalize_url(match.group(1))
+        for match in _INLINE_MARKDOWN_URL.finditer(answer)
+        if normalize_url(match.group(1))
+    }
+    if linked_urls:
+        return [
+            dict(item)
+            for item in ledger
+            if normalize_url(str(item.get("url") or "")) in linked_urls
+        ]
+    return cited if cited else [dict(item) for item in ledger]
+
+
+def _mark_unresolved_citation_labels(
+    answer: str,
+    unknown: list[str],
+    *,
+    language: str,
+) -> str:
+    """Replace unresolved citation syntax with an explicit visible marker."""
+    unresolved = set(unknown)
+    marker = "unbelegt" if language == "de" else "unsupported"
+    return _INLINE_CITATION_LABEL.sub(
+        lambda match: (
+            f"[{marker}: {match.group(1)}]"
+            if match.group(1) in unresolved
+            else match.group(0)
+        ),
+        answer,
+    )
+
+
+def _validate_kernel_answer_citations(
+    deps: KernelDeps,
+    answer: str,
+    ledger: list[dict[str, Any]],
+) -> str:
+    """Boundedly repair final chat citations or mark unresolved labels.
+
+    Canvas writes return a citation error to the bounded kernel loop, giving
+    the model one chance to correct the tool call.  A tool-free final chat
+    answer has no next loop turn, so it uses the shared synthesis repair once.
+    If that call fails or still invents labels, only the unsupported citation
+    syntax is replaced with a visible ``unbelegt`` marker; valid labels and
+    prose remain unchanged.
+    """
+    from inqtrix.agents.prompts import agent_answer_system_prompt
+    from inqtrix.agents.report_quality import (
+        CitationValidationFailed,
+        cited_references,
+        unknown_citation_labels,
+        validate_and_repair_citations,
+    )
+    from inqtrix.exceptions import AgentCancelled
+    from inqtrix.execution_authority import AuthorizationRevoked
+
+    unknown = unknown_citation_labels(answer, ledger)
+    if not unknown:
+        return answer
+    language = detect_ui_language(deps.question)
+
+    deps.check_abort()
+    known_labels = [
+        str(reference.get("label") or "")
+        for reference in ledger
+        if str(reference.get("label") or "")
+    ]
+    try:
+        repaired, usage = validate_and_repair_citations(
+            deps.llm,
+            markdown=answer,
+            known_labels=known_labels,
+            usage={},
+            system=agent_answer_system_prompt(),
+            model=deps.model,
+            reasoning_effort=deps.reasoning_effort,
+            timeout=deps.timeout,
+        )
+    except CitationValidationFailed as exc:
+        deps.book_usage(
+            exc.usage.get("prompt_tokens", 0),
+            exc.usage.get("completion_tokens", 0),
+        )
+        remaining = unknown_citation_labels(answer, ledger)
+        marked = _mark_unresolved_citation_labels(
+            answer,
+            remaining,
+            language=language,
+        )
+        deps.emit(
+            "inqtrix.agent.citation.validation",
+            {
+                "status": "degraded",
+                "unknown_labels": remaining,
+                "resolution": "marked_unsubstantiated",
+            },
+        )
+        return marked
+    except (AgentCancelled, AuthorizationRevoked):
+        raise
+    except Exception as exc:  # noqa: BLE001 — deterministic safe degradation
+        log.warning(
+            "Bounded citation repair failed (error_type=%s); unresolved "
+            "labels are marked.",
+            type(exc).__name__,
+        )
+        remaining = unknown_citation_labels(answer, ledger)
+        marked = _mark_unresolved_citation_labels(
+            answer,
+            remaining,
+            language=language,
+        )
+        deps.emit(
+            "inqtrix.agent.citation.validation",
+            {
+                "status": "degraded",
+                "unknown_labels": remaining,
+                "resolution": "marked_unsubstantiated",
+            },
+        )
+        return marked
+
+    deps.book_usage(
+        usage.get("prompt_tokens", 0),
+        usage.get("completion_tokens", 0),
+    )
+    deps.emit(
+        "inqtrix.agent.citation.validation",
+        {
+            "status": "repaired",
+            "unknown_labels": unknown,
+            "resolution": "bounded_repair",
+        },
+    )
+    if not cited_references(repaired, ledger):
+        # A valid repair may remove an unsupported label when no honest
+        # replacement exists. Preserve that fact in the rendered answer so
+        # the reference projector cannot mistake it for an originally
+        # citation-free answer and attach the whole ledger.
+        marker = "unbelegt" if language == "de" else "unsupported"
+        markers = ", ".join(f"[{marker}: {label}]" for label in unknown)
+        notice = (
+            f"> Belegstatus: Nicht auflösbare Zitationslabels wurden "
+            f"entfernt: {markers}."
+            if language == "de"
+            else f"> Evidence status: Unresolvable citation labels were "
+            f"removed: {markers}."
+        )
+        repaired = normalize_agent_markdown(f"{repaired}\n\n{notice}")
+    return repaired
 
 
 def _kernel_consent_reason(deps: KernelDeps) -> str:
@@ -1927,15 +2984,12 @@ def _observe_update(
 ) -> list[Any]:
     """Emit follow-the-agent events from one stream update; return interrupts.
 
-    THE one place the raw update stream is interpreted: intent prose ->
-    narration (deterministic content-hash id, safe under replay), tool
-    calls -> started (redacted args preview), tool results -> finished,
-    todo state -> todo.updated. Events are signals (R1) — clients
-    refetch, so a replayed duplicate is harmless.
+    THE one place the raw update stream is interpreted: tool identity ->
+    deterministic localized narration and started event (redacted args
+    preview), tool results -> finished, todo state -> todo.updated. Model
+    prose never becomes narration. Events are signals (R1) — clients refetch,
+    so a replayed duplicate is harmless.
     """
-    import hashlib
-    import json
-
     if "__interrupt__" in update:
         return list(update["__interrupt__"])
     for delta in update.values():
@@ -1944,23 +2998,75 @@ def _observe_update(
         for message in delta.get("messages") or []:
             role = getattr(message, "type", "")
             if role == "ai":
-                text = getattr(message, "content", "")
-                if isinstance(text, str) and text.strip():
+                tool_calls = getattr(message, "tool_calls", None) or []
+                message_id = str(getattr(message, "id", "") or "")
+                invocation_ids = [
+                    _tool_call_invocation_id(message_id, call, index)
+                    for index, call in enumerate(tool_calls)
+                    if isinstance(call, dict)
+                ]
+                has_new_invocation = any(
+                    invocation_id not in deps.emitted_tool_start_ids
+                    for invocation_id in invocation_ids
+                )
+                # Provider prose accompanying a tool call is untrusted answer
+                # material, not process state. Narration is derived from the
+                # accepted capability identity; tool-free AI content travels
+                # exclusively through the answer publication/output channel.
+                if tool_calls and has_new_invocation:
+                    narration = _tool_intent_narration(
+                        tool_calls,
+                        language=detect_ui_language(deps.question),
+                    )
+                    narration_identity = {
+                        "message_id": message_id,
+                        "tool_calls": [
+                            {
+                                "id": str(call.get("id", "") or ""),
+                                "name": str(call.get("name", "") or ""),
+                            }
+                            for call in tool_calls
+                            if isinstance(call, dict)
+                        ],
+                    }
                     digest = hashlib.sha1(
-                        text.encode("utf-8")
+                        json.dumps(
+                            narration_identity,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
                     ).hexdigest()[:8]
                     deps.emit(
                         NARRATION_EVENT,
                         {
                             "narration_id": f"kernel_{digest}",
                             "kind": "intent",
-                            "text": text.strip(),
+                            "text": narration,
                             "phase": "execution",
                         },
                     )
-                for call in getattr(message, "tool_calls", None) or []:
-                    preview = json.dumps(
-                        call.get("args", {}), ensure_ascii=False
+                for index, call in enumerate(tool_calls):
+                    if not isinstance(call, dict):
+                        continue
+                    invocation_id = _tool_call_invocation_id(
+                        message_id, call, index
+                    )
+                    if invocation_id in deps.emitted_tool_start_ids:
+                        continue
+                    deps.emitted_tool_start_ids.add(invocation_id)
+                    args = call.get("args", {})
+                    args = args if isinstance(args, dict) else {}
+                    query = args.get("query", "")
+                    # ONE preview form across both lanes (the quick-web
+                    # lane emits the bare query): a query-only call
+                    # previews as plain text, anything else as JSON.
+                    preview = (
+                        query
+                        if isinstance(query, str)
+                        and query.strip()
+                        and len(args) == 1
+                        else json.dumps(args, ensure_ascii=False)
                     )
                     if len(preview) > _ARGS_PREVIEW_LIMIT:
                         preview = (
@@ -1970,19 +3076,27 @@ def _observe_update(
                         TOOL_STARTED_EVENT,
                         {
                             "tool": str(call.get("name", "")),
-                            "tool_call_id": str(call.get("id", "")),
+                            "tool_call_id": invocation_id,
+                            "invocation_id": invocation_id,
                             "args_preview": preview,
                         },
                     )
             elif role == "tool":
                 content = getattr(message, "content", "")
+                invocation_id = str(
+                    getattr(message, "tool_call_id", "") or ""
+                )
+                if not invocation_id:
+                    invocation_id = str(getattr(message, "id", "") or "")
+                if invocation_id in deps.emitted_tool_finish_ids:
+                    continue
+                deps.emitted_tool_finish_ids.add(invocation_id)
                 deps.emit(
                     TOOL_FINISHED_EVENT,
                     {
                         "tool": str(getattr(message, "name", "") or ""),
-                        "tool_call_id": str(
-                            getattr(message, "tool_call_id", "") or ""
-                        ),
+                        "tool_call_id": invocation_id,
+                        "invocation_id": invocation_id,
                         "status": str(
                             getattr(message, "status", "") or "success"
                         ),
@@ -2007,6 +3121,33 @@ def _observe_update(
                 },
             )
     return []
+
+
+def _tool_call_invocation_id(
+    message_id: str,
+    call: dict[str, Any],
+    ordinal: int,
+) -> str:
+    """Return the provider id or a deterministic fallback invocation id."""
+    explicit = str(call.get("id", "") or "")
+    if explicit:
+        return explicit
+    identity = {
+        "args": call.get("args", {}),
+        "message_id": message_id,
+        "name": str(call.get("name", "") or ""),
+        "ordinal": ordinal,
+    }
+    digest = hashlib.sha1(
+        json.dumps(
+            identity,
+            default=str,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+    return f"call_{digest}"
 
 
 def _tool_approval_id(run_id: str, interrupt_id: str) -> str:
@@ -2111,8 +3252,77 @@ def _checkpointed_usage(snapshot: Any) -> dict[str, int]:
     return totals
 
 
+def _checkpointed_steps(snapshot: Any) -> int:
+    """Return the cumulative committed LangGraph super-step coordinate."""
+    if snapshot is None:
+        return 0
+    metadata = getattr(snapshot, "metadata", None) or {}
+    try:
+        # LangGraph starts at -1 before the first committed graph step.
+        return max(0, int(metadata.get("step", -1)) + 1)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _checkpointed_tool_call_count(snapshot: Any) -> int:
+    """Count all model-requested calls from checkpointed AI messages."""
+    if snapshot is None or not snapshot.values:
+        return 0
+    total = 0
+    for message in snapshot.values.get("messages") or []:
+        if isinstance(message, dict):
+            calls = message.get("tool_calls") or []
+            role = message.get("role") or message.get("type")
+        else:
+            calls = getattr(message, "tool_calls", None) or []
+            role = getattr(message, "type", "")
+        if role in {"ai", "assistant"}:
+            total += len(calls)
+    return total
+
+
+def _checkpointed_tool_event_ids(
+    snapshot: Any,
+) -> tuple[set[str], set[str]]:
+    """Reconstruct durable logical tool events from checkpointed messages."""
+    starts: set[str] = set()
+    finishes: set[str] = set()
+    if snapshot is None or not snapshot.values:
+        return starts, finishes
+    for message in snapshot.values.get("messages") or []:
+        if isinstance(message, dict):
+            role = str(message.get("role") or message.get("type") or "")
+            message_id = str(message.get("id", "") or "")
+            calls = message.get("tool_calls") or []
+            tool_call_id = str(message.get("tool_call_id", "") or "")
+        else:
+            role = str(getattr(message, "type", "") or "")
+            message_id = str(getattr(message, "id", "") or "")
+            calls = getattr(message, "tool_calls", None) or []
+            tool_call_id = str(
+                getattr(message, "tool_call_id", "") or ""
+            )
+        if role in {"ai", "assistant"}:
+            for index, call in enumerate(calls):
+                if isinstance(call, dict):
+                    starts.add(
+                        _tool_call_invocation_id(message_id, call, index)
+                    )
+        elif role == "tool":
+            finishes.add(tool_call_id or message_id)
+    finishes.discard("")
+    return starts, finishes
+
+
 def _checkpointed_tool_use_counts(snapshot: Any) -> dict[str, int]:
-    """Rehydrate cumulative source-tool usage from persisted tool messages."""
+    """Rehydrate cumulative source-tool usage from persisted tool messages.
+
+    SUCCESS-only, mirroring the live counter (which increments after a
+    successful invoke): failed calls persist as visible failure texts
+    (``SOURCE_TOOL_FAILURE_PREFIXES``) or error-status ToolMessages and
+    must not consume budgets or arm the sufficiency judge on resume.
+    """
+    from inqtrix.agents.kernel.tools import SOURCE_TOOL_FAILURE_PREFIXES
     from inqtrix.agents.source_policy import (
         KNOWLEDGE_TOOL_NAMES,
         WEB_TOOL_NAMES,
@@ -2123,6 +3333,11 @@ def _checkpointed_tool_use_counts(snapshot: Any) -> dict[str, int]:
         return counts
     for message in snapshot.values.get("messages") or []:
         if getattr(message, "type", "") != "tool":
+            continue
+        if str(getattr(message, "status", "") or "") == "error":
+            continue
+        content = str(getattr(message, "content", "") or "")
+        if content.startswith(SOURCE_TOOL_FAILURE_PREFIXES):
             continue
         name = str(getattr(message, "name", "") or "")
         if name in WEB_TOOL_NAMES:

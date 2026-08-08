@@ -13,6 +13,7 @@ from inqtrix.storage.editor_orm import editor_documents
 from inqtrix.storage.identity_orm import resource_shares
 from inqtrix.storage.prompt_template_orm import prompt_templates
 from inqtrix.storage.resource_access import (
+    lock_active_users,
     lock_resource_access,
     listed_resource_access,
     visible_resource_select,
@@ -110,6 +111,26 @@ class _AccessSession:
     async def execute(self, statement: Any) -> _AccessResult:
         self.statements.append(statement)
         return next(self._results)
+
+
+@pytest.mark.asyncio
+async def test_active_user_authorization_uses_fk_compatible_share_locks() -> None:
+    session = _AccessSession()
+    session._results = iter((_AccessResult(scalars=(ACTOR_ID,)),))
+
+    assert await lock_active_users(
+        cast(Any, session),
+        tenant_id="default",
+        user_ids=(ACTOR_ID,),
+    )
+    sql = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "FOR SHARE" in sql
+    assert "FOR UPDATE" not in sql
 
 
 @pytest.mark.asyncio

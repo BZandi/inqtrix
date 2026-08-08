@@ -55,6 +55,13 @@ account_preferences = Table(
         nullable=False,
         server_default=text("false"),
     ),
+    # Preferred model TIER per surface, deliberately one column each: an agent
+    # run fans out over several thinking nodes while a chat answer is a single
+    # call, so a chat preference must never silently raise agent spend. A tier
+    # rather than a model id, because this row follows the user across stacks
+    # where a concrete id may not exist. ``''`` means no preference.
+    Column("chat_model_tier", Text, nullable=False, server_default=text("''")),
+    Column("agent_model_tier", Text, nullable=False, server_default=text("''")),
     Column("updated_at", Float, nullable=False),
 )
 """One user's account-level UI preferences, following

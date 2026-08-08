@@ -70,6 +70,7 @@ export class CollaborationAuthenticator {
         expiresAt: introspected.expiresAt,
         generation: introspected.generation,
         leaseId: introspected.leaseId,
+        policyCursor: introspected.policyCursor,
         protocolVersion: introspected.protocolVersion,
         schemaHash: introspected.schemaHash,
         schemaVersion: introspected.schemaVersion,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -280,7 +281,7 @@ def test_perplexity_agent_empty_response_sets_notice() -> None:
     assert result.answer == ""
     assert result.sources == []
     notice = search.consume_nonfatal_notice()
-    assert notice is not None and "lieferte keine Textantwort" in notice
+    assert notice is not None and "weder Antworttext noch Quellen" in notice
 
 
 def test_perplexity_agent_rate_limit_escalates() -> None:
@@ -298,7 +299,32 @@ def test_perplexity_agent_api_error_degrades_to_empty() -> None:
     assert result.answer == ""
     assert result.sources == []
     notice = search.consume_nonfatal_notice()
-    assert notice is not None and "Perplexity-Suche fehlgeschlagen" in notice
+    assert notice is not None and "Perplexity-WebSearch fehlgeschlagen" in notice
+
+
+def test_perplexity_failure_does_not_copy_query_or_provider_error_to_logs(
+    caplog,
+) -> None:
+    query_secret = "private-query-sentinel-92741"
+    provider_secret = "provider-error-sentinel-63820"
+    req = httpx.Request("POST", "https://api.perplexity.ai/responses")
+    search, _ = _agent_search(
+        side_effect=APIError(provider_secret, request=req, body=None)
+    )
+    logger = logging.getLogger("inqtrix")
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.ERROR, logger="inqtrix"):
+            search.search(query_secret)
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    notice = search.consume_nonfatal_notice()
+    assert query_secret not in caplog.text
+    assert provider_secret not in caplog.text
+    assert notice is not None
+    assert query_secret not in notice
+    assert provider_secret not in notice
 
 
 def test_perplexity_agent_timeout_keeps_provider_timeout_notice() -> None:

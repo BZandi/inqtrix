@@ -55,6 +55,31 @@ class QuotaSubject:
 
 
 @dataclass(frozen=True)
+class StockLifecycleState:
+    """Canonical contribution of one resource to a stock counter.
+
+    ``amount`` is the resource's current contribution, while ``tombstoned``
+    permanently fences the lifecycle key from being charged again.  A new
+    physical resource must therefore receive a new lifecycle key.
+    """
+
+    stock_key: str
+    subject: QuotaSubject
+    dimension: QuotaDimension
+    amount: int
+    tombstoned: bool
+
+
+def file_stock_key(file_id: str) -> str:
+    """Return the stable stock identity for one physical file lifecycle."""
+
+    value = str(file_id).strip()
+    if not value:
+        raise ValueError("file stock identity requires a non-empty file id")
+    return f"file:{value}"
+
+
+@dataclass(frozen=True)
 class DimensionUsage:
     """Resolved usage for one dimension (the UI/enforcement view).
 
@@ -99,13 +124,22 @@ class QuotaExceeded(RuntimeError):
         used: int,
         reset_at: float,
     ) -> None:
-        super().__init__(
-            f"quota exceeded for {dimension.value}: {used}/{limit}"
-        )
+        super().__init__(f"quota exceeded for {dimension.value}: {used}/{limit}")
         self.dimension = dimension
         self.limit = limit
         self.used = used
         self.reset_at = reset_at
+
+
+class QuotaAdjustmentConflict(RuntimeError):
+    """An idempotency key was replayed with contradictory accounting facts."""
+
+    def __init__(self, adjustment_id: str) -> None:
+        self.adjustment_id = adjustment_id
+        super().__init__(
+            "quota adjustment id contradicts its original subject, dimension, "
+            "or amount"
+        )
 
 
 def consumed_tokens(usage: dict | None) -> int:
@@ -129,9 +163,12 @@ def estimate_tokens(text: str) -> int:
     Document ingestion embeds chunks without a per-call usage object, so
     its embedding-token spend is approximated with the standard
     ~4-chars-per-token heuristic. Every LLM surface (chat, runs, editor,
-    text) records the provider's REAL usage instead — embeddings are the
-    one flow dimension that genuinely cannot do better. Rounds up so
-    non-empty text always costs at least one token.
+    text) records the provider's REAL usage instead. Embeddings estimate
+    because the ``EmbeddingProvider`` contract returns vectors only and
+    discards any provider-side usage object, not because the numbers are
+    unobtainable in principle. The usage ledger books the same estimate
+    over the same texts, so both accountings agree by construction.
+    Rounds up so non-empty text always costs at least one token.
     """
     return -(-len(text) // 4) if text else 0
 
@@ -144,9 +181,7 @@ def current_period_start(now: float) -> float:
     and is overwritten on the next write, so no scheduled job is needed.
     """
     moment = _dt.datetime.fromtimestamp(now, tz=_dt.timezone.utc)
-    start = moment.replace(
-        day=1, hour=0, minute=0, second=0, microsecond=0
-    )
+    start = moment.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     return start.timestamp()
 
 

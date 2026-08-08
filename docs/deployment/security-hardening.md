@@ -16,6 +16,8 @@ Set both `INQTRIX_SERVER_TLS_KEYFILE` and `INQTRIX_SERVER_TLS_CERTFILE` to local
 
 The values are passed to `uvicorn.run(..., ssl_keyfile=..., ssl_certfile=...)`. For production, prefer terminating TLS at a reverse proxy (nginx, Traefik, Azure Application Gateway) whenever possible — built-in TLS exists for small self-hosted setups where a proxy would be overkill.
 
+Editor guest links require an HTTPS `INQTRIX_PUBLIC_BASE_URL` at startup (guest tokens and passwords travel with every request). For plain-HTTP local development only, `INQTRIX_EDITOR_GUEST_LINKS_ALLOW_INSECURE_HTTP=true` converts the hard startup failure into a loud startup WARNING and drops the `Secure` flag from the guest cookies so browsers accept them over http. The switch never covers production, and the Level-3 release verification of guest access keeps running against HTTPS regardless.
+
 ### Bearer API key
 
 Set `INQTRIX_SERVER_API_KEY` to a random string. With `INQTRIX_AUTH_MODE` unset, a non-empty key selects the `apikey` mode (the inference rule in [Authentication modes](auth-modes.md)). The server then enforces the Bearer gate on every principal-gated route — `/v1/chat/completions`, `/v1/text/improvements`, `/v1/editor/*`, `/v1/runs*`, `/v1/test/run`, and, when their feature gates register them, `/v1/files*`, `/v1/knowledge/*`, and `/v1/sources/*`:
@@ -40,8 +42,9 @@ INQTRIX_SERVER_CORS_ORIGINS=https://ui.example.com,https://admin.example.com
 ### Editor collaboration WebSocket
 
 The optional editor transport has a separate, fail-closed boundary. Browsers
-connect only to same-origin `/collaboration`; Vite, nginx, or the Python dist
-launcher forwards it to FastAPI, which validates `Origin` and relays binary
+connect only to same-origin `/collaboration`; the Vite development proxy or
+selected production web adapter (Python by default, nginx only when explicitly
+selected) forwards it to FastAPI, which validates `Origin` and relays binary
 frames to private Node. `INQTRIX_COLLABORATION_ALLOWED_ORIGINS` adds explicit
 origins when TLS termination or a trusted external frontend makes derived
 same-origin insufficient. CORS configuration does not replace this WebSocket
@@ -156,13 +159,22 @@ there is no dual-read, dual-write, or mixed-version compatibility window. API,
 worker, frontend, and migrations must move together during a maintenance
 window.
 
+Install the matching source tree before running host-side migration commands:
+use `uv sync --extra dev`, or create and activate a normal virtual environment
+and run `python -m pip install -e ".[dev]"`. The commands below show both
+execution forms.
+
 1. Stop every API and worker process so no old binary can write during the
    cutover.
 2. Take and verify a restorable database backup.
 3. Run the read-only audit:
 
    ```bash
+   # uv
    uv run inqtrix-migrate --preflight-v02
+
+   # standard Python/pip
+   python -m inqtrix.storage.migrate --preflight-v02
    ```
 
    It requires the expected pre-v0.2 schema and reports unmappable or
@@ -174,7 +186,13 @@ window.
    non-terminal work explicitly:
 
    ```bash
+   # uv
    uv run inqtrix-migrate \
+     --terminalize-v02-work \
+     --confirm-services-stopped
+
+   # standard Python/pip
+   python -m inqtrix.storage.migrate \
      --terminalize-v02-work \
      --confirm-services-stopped
    ```
@@ -186,7 +204,8 @@ window.
    flag is an operator assertion, not a process-killing mechanism; do not use
    it while an API or worker could still be inside an external call. Repeat the
    read-only preflight afterwards and require `ready: true`.
-5. Apply migrations 0045 through 0047 with `uv run inqtrix-migrate`.
+5. Apply migrations 0045 through 0047 with `uv run inqtrix-migrate`, or
+   `python -m inqtrix.storage.migrate` in the pip-installed environment.
 6. Deploy the matching API, worker, and frontend versions together. Do not
    bring up an old worker against the new schema.
 7. Wait for startup workspace-share reconciliation to finish before declaring

@@ -9,10 +9,13 @@ import {
   buildInspectorChanges,
   consumeCollaborationPublicationFocus,
   isCollaborationPublicationFocusCurrent,
+  localizeEditorCollaborationNotice,
   pendingCollaborationPublicationFocusForDocument,
   registerCollaborationPublicationFocus,
   effectiveEditorWriteMode,
   filterInspectorChanges,
+  editorDocumentRowKind,
+  editorDocumentRailCapabilities,
   isOwnedEditorDocument,
   participantPreview,
   partitionEditorDocumentsByAccess,
@@ -35,7 +38,7 @@ const changes: InspectorChange[] = [
     position: 2,
     proposedText: 'new',
     suggestionIds: ['suggestion-a'],
-    type: 'modification',
+    type: 'replacement',
   },
   {
     author: participants[1]!,
@@ -80,7 +83,7 @@ describe('inspector collaboration model', () => {
       position: 9,
       proposedText: 'after',
       suggestionIds: ['delete-a', 'insert-a'],
-      type: 'modification',
+      type: 'replacement',
     }])
   })
 
@@ -162,6 +165,34 @@ describe('inspector collaboration model', () => {
       participants: [],
       synced: false,
     }).kind).toBe('update_required')
+    // A rejected origin must not borrow the update label: the remedy is an
+    // address, not a client version.
+    expect(buildEditorCollaborationStatusModel({
+      access: 'edit',
+      active: true,
+      canEdit: false,
+      connectionStatus: 'origin_rejected',
+      durabilityStatus: 'idle',
+      participants: [],
+      synced: false,
+    }).kind).toBe('origin_rejected')
+  })
+
+  it('translates stable collaboration recovery notices without rewriting English', () => {
+    const notice =
+      'The collaboration lease could not be refreshed; reconnecting read-only.'
+    expect(localizeEditorCollaborationNotice(notice, 'de')).toBe(
+      'Die Verbindung zum Kollaborationsdienst ist unterbrochen. Inqtrix verbindet sich automatisch erneut.',
+    )
+    expect(localizeEditorCollaborationNotice(notice, 'en')).toBe(notice)
+    expect(localizeEditorCollaborationNotice('diagnostic detail', 'de'))
+      .toBe('diagnostic detail')
+    expect(localizeEditorCollaborationNotice(
+      'Collaboration access changed; revalidating read-only.',
+      'de',
+    )).toBe(
+      'Der Kollaborationszugriff hat sich geändert. Inqtrix prüft die aktuelle Berechtigung erneut.',
+    )
   })
 
   it('holds initiating-user publication focus until the patch arrives, then consumes it once', () => {
@@ -194,8 +225,11 @@ describe('inspector collaboration model', () => {
 
   it('locks write mode to the granted permission', () => {
     expect(effectiveEditorWriteMode('edit', true, 'suggest')).toBe('suggest')
+    expect(effectiveEditorWriteMode('edit', true, 'comment')).toBe('comment')
     expect(effectiveEditorWriteMode('suggest', true, 'edit')).toBe('suggest')
+    expect(effectiveEditorWriteMode('suggest', true, 'comment')).toBe('comment')
     expect(effectiveEditorWriteMode('view', false, 'edit')).toBe('view')
+    expect(effectiveEditorWriteMode('view', false, 'comment')).toBe('view')
   })
 
   it('keeps shared documents outside the owner hierarchy', () => {
@@ -217,6 +251,45 @@ describe('inspector collaboration model', () => {
     })
     expect(isOwnedEditorDocument(owned)).toBe(true)
     expect(isOwnedEditorDocument(shared)).toBe(false)
+  })
+
+  it('classifies a row by whether a details page exists for it', () => {
+    // Private: no details page — the row must not offer a details action.
+    expect(editorDocumentRowKind({ contentMode: 'markdown' })).toBe('owned-private')
+    // Shared out by me: details (access, activity) exist.
+    expect(editorDocumentRowKind({ contentMode: 'collaboration' })).toBe('owned-shared')
+    // Shared with me: details exist and the owner is someone else.
+    expect(editorDocumentRowKind({ access: { mode: 'shared' }, contentMode: 'collaboration' })).toBe('shared-with-me')
+    expect(editorDocumentRowKind({ access: { mode: 'shared' } })).toBe('shared-with-me')
+    // A local/legacy record carries neither fact and reads as private.
+    expect(editorDocumentRowKind({})).toBe('owned-private')
+  })
+
+  it('derives the full rail grammar from the same ownership classification', () => {
+    expect(editorDocumentRailCapabilities({ contentMode: 'markdown' })).toEqual({
+      canDelete: true,
+      canDrag: true,
+      canOpenDetails: false,
+      canPin: true,
+      canRename: true,
+      leadingRole: 'file',
+    })
+    expect(editorDocumentRailCapabilities({ contentMode: 'collaboration' }))
+      .toMatchObject({
+        canDelete: true,
+        canOpenDetails: true,
+        canPin: true,
+        leadingRole: 'people',
+      })
+    expect(editorDocumentRailCapabilities({ access: { mode: 'shared' } }))
+      .toEqual({
+        canDelete: false,
+        canDrag: false,
+        canOpenDetails: true,
+        canPin: false,
+        canRename: false,
+        leadingRole: 'people',
+      })
   })
 })
 

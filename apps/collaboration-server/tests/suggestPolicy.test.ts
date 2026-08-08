@@ -3,6 +3,7 @@ import { EditorState, TextSelection } from '@tiptap/pm/state'
 import { initProseMirrorDoc, updateYFragment } from '@tiptap/y-tiptap'
 import {
   EDITOR_YJS_FRAGMENT,
+  INQTRIX_STRUCTURE_COMMAND_META,
   createEditorSchemaExtensions,
   editorJsonToYDoc,
   parseEditorMarkdown,
@@ -11,14 +12,42 @@ import {
 } from '@inqtrix/editor-schema'
 import * as Y from 'yjs'
 
-import { validateSuggestionUpdate } from '../src/suggestPolicy'
+import { needsPositionMapper, validateSuggestionUpdate } from '../src/suggestPolicy'
 import { USER_ID } from './helpers'
 
 const PATCH_ID = '22222222-2222-4222-8222-222222222222'
 const SUGGESTION_ID = '33333333-3333-4333-8333-333333333333'
 const OTHER_USER_ID = '44444444-4444-4444-8444-444444444444'
+const STRUCTURE_SUGGESTION_ID = '55555555-5555-4555-8555-555555555555'
 const CREATED_AT = 1_784_112_000
 const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
+
+describe('position mapper necessity', () => {
+  // The mapper costs two initProseMirrorDoc conversions and two full
+  // document parses. On a large document that is the single most
+  // expensive part of policy validation — and on a document without a
+  // single suggestion it answers a question nobody asked.
+  it('is unnecessary when neither side carries a suggestion', () => {
+    const plain = parseEditorMarkdown('Hello')
+
+    expect(needsPositionMapper(plain, plain)).toBe(false)
+  })
+
+  it('is required as soon as either side carries a suggestion', () => {
+    const before = schema.nodeFromJSON(parseEditorMarkdown('Hello'))
+    const state = EditorState.create({ schema, doc: before })
+    const tracked = transformToInqtrixSuggestionTransaction(
+      state.tr.setSelection(TextSelection.create(state.doc, 6)).insertText('!'),
+      state,
+      { authorId: USER_ID, createdAt: CREATED_AT, patchId: PATCH_ID },
+      () => SUGGESTION_ID,
+    ).doc
+
+    // Both directions: adding one and removing one.
+    expect(needsPositionMapper(before.toJSON(), tracked.toJSON())).toBe(true)
+    expect(needsPositionMapper(tracked.toJSON(), before.toJSON())).toBe(true)
+  })
+})
 
 describe('suggestion policy', () => {
   it('emits authoritative active patch state for a new suggestion', () => {
@@ -49,6 +78,7 @@ describe('suggestion policy', () => {
       createdAt: CREATED_AT,
       kinds: ['insertion'],
       patchId: PATCH_ID,
+      supersededSuggestionIds: [],
     }])
   })
 
@@ -73,6 +103,59 @@ describe('suggestion policy', () => {
     expect(result.suggestionIds).toEqual([SUGGESTION_ID])
   })
 
+  it('accepts an actor-owned slash insertion superseded by one structure suggestion', () => {
+    const before = schema.node('doc', null, [
+      schema.node('heading', { level: 1, textAlign: null }, schema.text('Title')),
+    ])
+    const initial = EditorState.create({ schema, doc: before })
+    const trackedSlash = initial.apply(transformToInqtrixSuggestionTransaction(
+      initial.tr.insertText('/', 1),
+      initial,
+      { authorId: USER_ID, createdAt: CREATED_AT, patchId: PATCH_ID },
+      () => SUGGESTION_ID,
+    )).doc
+    const slashState = EditorState.create({ schema, doc: trackedSlash })
+    const direct = slashState.tr
+      .delete(1, 2)
+      .setNodeMarkup(0, schema.nodes.heading, { level: 2, textAlign: null })
+      .setMeta(INQTRIX_STRUCTURE_COMMAND_META, {
+        action: 'heading2',
+        commandRange: { from: 1, to: 2 },
+      })
+    const trackedStructure = slashState.apply(
+      transformToInqtrixSuggestionTransaction(
+        direct,
+        slashState,
+        {
+          authorId: USER_ID,
+          createdAt: CREATED_AT + 1,
+          patchId: '66666666-6666-4666-8666-666666666666',
+        },
+        () => STRUCTURE_SUGGESTION_ID,
+      ),
+    ).doc
+
+    const result = validateMappedSuggestionUpdate(
+      trackedSlash.toJSON(),
+      trackedStructure.toJSON(),
+      'suggest',
+      USER_ID,
+    )
+
+    expect(result.suggestionIds).toEqual([
+      SUGGESTION_ID,
+      STRUCTURE_SUGGESTION_ID,
+    ])
+    expect(result.patches).toEqual([{
+      activeSuggestionIds: [STRUCTURE_SUGGESTION_ID],
+      authorId: USER_ID,
+      createdAt: CREATED_AT,
+      kinds: ['structure'],
+      patchId: PATCH_ID,
+      supersededSuggestionIds: [SUGGESTION_ID],
+    }])
+  })
+
   it('rejects removal of the last active suggestion outside an explicit decision', () => {
     const plain = schema.nodeFromJSON(parseEditorMarkdown('Hello'))
     const state = EditorState.create({ schema, doc: plain })
@@ -94,7 +177,7 @@ describe('suggestion policy', () => {
     )).toThrowError('suggestion_policy_violation')
   })
 
-  it('recognizes a replacement as one modification descriptor', () => {
+  it('recognizes a replacement as one replacement descriptor', () => {
     const before = schema.nodeFromJSON(parseEditorMarkdown('Hello'))
     const state = EditorState.create({ schema, doc: before })
     const tracked = transformToInqtrixSuggestionTransaction(
@@ -112,10 +195,10 @@ describe('suggestion policy', () => {
     )
 
     expect(result.suggestions).toEqual([expect.objectContaining({
-      kind: 'modification',
+      kind: 'replacement',
       suggestionId: SUGGESTION_ID,
     })])
-    expect(result.patches[0]?.kinds).toEqual(['modification'])
+    expect(result.patches[0]?.kinds).toEqual(['replacement'])
   })
 
   it('rejects a newly injected suggestion attributed to another user', () => {

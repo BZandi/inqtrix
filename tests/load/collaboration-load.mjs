@@ -1,16 +1,22 @@
 import process from 'node:process'
+import { chmod, rename, writeFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 
 import {
   API_DEGRADATION_LIMIT_PERCENT,
+  API_P95_LIMIT_MS,
+  API_RELATIVE_GATE_MIN_BASELINE_MS,
   FatalSocketState,
-  RELEASE_MIN_ACK_ROUNDS_PER_WRITER,
-  RELEASE_MIN_DURATION_MS,
-  RELEASE_OBSERVER_COHORT,
+  CAPACITY_MIN_ACK_ROUNDS_PER_WRITER,
+  CAPACITY_MIN_DURATION_MS,
+  CAPACITY_OBSERVER_COHORT,
+  SOAK_MIN_ACK_ROUNDS_PER_WRITER,
+  SOAK_MIN_DURATION_MS,
   RawCollaborationClient,
   SessionRotationSupervisor,
   allLoadGatesPassed,
-  assertReleasePreflight,
+  assertCapacityPreflight,
+  assertSoakPreflight,
   connectInBatches,
   delay,
   evaluateGates,
@@ -22,9 +28,11 @@ import {
   reissueSessions,
   resolveApiProbe,
   resolveInstanceProbe,
+  resolveNetworkControl,
   resolveRestartControl,
   resolveSessionReissueControl,
   runSustainedWriterLoad,
+  runSoakPhases,
   summarize,
   summarizeApiProbe,
   verifyObserverCohort,
@@ -47,18 +55,26 @@ export async function main(args = process.argv.slice(2), environment = process.e
   const apiProbeConfiguration = resolveApiProbe(fixture, options)
   const instanceProbe = resolveInstanceProbe(fixture, options)
   const restartControl = resolveRestartControl(fixture, options, environment)
+  const networkControl = resolveNetworkControl(fixture, options, environment)
   const sessionReissueControl = resolveSessionReissueControl(fixture, options, environment)
   if ((restartControl === null) !== (instanceProbe === null)) {
     throw new Error(
       'fixture.restart_control and fixture.instance_probe must be supplied together.',
     )
   }
-  assertReleasePreflight(
+  assertCapacityPreflight(
     options,
     sessions,
     apiProbeConfiguration,
     restartControl,
     instanceProbe,
+    sessionReissueControl,
+  )
+  assertSoakPreflight(
+    options,
+    sessions,
+    apiProbeConfiguration,
+    networkControl,
     sessionReissueControl,
   )
 
@@ -133,26 +149,55 @@ export async function main(args = process.argv.slice(2), environment = process.e
         : `Running ${writers.length} writers with the API gate explicitly skipped...`,
       options.json,
     )
-    const load = await runSustainedWriterLoad({
-      apiProbe: apiProbeConfiguration,
-      fatal,
-      minAckRoundsPerWriter: options.minAckRoundsPerWriter,
-      minDurationMs: options.minDurationMs,
-      observers,
-      sampleTimeoutMs: options.sampleTimeoutMs,
-      writers,
-    })
-    const apiProbe = summarizeApiProbe(
-      baselineApiMeasurement?.latencies ?? null,
-      load.loadedApiLatencies,
-    )
-    const gates = evaluateGates(
-      load.visibleLatencies,
-      load.durableLatencies,
-      apiProbe,
-      options,
-      load,
-    )
+    let load
+    let apiProbe
+    let gates
+    if (options.mode === 'soak') {
+      progress('Running six separately budgeted five-minute network phases...', options.json)
+      load = await runSoakPhases({
+        apiProbe: apiProbeConfiguration,
+        baselineApiMeasurement,
+        fatal,
+        networkControl,
+        observers,
+        sampleTimeoutMs: options.sampleTimeoutMs,
+        writerIntervalMs: options.writerIntervalMs,
+        writers,
+      })
+      apiProbe = {
+        absoluteLimitMs: API_P95_LIMIT_MS,
+        phases: load.phases.map((phase) => ({
+          ...phase.apiProbe,
+          id: phase.id,
+        })),
+        relativeGateMinBaselineMs: API_RELATIVE_GATE_MIN_BASELINE_MS,
+        relativeLimitPercent: API_DEGRADATION_LIMIT_PERCENT,
+        status: load.gates.apiLatencyStatus,
+      }
+      gates = load.gates
+    } else {
+      load = await runSustainedWriterLoad({
+        apiProbe: apiProbeConfiguration,
+        fatal,
+        minAckRoundsPerWriter: options.minAckRoundsPerWriter,
+        minDurationMs: options.minDurationMs,
+        observers,
+        sampleTimeoutMs: options.sampleTimeoutMs,
+        writerIntervalMs: options.writerIntervalMs,
+        writers,
+      })
+      apiProbe = summarizeApiProbe(
+        baselineApiMeasurement?.latencies ?? null,
+        load.loadedApiLatencies,
+      )
+      gates = evaluateGates(
+        load.visibleLatencies,
+        load.durableLatencies,
+        apiProbe,
+        options,
+        load,
+      )
+    }
 
     fatal.throwIfSet()
     await delay(options.postSampleQuietMs)
@@ -231,6 +276,7 @@ export async function main(args = process.argv.slice(2), environment = process.e
       durableAckMs: summarize(load.durableLatencies),
       gates,
       mode: options.mode,
+      phases: load.phases ?? null,
       reconstruction: {
         ...reconstruction,
         restart,
@@ -239,11 +285,16 @@ export async function main(args = process.argv.slice(2), environment = process.e
         connectedClients: connectedRotations,
         freshObservers: sessionReissueControl ? freshObserverSessions.length : 0,
         passed: (
-          options.mode !== 'release'
-          || (
+          options.mode === 'smoke'
+          || (options.mode === 'capacity' && (
             connectedRotations === clients.length
             && freshObserverSessions.length === observers.length
-          )
+          ))
+          || (options.mode === 'soak' && (
+            connectedRotations === clients.length
+            && scheduledRotations >= clients.length
+            && freshObserverSessions.length === observers.length
+          ))
         ),
         scheduledClients: scheduledRotations,
       },
@@ -257,10 +308,28 @@ export async function main(args = process.argv.slice(2), environment = process.e
       },
       writers: writers.length,
     }
+    const passed = allLoadGatesPassed(
+      gates,
+      reconstruction,
+      result.sessionRotation,
+    )
+    result.passed = passed
+    await writeScenarioResults(
+      options.mode,
+      gates,
+      reconstruction,
+      result.sessionRotation,
+      environment,
+    )
     printResult(result, options.json)
-    if (!allLoadGatesPassed(gates, reconstruction, result.sessionRotation)) {
+    // In ramp mode a rung that misses its budget is the EXPECTED way the
+    // ladder ends: the engine decides whether that is an honest local
+    // ceiling or an integrity failure. Letting one rung set a failing
+    // exit code here would turn every controlled stop red.
+    if (!passed && options.mode !== 'ramp') {
       process.exitCode = 1
     }
+    return result
   } finally {
     let rotationStopError = null
     if (rotationSupervisor && !rotationStopped) {
@@ -278,12 +347,110 @@ export async function main(args = process.argv.slice(2), environment = process.e
   }
 }
 
+export async function writeScenarioResults(
+  mode,
+  gates,
+  reconstruction,
+  sessionRotation,
+  environment,
+  supplemental = {},
+) {
+  const path = environment.INQTRIX_VERIFICATION_SCENARIO_RESULTS_PATH
+  if (!path) return
+  const latencyPassed = (
+    gates.visibleUpdatePassed
+    && gates.durableAckPassed
+    && gates.apiLatencyStatus !== 'failed'
+    && gates.apiSampleSpanPassed !== false
+    && gates.minimumAckRoundsPassed
+    && gates.minimumDurationPassed
+    && gates.observerCohortPassed
+  )
+  // The ramp runs many rungs through this entrypoint; only the engine
+  // knows whether a stopped rung is an honest local ceiling or a real
+  // failure, so it owns the sidecar and this call stays silent.
+  if (mode === 'ramp') return
+  const scenarios = mode === 'capacity'
+    ? [
+        {
+          id: 'load-capacity.latency',
+          status: latencyPassed ? 'passed' : 'failed',
+        },
+        {
+          id: 'load-capacity.rotation',
+          status: sessionRotation.passed ? 'passed' : 'failed',
+        },
+        {
+          id: 'load-capacity.restart',
+          status: reconstruction.passed ? 'passed' : 'failed',
+        },
+      ]
+    : mode === 'soak'
+      ? [
+          {
+            id: 'load-soak.identity-matrix',
+            status: supplemental.identityMatrixPassed === true ? 'passed' : 'failed',
+          },
+          {
+            id: 'load-soak.comments-and-navigation',
+            status: supplemental.commentsAndNavigationPassed === true ? 'passed' : 'failed',
+          },
+          {
+            id: 'load-soak.network-phases',
+            status: gates.phaseResultsPassed === true ? 'passed' : 'failed',
+          },
+          {
+            id: 'load-soak.durability',
+            status: (
+              latencyPassed
+              && reconstruction.passed
+              && sessionRotation.passed
+            ) ? 'passed' : 'failed',
+          },
+          {
+            id: 'load-soak.feature-activity',
+            status: supplemental.featureActivityPassed === true ? 'passed' : 'failed',
+          },
+          {
+            id: 'load-soak.resource-recovery',
+            status: supplemental.resourceRecoveryPassed === true ? 'passed' : 'failed',
+          },
+        ]
+      : [
+        { id: 'load-smoke.protocol', status: 'passed' },
+        {
+          id: 'load-smoke.durability',
+          status: latencyPassed ? 'passed' : 'failed',
+        },
+        {
+          id: 'load-smoke.reconstruction',
+          status: reconstruction.passed ? 'passed' : 'failed',
+        },
+      ]
+  await writeScenarioSidecar(path, scenarios)
+}
+
+/** Atomic 0600 sidecar in the canonical {schemaVersion, scenarios} shape.
+ * Shared so aggregating engines write exactly the same contract. */
+export async function writeScenarioSidecar(path, scenarios) {
+  if (!path) return
+  const temporaryPath = `${path}.tmp`
+  await writeFile(temporaryPath, `${JSON.stringify({
+    scenarios,
+    schemaVersion: 1,
+  }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  await rename(temporaryPath, path)
+  await chmod(path, 0o600)
+}
+
 function printHelp() {
-  process.stdout.write('Usage: pnpm load:collaboration:dev -- --fixture PATH [options]\n')
-  process.stdout.write('       pnpm load:collaboration:release -- --fixture PATH [--json]\n\n')
-  process.stdout.write(`Release: exactly 1000 connections, 100 writers, ${RELEASE_OBSERVER_COHORT} observers, at least ${RELEASE_MIN_DURATION_MS}ms and ${RELEASE_MIN_ACK_ROUNDS_PER_WRITER} acknowledged rounds/writer.\n`)
-  process.stdout.write('Release latency: visible p95 <250ms, durable p95 <500ms, FastAPI /health degradation <=20%.\n')
-  process.stdout.write('Developer options: --connections N --writers N --observers N --connect-concurrency N\n')
+  process.stdout.write('Usage: npm run verify:load-smoke\n')
+  process.stdout.write('       npm run verify:load-soak\n')
+  process.stdout.write('       npm run verify:load-capacity -- --fixture PATH\n\n')
+  process.stdout.write(`Soak: exactly 25 identities across six five-minute network phases, at least ${SOAK_MIN_DURATION_MS}ms and ${SOAK_MIN_ACK_ROUNDS_PER_WRITER} acknowledged rounds/writer.\n`)
+  process.stdout.write(`Capacity: exactly 1000 connections, 100 writers, ${CAPACITY_OBSERVER_COHORT} observers, at least ${CAPACITY_MIN_DURATION_MS}ms and ${CAPACITY_MIN_ACK_ROUNDS_PER_WRITER} acknowledged rounds/writer.\n`)
+  process.stdout.write('Capacity latency: visible p95 <250ms, durable p95 <500ms, FastAPI /health degradation <=20%.\n')
+  process.stdout.write('Internal smoke-engine options: --connections N --writers N --observers N --connect-concurrency N\n')
   process.stdout.write('  --connect-timeout-ms N --sample-timeout-ms N --post-sample-quiet-ms N\n')
   process.stdout.write('  --min-duration-ms N --min-ack-rounds N\n')
   process.stdout.write('  --visible-p95-ms N --durable-p95-ms N --allow-insecure-tls\n')
@@ -300,19 +467,27 @@ function printResult(result, json) {
   process.stdout.write(`  writers: ${result.writers}\n`)
   process.stdout.write(`  observers: ${result.reconstruction.observerCount}\n`)
   process.stdout.write(`  write samples: ${result.writeSamples}\n`)
-  process.stdout.write(`  sustained: ${formatMs(result.sustainedDurationMs)} gate>=${result.gates.minimumDurationMs}ms ${result.gates.minimumDurationPassed ? 'PASS' : 'FAIL'}\n`)
-  process.stdout.write(`  acknowledged rounds/writer: min=${result.writerRounds.minimum} max=${result.writerRounds.maximum} gate>=${result.gates.minimumAckRounds} ${result.gates.minimumAckRoundsPassed ? 'PASS' : 'FAIL'}\n`)
-  process.stdout.write(`  visible-update: p50=${formatMs(result.visibleUpdateMs.p50)} p95=${formatMs(result.visibleUpdateMs.p95)} gate<${result.gates.visibleUpdateP95Ms}ms ${result.gates.visibleUpdatePassed ? 'PASS' : 'FAIL'}\n`)
-  process.stdout.write(`  durable-ack: p50=${formatMs(result.durableAckMs.p50)} p95=${formatMs(result.durableAckMs.p95)} gate<${result.gates.durableAckP95Ms}ms ${result.gates.durableAckPassed ? 'PASS' : 'FAIL'}\n`)
-  if (result.apiProbe.status === 'skipped') {
-    process.stdout.write('  api-latency: SKIPPED (explicit developer protocol-smoke opt-out)\n')
+  if (result.mode === 'soak') {
+    process.stdout.write(`  sustained: ${formatMs(result.sustainedDurationMs)} gate>=${SOAK_MIN_DURATION_MS}ms ${result.gates.minimumDurationPassed ? 'PASS' : 'FAIL'}\n`)
+    process.stdout.write(`  acknowledged rounds/writer: min=${result.writerRounds.minimum} max=${result.writerRounds.maximum} gate>=${SOAK_MIN_ACK_ROUNDS_PER_WRITER} ${result.gates.minimumAckRoundsPassed ? 'PASS' : 'FAIL'}\n`)
+    for (const phase of result.phases) {
+      process.stdout.write(`  phase ${phase.id}: visible=[${formatVisibleUpdateGate(phase.visibleUpdateMs, phase.gates)}] durable-p95=${formatMs(phase.durableAckMs.p95)} gate<${phase.gates.durableAckP95Ms}ms api=[${formatApiProbe(phase.apiProbe)}] ${phase.passed ? 'PASS' : 'FAIL'}\n`)
+    }
   } else {
-    process.stdout.write(`  api-latency: baseline-p95=${formatMs(result.apiProbe.baselineP95Ms)} loaded-p95=${formatMs(result.apiProbe.loadedP95Ms)} degradation=${formatPercent(result.apiProbe.degradationPercent)} gate<=${API_DEGRADATION_LIMIT_PERCENT}% ${result.apiProbe.status === 'passed' ? 'PASS' : 'FAIL'}\n`)
-    process.stdout.write(`  api-sample-span: ${formatMs(result.loadedApiSampleSpanMs)} gate>=${result.gates.minimumDurationMs}ms ${result.gates.apiSampleSpanPassed ? 'PASS' : 'FAIL'}\n`)
+    process.stdout.write(`  sustained: ${formatMs(result.sustainedDurationMs)} gate>=${result.gates.minimumDurationMs}ms ${result.gates.minimumDurationPassed ? 'PASS' : 'FAIL'}\n`)
+    process.stdout.write(`  acknowledged rounds/writer: min=${result.writerRounds.minimum} max=${result.writerRounds.maximum} gate>=${result.gates.minimumAckRounds} ${result.gates.minimumAckRoundsPassed ? 'PASS' : 'FAIL'}\n`)
+    process.stdout.write(`  visible-update: ${formatVisibleUpdateGate(result.visibleUpdateMs, result.gates)}\n`)
+    process.stdout.write(`  durable-ack: p50=${formatMs(result.durableAckMs.p50)} p95=${formatMs(result.durableAckMs.p95)} gate<${result.gates.durableAckP95Ms}ms ${result.gates.durableAckPassed ? 'PASS' : 'FAIL'}\n`)
+    if (result.apiProbe.status === 'skipped') {
+      process.stdout.write('  api-latency: SKIPPED (explicit load-smoke API-probe opt-out)\n')
+    } else {
+      process.stdout.write(`  api-latency: ${formatApiProbe(result.apiProbe)}\n`)
+      process.stdout.write(`  api-sample-span: ${formatMs(result.loadedApiSampleSpanMs)} gate>=${result.gates.minimumDurationMs}ms ${result.gates.apiSampleSpanPassed ? 'PASS' : 'FAIL'}\n`)
+    }
   }
   const restart = result.reconstruction.restart
   process.stdout.write(`  reconstruction: observers=${result.reconstruction.observerCount} expected-per-observer=${result.reconstruction.expectedPerObserver} failed-observers=${result.reconstruction.failedObservers} missing=${result.reconstruction.missing} duplicates=${result.reconstruction.duplicates} unexpected=${result.reconstruction.unexpected} ${result.reconstruction.passed ? 'PASS' : 'FAIL'}\n`)
-  process.stdout.write(`  restart: ${restart ? `${restart.kind} sockets=${restart.closedSockets} instance-changed=${restart.instanceIdentityChanged} epoch=${restart.beforeEpoch}->${restart.afterEpoch}` : 'not exercised'} ${restart?.instanceIdentityChanged && restart?.epochAdvanced ? 'PASS' : result.mode === 'release' ? 'FAIL' : 'SKIPPED'}\n`)
+  process.stdout.write(`  restart: ${restart ? `${restart.kind} sockets=${restart.closedSockets} instance-changed=${restart.instanceIdentityChanged} epoch=${restart.beforeEpoch}->${restart.afterEpoch}` : 'not exercised'} ${restart?.instanceIdentityChanged && restart?.epochAdvanced ? 'PASS' : result.mode === 'capacity' ? 'FAIL' : 'SKIPPED'}\n`)
   process.stdout.write(`  lease-rotation: connected=${result.sessionRotation.connectedClients} scheduled=${result.sessionRotation.scheduledClients} fresh-observers=${result.sessionRotation.freshObservers} ${result.sessionRotation.passed ? 'PASS' : 'FAIL'}\n`)
 }
 
@@ -327,6 +502,22 @@ function formatMs(value) {
 
 function formatPercent(value) {
   return `${value.toFixed(1)}%`
+}
+
+export function formatApiProbe(apiProbe) {
+  const relativeGate = apiProbe.relativeGateApplied
+    ? `${apiProbe.relativePassed ? 'PASS' : 'FAIL'} (active)`
+    : apiProbe.relativePassed
+      ? `PASS (advisory; baseline below ${API_RELATIVE_GATE_MIN_BASELINE_MS}ms)`
+      : `WARN (advisory; baseline below ${API_RELATIVE_GATE_MIN_BASELINE_MS}ms)`
+  return `baseline-p95=${formatMs(apiProbe.baselineP95Ms)} loaded-p95=${formatMs(apiProbe.loadedP95Ms)} degradation=${formatPercent(apiProbe.degradationPercent)} absolute<=${API_P95_LIMIT_MS}ms ${apiProbe.absolutePassed ? 'PASS' : 'FAIL'} relative<=${API_DEGRADATION_LIMIT_PERCENT}% ${relativeGate} status=${apiProbe.status.toUpperCase()}`
+}
+
+export function formatVisibleUpdateGate(visibleUpdateMs, gates) {
+  const limits = gates.visibleUpdateWarningEnabled
+    ? `target<${gates.visibleUpdateTargetP95Ms}ms hard<=${gates.visibleUpdateHardLimitP95Ms}ms`
+    : `gate<${gates.visibleUpdateTargetP95Ms}ms`
+  return `p50=${formatMs(visibleUpdateMs.p50)} p95=${formatMs(visibleUpdateMs.p95)} ${limits} status=${gates.visibleUpdateStatus.toUpperCase()}`
 }
 
 const entryPoint = process.argv[1] ? pathToFileURL(process.argv[1]).href : null

@@ -111,6 +111,9 @@ def test_v02_preflight_uses_the_0045_authority_inventory() -> None:
     )
     assert {
         "job_id",
+        "operation_kind",
+        "document_id",
+        "revision_id",
         "total_documents",
         "completed_documents",
         "current_document_title",
@@ -170,6 +173,9 @@ def test_v02_index_terminalization_uses_normal_failure_snapshot() -> None:
         "total_documents": 4,
         "progress_estimate": 0.25,
         "current_document_title": "Document 2",
+        "phase": "queued",
+        "current_batch": 0,
+        "total_batches": 0,
     }
 
 
@@ -419,7 +425,12 @@ def test_v02_locked_terminalization_rejects_non_work_preflight_blocker() -> None
             _terminalize_v02_locked(
                 Connection(),
                 _report(unsupported_active_shares=1),
-                terminal_statuses_sql="('cancelled', 'completed', 'failed')",
+                run_terminal_statuses_sql=(
+                    "('cancelled', 'completed', 'failed')"
+                ),
+                indexing_terminal_statuses_sql=(
+                    "('cancelled', 'completed', 'failed')"
+                ),
             )
         )
 

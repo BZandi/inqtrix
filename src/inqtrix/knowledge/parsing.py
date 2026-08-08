@@ -1,7 +1,7 @@
 """Document parsing behind a Baukasten port (file-to-text for ingestion).
 
-Parser ladder (user decision 2026-06-12, mirroring the auth/object-
-store pattern — standards first, nothing hardwired):
+The parser ladder mirrors the auth and object-store ports: standards first,
+nothing hardwired.
 
 * :class:`MarkItDownParser` — the DEFAULT. Pure-Python conversion to
   Markdown (Microsoft MarkItDown, MIT): no ML models, no cloud
@@ -82,7 +82,8 @@ class MarkItDownParser(DocumentParser):
             )
         except Exception as exc:  # noqa: BLE001 — normalized below, visibly
             log.warning(
-                "Datei-Parsing fehlgeschlagen (%s): %s", file_name, exc
+                "Datei-Parsing fehlgeschlagen (error_type=%s)",
+                type(exc).__name__,
             )
             raise DocumentParseError(
                 f"Datei {file_name!r} konnte nicht konvertiert werden: {exc}"

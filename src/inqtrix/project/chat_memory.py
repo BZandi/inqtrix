@@ -48,6 +48,7 @@ class MemoryChatStore:
         updated_at: float,
         created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
+        model_selection: str = "",
     ) -> ChatThread:
         if group_id is not None:
             require_memory_scope(
@@ -72,6 +73,7 @@ class MemoryChatStore:
                 preview=preview,
                 source=source,
                 group_id=group_id,
+                model_selection=model_selection,
                 updated_at=updated_at,
             )
         else:
@@ -85,6 +87,7 @@ class MemoryChatStore:
                 updated_at=updated_at,
                 created_by_user_id=created_by_user_id,
                 workspace_id=workspace_id,
+                model_selection=model_selection,
             )
         self._threads[id] = thread
         return thread

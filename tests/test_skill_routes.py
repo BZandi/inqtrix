@@ -1,4 +1,4 @@
-"""Skill CRUD, validation, ownership wiring, and sharing (plan M3 `3.1`).
+"""Skill CRUD, validation, ownership wiring, and sharing.
 
 Same world as the prompt-template route tests (full oidc container,
 memory backends). The owned-resource GRADE semantics (view/edit/owner)

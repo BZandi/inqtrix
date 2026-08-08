@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+
 import { CircleUserRound } from '@/components/icons'
 import { InitialsAvatar } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
@@ -43,6 +45,15 @@ export function ProfileAvatar({
   onOpenSecuritySettings,
 }: ProfileAvatarProps) {
   const { t } = useLocale()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const effectiveSessionStatus = isDemo ? 'authenticated' : session.status
+
+  useEffect(() => {
+    if (effectiveSessionStatus !== 'authenticated') {
+      setMenuOpen(false)
+    }
+  }, [effectiveSessionStatus])
+
   if (!isDemo && (!isCookieSessionMode(authMode) || session.status === 'unknown')) {
     return null
   }
@@ -81,7 +92,7 @@ export function ProfileAvatar({
   }
 
   return (
-    <DropdownMenu>
+    <DropdownMenu onOpenChange={setMenuOpen} open={menuOpen}>
       <Tooltip>
         <TooltipTrigger asChild>
           <DropdownMenuTrigger asChild>
@@ -99,14 +110,16 @@ export function ProfileAvatar({
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>
-        <TooltipContent side="right">
-          <div className="flex flex-col gap-0.5">
-            <span>{effectiveSession.user?.displayName ?? t.profile.signedInAs}</span>
-            {effectiveSession.user?.email ? (
-              <span className="text-muted-foreground">{effectiveSession.user.email}</span>
-            ) : null}
-          </div>
-        </TooltipContent>
+        {menuOpen ? null : (
+          <TooltipContent side="right">
+            <div className="flex flex-col gap-0.5">
+              <span>{effectiveSession.user?.displayName ?? t.profile.signedInAs}</span>
+              {effectiveSession.user?.email ? (
+                <span className="text-muted-foreground">{effectiveSession.user.email}</span>
+              ) : null}
+            </div>
+          </TooltipContent>
+        )}
       </Tooltip>
       <DropdownMenuContent align="start" side="right">
         <div className="px-2 py-1.5">

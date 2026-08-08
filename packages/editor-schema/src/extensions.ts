@@ -15,6 +15,7 @@ import {
   SuggestionInsertion,
   SuggestionModification,
 } from './suggestionMarks.js'
+import { StructureSuggestionAttributes } from './structureSuggestions.js'
 
 export type EditorSchemaExtensionOptions = {
   enableUndoRedo?: boolean
@@ -75,6 +76,7 @@ export function createEditorSchemaExtensions(
     TableHeader,
     TableCell,
     TextAlign.configure({ types: ['heading', 'paragraph'] }),
+    StructureSuggestionAttributes,
     SuggestionDeletion,
     SuggestionInsertion,
     SuggestionModification,
@@ -94,7 +96,6 @@ function safeLinkOptions() {
     ),
     linkOnPaste: true,
     openOnClick: false,
-    protocols: ['http', 'https', 'mailto'],
     shouldAutoLink: isSafeEditorUrl,
   }
 }

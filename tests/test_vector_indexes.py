@@ -12,7 +12,12 @@ from inqtrix.project.vector_index_memory import MemoryVectorIndexStore
 from inqtrix.project.vector_index_ports import (
     VectorIndexHistoryEntry,
     VectorIndexMember,
+    VectorIndexMemberUnavailable,
     VectorIndexNotFound,
+)
+from inqtrix.source_authority import (
+    MemorySourceLifecycleAuthority,
+    SourceScope,
 )
 from inqtrix.services.vector_index_service import (
     VectorIndexService,
@@ -185,3 +190,35 @@ def test_history_payload_parser_rejects_malformed_input() -> None:
     with pytest.raises(_PayloadError):
         _parse_members([{"state": "embedded"}])
     assert _parse_members([{"file_id": "fa_1"}])[0].state == "pending"
+
+
+@pytest.mark.asyncio
+async def test_bound_lifecycle_rejects_a_stale_member_after_delete() -> None:
+    authority = MemorySourceLifecycleAuthority()
+    scope = SourceScope(
+        tenant_id="default",
+        source_id="asset:fa_1",
+        owner_user_id=USER,
+        workspace_id=None,
+    )
+    authority.register_active(scope)
+    store = MemoryVectorIndexStore()
+    store.bind_source_lifecycle_authority(authority)
+    bound = VectorIndexService(store=store)
+    await _save(
+        bound,
+        "vix_1",
+        owner=USER,
+        members=(VectorIndexMember("fa_1", "embedded"),),
+    )
+
+    permit = authority.begin_delete(scope, operation_id="del_1")
+    authority.complete_delete(permit)
+
+    with pytest.raises(VectorIndexMemberUnavailable):
+        await _save(
+            bound,
+            "vix_1",
+            owner=USER,
+            members=(VectorIndexMember("fa_1", "embedded"),),
+        )

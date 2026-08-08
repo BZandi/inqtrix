@@ -12,13 +12,24 @@ orchestrator.
 
 ## TLS and the public URL
 
-Terminate TLS at your ingress/load balancer (or the bundled nginx behind one)
+Terminate TLS at your ingress/load balancer (or directly in the bundled Python gateway)
 and serve the app over HTTPS. The public origin must match how the browser
 reaches the app, because cookies and the OIDC callback derive from it:
 
 ```dotenv
 INQTRIX_PUBLIC_BASE_URL=https://research.example.com
+# Optional only when an additional trusted proxy needs a scheme-only override:
+# INQTRIX_EXTERNAL_SCHEME=https
 ```
+
+`INQTRIX_PUBLIC_BASE_URL` is the primary trust anchor consumed by both API and
+web gateway; it supplies the complete scheme and authority. The optional
+`INQTRIX_EXTERNAL_SCHEME` is only a scheme-level override for unusual
+multi-proxy topologies. When both are set they must agree, otherwise the web
+gateway fails at startup instead of forwarding contradictory origin metadata.
+See
+[Editor collaboration](../deployment/editor-collaboration.md) for the full
+origin-trust chain.
 
 Over HTTPS, leave secure cookies ON — that is the default. **Never** set
 `INQTRIX_OIDC_INSECURE_DEV_COOKIES=true` in production; it drops the `Secure`
@@ -34,7 +45,7 @@ minted on one replica must validate on another):
 |---|---|
 | `INQTRIX_SESSION_SECRET` | HMAC for the session/CSRF cookies (local/ldap/oidc). |
 | `INQTRIX_PAT_PEPPER` | Pepper for personal-access-token hashing. |
-| `INQTRIX_PG_PASSWORD` + the password inside `INQTRIX_DATABASE_URL` | Database auth (must match). |
+| `INQTRIX_PG_PASSWORD` | Database auth; the visible `INQTRIX_DATABASE_URL` interpolates this one secret. |
 
 Generate them with a CSPRNG and inject via your secret manager, not the repo:
 
@@ -47,10 +58,14 @@ insecure (No Silent Fallbacks) — treat that log line as a release blocker.
 
 ## Storage durability
 
-Production runs the Postgres backend; migrations are applied by the one-shot
-`migrate` service (or `uv run inqtrix-migrate`) before the api starts. Without
-Postgres everything is in-memory and lost on restart, including sessions and
-the user mirror — so a restart logs everyone out.
+Production runs the Postgres backend; normal Compose deployments apply
+migrations through the orchestrated one-shot `migrate` service before the API
+starts. The equivalent Helm deployment uses its one-shot migration Job. A
+direct `uv run inqtrix-migrate` or pip-installed `inqtrix-migrate` invocation
+is a break-glass operation only after the documented workload drain and backup,
+not a parallel normal startup path. Without Postgres everything is in-memory
+and lost on restart, including sessions and the user mirror — so a restart
+logs everyone out.
 
 ## Backups
 
@@ -59,8 +74,8 @@ Back up two things:
 - **Postgres** — runs, identity/credentials, knowledge metadata, prompt
   templates, quotas. Use your standard `pg_dump`/snapshot cadence.
 - **The object store** — uploaded file blobs. The default `local` backend writes
-  to a volume; snapshot it, or move to `--profile s3` (SeaweedFS or any S3
-  endpoint) for replicated/scalable storage.
+  to a volume; snapshot it, configure managed/native S3 without a profile, or
+  use `--profile s3` only for the bundled SeaweedFS reference.
 
 Restore is the inverse: restore Postgres, restore the blob volume/bucket, then
 start the stack (migrations are idempotent).
@@ -71,8 +86,8 @@ start the stack (migrations are idempotent).
 |---|---|
 | Qdrant (`--profile knowledge`) | Self-hosted Qdrant is unauthenticated by default — set `INQTRIX_QDRANT_API_KEY` and keep it off the public network. |
 | Valkey + workers (`--profile workers`) | Set a strong `INQTRIX_VALKEY_PASSWORD`; the worker refuses to start without Postgres + Valkey. |
-| Object store S3 (`--profile s3`) | Real credentials, a private bucket, TLS to the endpoint. |
-| OIDC (`--profile oidc` / your IdP) | Register the exact `https://…/api/auth/callback`; the bundled Dex is a dev reference, not for production. |
+| Object store S3 | Configure a managed/native S3 endpoint without the bundled profile; use real credentials or workload identity, a private bucket, and TLS. |
+| OIDC | Configure your external IdP without the bundled profile and register the exact `https://…/api/auth/callback`; Dex is a dev reference, not for production. |
 
 Misconfiguration fails loudly at startup (e.g. `INQTRIX_QUEUE_BACKEND=valkey`
 without a URL, or `valkey` without `postgres`) rather than degrading silently.
@@ -98,19 +113,20 @@ ALSO rate-limit per-IP at the reverse proxy / WAF (e.g. on `/api/auth/login/*`)
 — the in-app limit then complements, not replaces, the edge limit.
 
 The client IP is read from the **right** of `X-Forwarded-For`, at the depth set
-by `INQTRIX_TRUSTED_PROXY_HOPS` (default `1`, matching the single bundled proxy
-— the nginx `web` container or `scripts/run_research_desk.py`, both of which
-append the real peer). The right-most hop is written by that proxy and is not
-client-spoofable, so an attacker cannot rotate a forged left-most value to mint
-a fresh throttle key per attempt. Set it to the **exact** number of chained
-proxies in front of the server (e.g. `2` for an external load balancer in front
-of the bundled proxy); a value **higher** than the real chain lets a client
-backfill the gap and spoof again. Set it to `0` only when the API server is
-exposed directly with no reverse proxy — then just the socket peer is trusted.
+by `INQTRIX_TRUSTED_PROXY_HOPS` (default `1`, matching the single selected web
+adapter in the `web` container: packaged Python by default or nginx when
+explicitly selected). Both adapters append the real peer. The right-most hop is
+therefore not client-spoofable, so an attacker cannot rotate a forged left-most
+value to mint a fresh throttle key per attempt. Set it to the **exact** number
+of chained proxies in front of the server (e.g. `2` for an external load
+balancer in front of the bundled adapter); a value **higher** than the real
+chain lets a client backfill the gap and spoof again. Set it to `0` only when
+the API server is exposed directly with no reverse proxy — then just the socket
+peer is trusted.
 
 ## Pre-flight checklist
 
-- [ ] HTTPS at the ingress; `INQTRIX_PUBLIC_BASE_URL` is the public `https://` origin.
+- [ ] HTTPS at the ingress; `INQTRIX_PUBLIC_BASE_URL` is the exact public `https://` origin. If `INQTRIX_EXTERNAL_SCHEME` is explicitly set, it is also `https`.
 - [ ] `INQTRIX_OIDC_INSECURE_DEV_COOKIES` unset/false.
 - [ ] `SESSION_SECRET`, `PAT_PEPPER`, `PG_PASSWORD` real and shared across replicas; no `CHANGE_ME_*` in the startup log.
 - [ ] Postgres backend + migrations applied; backups scheduled for Postgres and the blob store.
@@ -123,3 +139,5 @@ exposed directly with no reverse proxy — then just the socket peer is trusted.
 - [Platform components](../getting-started/platform-components.md) — which backend each feature needs.
 - [Runbooks](../deployment/runbooks.md) — start/stop/update/restore operations.
 - [Auth modes](../deployment/auth-modes.md) — choosing and wiring auth.
+- [Editor collaboration](../deployment/editor-collaboration.md) — origin trust
+  chain and TLS requirements for live editing.

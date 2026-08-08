@@ -34,11 +34,11 @@ log = logging.getLogger("inqtrix")
 
 AuthMode = Literal["none", "apikey", "oidc", "local", "ldap"]
 
-# ``oidc_session`` is the cookie-session kind for ALL session-cookie
-# providers — OIDC, local email/password, and LDAP (ADR-AUTH-3: the kind
-# names the transport, not the identity provider). Local/LDAP differ only
-# in their synthetic issuer ("local"/"ldap"), keeping every scoped surface
-# (workspaces, sharing, PAT ownership) working without a new kind.
+# ``oidc_session`` is the cookie-session kind for all session-cookie
+# providers: OIDC, local email/password, and LDAP. The kind names the
+# transport, not the identity provider. Local and LDAP differ only in their
+# synthetic issuer ("local"/"ldap"), keeping every scoped surface working
+# without a new kind.
 PrincipalKind = Literal["anonymous", "static", "oidc_session", "pat"]
 
 
@@ -190,7 +190,14 @@ def make_principal_dependency(
     """
 
     def get_principal(request: Request) -> Principal:
-        return provider.resolve_principal(request)
+        principal = provider.resolve_principal(request)
+        # Stamp the subject onto the log context (stable pseudonym, never
+        # the raw id) so every log line of this request carries it. The
+        # request task owns the binding — no reset needed.
+        from inqtrix.observability.context import bind_principal_context
+
+        bind_principal_context(principal)
+        return principal
 
     return get_principal
 
@@ -280,6 +287,12 @@ def resolve_auth_mode(
                     # boot beats discovering at token-creation time
                     # that hashes were minted pepperless.
                     ("INQTRIX_PAT_PEPPER", auth.pat_pepper),
+                    # The pseudonym pepper is mandatory in oidc mode:
+                    # multi-user SSO deployments are exactly where
+                    # cross-process subject correlation (logs <-> audit
+                    # <-> traces) must not silently degrade to
+                    # per-process references.
+                    ("INQTRIX_PSEUDONYM_PEPPER", auth.pseudonym_pepper),
                 )
                 if not value.strip()
             ]

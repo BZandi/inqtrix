@@ -161,8 +161,8 @@ def test_frozen_tables_encode_binary_authority_and_fencing() -> None:
     assert "slot = 'primary'" in rendered
 
 
-def test_runtime_orm_matches_the_frozen_0048_table_contract() -> None:
-    """Runtime metadata must not drift from the migration applied in production."""
+def test_runtime_orm_extends_the_frozen_0048_table_contract_additively() -> None:
+    """Later revisions may add review fields without rewriting frozen 0048."""
     migration = _migration()
     runtime_tables = {
         table.name: table
@@ -177,11 +177,70 @@ def test_runtime_orm_matches_the_frozen_0048_table_contract() -> None:
     assert set(runtime_tables) == set(migration._collaboration_metadata.tables)
     for table_name, runtime_table in runtime_tables.items():
         frozen_table = migration._collaboration_metadata.tables[table_name]
-        assert tuple(runtime_table.c.keys()) == tuple(frozen_table.c.keys())
-        assert _constraint_names(runtime_table) == _constraint_names(frozen_table)
-        assert {index.name for index in runtime_table.indexes} == {
-            index.name for index in frozen_table.indexes
-        }
+        additive_columns = {
+            "editor_collaboration_updates": {
+                "actor_guest_identity_id",
+                "change_summary",
+                "decision_outcome",
+            },
+            "editor_collaboration_leases": {
+                "actor_kind",
+                "guest_identity_id",
+                "guest_link_id",
+            },
+        }.get(table_name, set())
+        assert tuple(
+            column
+            for column in runtime_table.c.keys()
+            if column not in additive_columns
+        ) == tuple(frozen_table.c.keys())
+        if table_name == "editor_collaboration_updates":
+            assert isinstance(
+                runtime_table.c.change_summary.type,
+                postgresql.JSONB,
+            )
+            assert runtime_table.c.change_summary.nullable is False
+            assert runtime_table.c.decision_outcome.nullable is True
+            assert _constraint_names(runtime_table) == (
+                (
+                    _constraint_names(frozen_table)
+                    - {"ck_collaboration_updates_human_actor"}
+                )
+                | {
+                    "ck_collaboration_updates_actor",
+                    "ck_collaboration_updates_change_summary",
+                    "ck_collaboration_updates_decision_outcome",
+                }
+            )
+            assert {index.name for index in runtime_table.indexes} == (
+                {index.name for index in frozen_table.indexes}
+                | {"ix_collaboration_updates_actor_guest"}
+            )
+        elif table_name == "editor_collaboration_leases":
+            assert runtime_table.c.user_id.nullable is True
+            assert runtime_table.c.session_id.nullable is True
+            assert _constraint_names(runtime_table) == (
+                _constraint_names(frozen_table)
+                | {"ck_collaboration_leases_actor"}
+            )
+            actor_constraint = next(
+                constraint
+                for constraint in runtime_table.constraints
+                if constraint.name == "ck_collaboration_leases_actor"
+            )
+            assert "session_id IS NOT NULL" in str(actor_constraint.sqltext)
+            assert "session_id IS NULL" in str(actor_constraint.sqltext)
+            assert {index.name for index in runtime_table.indexes} == (
+                {index.name for index in frozen_table.indexes}
+                | {"ix_collaboration_leases_guest_identity"}
+            )
+        else:
+            assert _constraint_names(runtime_table) == _constraint_names(
+                frozen_table
+            )
+            assert {index.name for index in runtime_table.indexes} == {
+                index.name for index in frozen_table.indexes
+            }
 
 
 def test_upgrade_emits_legacy_extensions_fks_and_tenant_security(

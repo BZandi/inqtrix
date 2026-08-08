@@ -41,23 +41,47 @@ export function formatDurationMsShort(ms: number): string {
 /** Chat-style message timestamp used anywhere a conversational entry needs the
  * same date + time surface. It intentionally uses the viewer's local timezone,
  * matching the previous chat-only formatter. */
+// `Intl.DateTimeFormat` construction is the expensive part; formatting
+// with an existing instance is cheap. A chat list rebuilt two of them
+// per message on every render, so the cost scaled with conversation
+// length for a result that only ever depends on the locale. Keyed by
+// locale so alternating languages in one list cannot bleed into each
+// other, and module-level so the instances survive re-renders.
+const messageTimestampFormatters = new Map<
+  string,
+  { date: Intl.DateTimeFormat; time: Intl.DateTimeFormat }
+>()
+
+function messageTimestampFormatter(locale: string): {
+  date: Intl.DateTimeFormat
+  time: Intl.DateTimeFormat
+} {
+  const cached = messageTimestampFormatters.get(locale)
+  if (cached) return cached
+  const formatterLocale = locale === 'de' ? 'de-DE' : 'en-US'
+  const created = {
+    date: new Intl.DateTimeFormat(formatterLocale, locale === 'de'
+      ? {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      }
+      : {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+      }),
+    time: new Intl.DateTimeFormat(formatterLocale, {
+      hour: locale === 'de' ? '2-digit' : 'numeric',
+      minute: '2-digit',
+    }),
+  }
+  messageTimestampFormatters.set(locale, created)
+  return created
+}
+
 export function formatMessageTimestamp(iso: string, locale: string): string {
   const date = new Date(iso)
-  const formatterLocale = locale === 'de' ? 'de-DE' : 'en-US'
-  const dateLabel = new Intl.DateTimeFormat(formatterLocale, locale === 'de'
-    ? {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-    }
-    : {
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric',
-    }).format(date)
-  const timeLabel = new Intl.DateTimeFormat(formatterLocale, {
-    hour: locale === 'de' ? '2-digit' : 'numeric',
-    minute: '2-digit',
-  }).format(date)
-  return `${dateLabel} · ${timeLabel}`
+  const formatter = messageTimestampFormatter(locale)
+  return `${formatter.date.format(date)} · ${formatter.time.format(date)}`
 }

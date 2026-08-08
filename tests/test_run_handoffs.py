@@ -21,6 +21,7 @@ def _make_store() -> PostgresRunStore:
     store._local = {}
     store._swept_waiting = SimpleQueue()
     store._parents_to_wake = SimpleQueue()
+    store._failed_cascades = SimpleQueue()
     return store
 
 

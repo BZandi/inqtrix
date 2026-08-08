@@ -4,7 +4,19 @@
 
 ## Scope
 
-Copy-paste `.env` recipes for every supported LLM + search provider combination, configured purely through environment variables — no Python. This is the env-driven front door for the HTTP server (`python -m inqtrix`) and the Stack-mode compose stack. Library-mode users who build providers in Python keep using the explicit constructors (see [Library mode](../deployment/library-mode.md) and the scripts in [`examples/provider_stacks/`](../../examples/provider_stacks/)); this page is for the server/Stack-mode path.
+Copy-paste environment recipes for every supported LLM + search provider
+combination, configured without Python code. Host-side server mode may place
+both blocks of a recipe in one private `.env`. Stack mode must keep the blocks
+separate: copy **visible configuration** into the selected
+`deploy/.env.stack.<name>` and **credentials** into its single companion
+`deploy/.env.stack.secrets.<name>`. Never copy a credential into the visible
+stack file.
+
+This is the env-driven front door for the HTTP server
+(`python -m inqtrix`) and the Stack-mode Compose deployment. Library-mode
+users who build providers in Python keep using the explicit constructors (see
+[Library mode](../deployment/library-mode.md) and the scripts in
+[`examples/provider_stacks/`](../../examples/provider_stacks/)).
 
 **What these settings give you.** With one LLM + one search provider configured, the server runs the full agent: iterative web research with live SSE events (`/v1/runs`), the OpenAI-compatible chat endpoint (`/v1/chat/completions`), and the editor/text-improvement endpoints. The *search* provider only does web search — the *LLM* does the reasoning, planning, and answer synthesis, so the server is far more than "just web search". Features that need extra infrastructure — knowledge/RAG over your own documents, file uploads, multi-user/sharing — are **not** enabled by these recipes; see [More configuration](#more-configuration-production) below. The full endpoint surface is documented in [Web server mode](../deployment/webserver-mode.md).
 
@@ -34,7 +46,15 @@ LLM down the side, search across the top. Each cell links to a runnable webserve
 
 ## Recipe shape
 
-Each recipe is: pick **one** LLM block + **one** search block, set the model names, start the server, verify. `INQTRIX_SELECTABLE_CHAT_MODELS` (comma-separated) populates the in-app model picker and appears in every recipe so the surface is uniform — drop it if you do not want an explicit picker.
+Each recipe has exactly two labelled blocks: visible configuration and
+credentials. Pick **one** LLM block + **one** search block, set the model
+names, and replace the corresponding canonical assignments in a copied stack
+template; never append a second assignment for an existing key. Place
+credentials according to the deployment mode described above, start the server,
+and verify. `INQTRIX_SELECTABLE_CHAT_MODELS`
+(comma-separated) populates the in-app model picker and appears in every
+recipe so the surface is uniform — drop it if you do not want an explicit
+picker.
 
 ## Recipes
 
@@ -43,18 +63,19 @@ Each recipe is: pick **one** LLM block + **one** search block, set the model nam
 Any model behind an OpenAI-compatible gateway (LiteLLM proxy, OpenRouter, vLLM, Ollama) + Perplexity search. This is the zero-config default — both selectors may be omitted.
 
 ```dotenv
-# LLM axis
+# Visible configuration
 INQTRIX_LLM_PROVIDER=litellm
 LITELLM_BASE_URL=http://localhost:4000/v1
-LITELLM_API_KEY=sk-...
-# Search axis (independent of the LLM axis)
 INQTRIX_SEARCH_PROVIDER=perplexity
-PERPLEXITY_API_KEY=pplx-...
-# Models
 REASONING_MODEL=gpt-4o
 SEARCH_MODEL=perplexity-sonar-pro-agent
-# Comma-separated ids for the in-app model picker (optional)
 INQTRIX_SELECTABLE_CHAT_MODELS=gpt-4o,gpt-4o-mini
+```
+
+```dotenv
+# Credentials
+LITELLM_API_KEY=sk-...
+PERPLEXITY_API_KEY=pplx-...
 ```
 
 Python equivalent: [`examples/webserver_stacks/litellm_perplexity.py`](../../examples/webserver_stacks/litellm_perplexity.py).
@@ -64,20 +85,21 @@ Python equivalent: [`examples/webserver_stacks/litellm_perplexity.py`](../../exa
 Claude models via the direct Messages API + Perplexity search.
 
 ```dotenv
-# LLM axis
+# Visible configuration
 INQTRIX_LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-# Search axis
 INQTRIX_SEARCH_PROVIDER=perplexity
-PERPLEXITY_API_KEY=pplx-...
-# Models
 REASONING_MODEL=claude-opus-4-8
 TIER_HIGH_MODEL=claude-opus-4-8
 TIER_MID_MODEL=claude-sonnet-4-6
 TIER_FAST_MODEL=claude-haiku-4-5
 TIER_HIGH_EFFORT=medium
-# Comma-separated ids for the in-app model picker (optional)
 INQTRIX_SELECTABLE_CHAT_MODELS=claude-opus-4-8,claude-sonnet-4-6,claude-haiku-4-5
+```
+
+```dotenv
+# Credentials
+ANTHROPIC_API_KEY=sk-ant-...
+PERPLEXITY_API_KEY=pplx-...
 ```
 
 Python equivalent: [`examples/webserver_stacks/anthropic_perplexity.py`](../../examples/webserver_stacks/anthropic_perplexity.py).
@@ -87,23 +109,25 @@ Python equivalent: [`examples/webserver_stacks/anthropic_perplexity.py`](../../e
 GPT models on Azure (the model name is the **deployment** name) + Perplexity search. Authenticate with an API key **or** an Entra Service Principal (all three SP variables together).
 
 ```dotenv
-# LLM axis
+# Visible configuration
 INQTRIX_LLM_PROVIDER=azure
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-AZURE_OPENAI_API_KEY=...
-#   ... or Service Principal instead of the key:
-# AZURE_TENANT_ID=...
-# AZURE_CLIENT_ID=...
-# AZURE_CLIENT_SECRET=...
-# Search axis
+# Optional Service Principal identity instead of an API key:
+# AZURE_TENANT_ID=your-tenant-id
+# AZURE_CLIENT_ID=your-client-id
 INQTRIX_SEARCH_PROVIDER=perplexity
-PERPLEXITY_API_KEY=pplx-...
-# Models (deployment names, not model ids)
 REASONING_MODEL=gpt-5.4
 TIER_HIGH_MODEL=gpt-5.4
 TIER_FAST_MODEL=gpt-5.4-mini
-# Comma-separated deployment names for the in-app model picker (optional)
 INQTRIX_SELECTABLE_CHAT_MODELS=gpt-5.4,gpt-5.4-mini
+```
+
+```dotenv
+# Credentials: use the Azure API key OR the client secret belonging to the
+# visible tenant/client identity above.
+AZURE_OPENAI_API_KEY=...
+# AZURE_CLIENT_SECRET=...
+PERPLEXITY_API_KEY=pplx-...
 ```
 
 Python equivalent: [`examples/webserver_stacks/azure_openai_perplexity.py`](../../examples/webserver_stacks/azure_openai_perplexity.py).
@@ -113,25 +137,26 @@ Python equivalent: [`examples/webserver_stacks/azure_openai_perplexity.py`](../.
 GPT models on Azure + the Azure AI Foundry Web Search agent. The cleanest enterprise combo: one Entra Service Principal authenticates **both** axes.
 
 ```dotenv
-# LLM axis
+# Visible configuration
 INQTRIX_LLM_PROVIDER=azure
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-# Search axis
 INQTRIX_SEARCH_PROVIDER=azure_foundry
 AZURE_AI_PROJECT_ENDPOINT=https://your-project.services.ai.azure.com/api/projects/your-project
 WEB_SEARCH_AGENT_NAME=web-search-agent
 # WEB_SEARCH_AGENT_VERSION=2          # optional pin
-# Shared Service Principal (authenticates both the LLM and the search agent):
+# Shared Service Principal identity (authenticates both axes):
 AZURE_TENANT_ID=...
 AZURE_CLIENT_ID=...
+REASONING_MODEL=gpt-5.4
+INQTRIX_SELECTABLE_CHAT_MODELS=gpt-5.4,gpt-5.4-mini
+```
+
+```dotenv
+# Credentials: use the shared Service Principal secret ...
 AZURE_CLIENT_SECRET=...
-#   ... or per-axis API keys instead:
+# ... or omit it and use per-axis API keys instead:
 # AZURE_OPENAI_API_KEY=...
 # AZURE_AI_PROJECT_API_KEY=...
-# Models
-REASONING_MODEL=gpt-5.4
-# Comma-separated deployment names for the in-app model picker (optional)
-INQTRIX_SELECTABLE_CHAT_MODELS=gpt-5.4,gpt-5.4-mini
 ```
 
 Python equivalent: [`examples/webserver_stacks/azure_foundry_web_search.py`](../../examples/webserver_stacks/azure_foundry_web_search.py).
@@ -141,20 +166,21 @@ Python equivalent: [`examples/webserver_stacks/azure_foundry_web_search.py`](../
 Claude models on AWS Bedrock (credentials via the standard AWS chain — named profile, env vars, or instance role) + Perplexity search.
 
 ```dotenv
-# LLM axis
+# Visible configuration
 INQTRIX_LLM_PROVIDER=bedrock
 AWS_PROFILE=your-profile           # optional; omit to use the default AWS chain
 AWS_REGION=eu-central-1
-# Search axis
 INQTRIX_SEARCH_PROVIDER=perplexity
-PERPLEXITY_API_KEY=pplx-...
-# Models (Bedrock model ids)
 REASONING_MODEL=eu.anthropic.claude-opus-4-8-v1
 TIER_HIGH_MODEL=eu.anthropic.claude-opus-4-8-v1
 TIER_MID_MODEL=eu.anthropic.claude-sonnet-4-6
 TIER_FAST_MODEL=eu.anthropic.claude-haiku-4-5
-# Comma-separated model ids for the in-app model picker (optional)
 INQTRIX_SELECTABLE_CHAT_MODELS=eu.anthropic.claude-opus-4-8-v1,eu.anthropic.claude-sonnet-4-6
+```
+
+```dotenv
+# Credentials. Bedrock itself uses the normal AWS credential chain.
+PERPLEXITY_API_KEY=pplx-...
 ```
 
 Python equivalent: [`examples/webserver_stacks/bedrock_perplexity.py`](../../examples/webserver_stacks/bedrock_perplexity.py).
@@ -196,7 +222,11 @@ The recipes above cover the providers and models. Everything else lives in dedic
 ## Verify
 
 ```bash
+# uv
 uv run python -m inqtrix
+
+# or, after `python -m pip install -e .`
+python -m inqtrix
 # in a second shell:
 curl http://localhost:5100/health        # llm.provider / search.provider + model identity
 curl http://localhost:5100/v1/capabilities

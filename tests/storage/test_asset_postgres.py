@@ -2,23 +2,41 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
+import time
 import uuid
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
+from inqtrix.content.ports import FileRecord
 from inqtrix.pagination import decode_cursor
 from inqtrix.project.asset_records_postgres import PostgresAssetStore
-from inqtrix.project.asset_records_ports import AssetNotFound
+from inqtrix.project.asset_records_ports import (
+    AssetDeletionInProgress,
+    AssetNotFound,
+    GroupNotFound,
+)
 from inqtrix.project.scoped_upsert import ResourceScope
+from inqtrix.runs.deletion_operations import DeletionTargetKind
+from inqtrix.runs.deletion_postgres import PostgresDeletionOperationStore
 from inqtrix.storage.asset_records_orm import (
     asset_groups,
     asset_records,
     asset_sections,
 )
 from inqtrix.storage.db import build_engine, build_session_factory
+from inqtrix.storage.deletions_orm import (
+    deletion_operation_assets,
+    deletion_operation_events,
+    deletion_operations,
+)
+from inqtrix.storage.content_orm import files
+from inqtrix.storage.content_postgres import PostgresFileRegistry
 from inqtrix.storage.migrate import run_migrations
 from tests.storage._canonical_users import (
     canonical_user_id,
@@ -27,10 +45,7 @@ from tests.storage._canonical_users import (
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 USER_ID = canonical_user_id("asset-user")
@@ -60,6 +75,7 @@ async def store():
             if not bypasses:
                 pytest.fail("INQTRIX_TEST_DATABASE_URL must connect as superuser/BYPASSRLS.")
             await session.execute(asset_records.delete())
+            await session.execute(files.delete())
             await session.execute(asset_groups.delete())
             await session.execute(asset_sections.delete())
             await ensure_canonical_users(
@@ -98,10 +114,95 @@ async def _asset(
         id=aid, section_id=section_id, group_id=group_id, title="A", label="A",
         file_name="a.pdf", mime_type="application/pdf", origin="library",
         page_count=2, parse_status="parsed", parse_warning=None, text_truncated=True,
-        size_bytes=10, server_file_id="fl_1", extracted_text=text,
+        size_bytes=10, server_file_id=None, extracted_text=text,
         created_at=created_at, updated_at=created_at, created_by_user_id=owner,
         workspace_id=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_prepared_section_identity_converges_concurrent_scopes(store) -> None:
+    first, second = await asyncio.gather(
+        store.ensure_default_sections(
+            created_by_user_id=USER_1_ID,
+            workspace_id="workspace-a",
+        ),
+        store.ensure_default_sections(
+            created_by_user_id=USER_1_ID,
+            workspace_id="workspace-a",
+        ),
+    )
+    assert [section.id for section in first] == [section.id for section in second]
+    assert [section.semantic_role for section in first] == [
+        "temporary",
+        "library",
+        "project_sources",
+    ]
+
+    same_owner_other_workspace = await store.ensure_default_sections(
+        created_by_user_id=USER_1_ID,
+        workspace_id="workspace-b",
+    )
+    other_owner_same_workspace = await store.ensure_default_sections(
+        created_by_user_id=USER_2_ID,
+        workspace_id="workspace-a",
+    )
+    assert {section.id for section in first}.isdisjoint(
+        section.id for section in same_owner_other_workspace
+    )
+    assert {section.id for section in first}.isdisjoint(
+        section.id for section in other_owner_same_workspace
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepared_role_unique_but_equal_custom_titles_are_allowed(store) -> None:
+    prepared = await store.ensure_default_sections(
+        created_by_user_id=USER_ID,
+        workspace_id=None,
+    )
+    library = next(
+        section for section in prepared if section.semantic_role == "library"
+    )
+    custom_a = await store.upsert_section(
+        id="custom_same_a",
+        kind="custom",
+        title="Bibliothek",
+        created_at=2.0,
+        updated_at=2.0,
+        created_by_user_id=USER_ID,
+        workspace_id=None,
+    )
+    custom_b = await store.upsert_section(
+        id="custom_same_b",
+        kind="custom",
+        title="Bibliothek",
+        created_at=3.0,
+        updated_at=3.0,
+        created_by_user_id=USER_ID,
+        workspace_id=None,
+    )
+    assert custom_a.semantic_role == custom_b.semantic_role == "custom"
+
+    renamed = await store.upsert_section(
+        id=library.id,
+        kind=library.kind,
+        title="Meine Ablage",
+        created_at=library.created_at,
+        updated_at=4.0,
+        created_by_user_id=USER_ID,
+        workspace_id=None,
+    )
+    assert renamed.semantic_role == "custom"
+    replacement = next(
+        section
+        for section in await store.ensure_default_sections(
+            created_by_user_id=USER_ID,
+            workspace_id=None,
+        )
+        if section.semantic_role == "library"
+    )
+    assert replacement.id != library.id
 
 
 @pytest.mark.asyncio
@@ -118,6 +219,109 @@ async def test_asset_list_excludes_body_get_includes_it(store) -> None:
     assert page[0].text_truncated is True  # int 1 round-trips to bool
     full = await store.get_asset("fa_1")
     assert full.extracted_text == "HEAVY"
+
+
+@pytest.mark.asyncio
+async def test_asset_deletion_detaches_bound_file_without_losing_retry_anchor(
+    store,
+) -> None:
+    await _section(store, "fsec_bound_delete")
+    asset = await _asset(
+        store,
+        "fa_bound_delete",
+        section_id="fsec_bound_delete",
+    )
+    file_record = FileRecord(
+        id="fl_bound_delete",
+        tenant_id="default",
+        owner_user_id=USER_ID,
+        workspace_id=None,
+        file_name="bound.txt",
+        content_type="text/plain",
+        size_bytes=12,
+        sha256="a" * 64,
+        object_key="tenants/default/files/fl_bound_delete",
+        created_at=1.0,
+    )
+    registry_engine = build_engine(TEST_DATABASE_URL)
+    registry = PostgresFileRegistry(
+        session_factory=build_session_factory(registry_engine),
+        app_role=APP_ROLE,
+    )
+    try:
+        await registry.create(file_record)
+        bound = await store.finalize_asset_upload(
+            id=asset.id,
+            section_id=asset.section_id,
+            group_id=asset.group_id,
+            title=asset.title,
+            label=asset.label,
+            file_name=file_record.file_name,
+            mime_type=file_record.content_type,
+            origin=asset.origin,
+            page_count=asset.page_count,
+            parse_status=asset.parse_status,
+            parse_warning=asset.parse_warning,
+            text_truncated=asset.text_truncated,
+            size_bytes=file_record.size_bytes,
+            server_file_id=file_record.id,
+            parser_id="markitdown:test",
+            created_at=asset.created_at,
+            updated_at=2.0,
+            scope=ResourceScope.from_record(asset),
+        )
+        await store.set_asset_deletion_state(
+            asset.id,
+            scope=ResourceScope.from_record(asset),
+            lifecycle_status="deleting",
+            deletion_operation_id="del_bound_delete",
+            deletion_stage="knowledge_removed",
+            deletion_error=None,
+        )
+
+        with pytest.raises(IntegrityError):
+            await registry.delete(file_record.id, tenant_id="default")
+
+        with pytest.raises(
+            RuntimeError,
+            match="asset file binding changed during deletion",
+        ):
+            await store.detach_server_file_for_deletion(
+                asset.id,
+                scope=ResourceScope.from_record(asset),
+                operation_id="del_bound_delete",
+                expected_server_file_id="fl_other",
+            )
+        with pytest.raises(AssetDeletionInProgress):
+            await store.detach_server_file_for_deletion(
+                asset.id,
+                scope=ResourceScope.from_record(asset),
+                operation_id="del_other",
+                expected_server_file_id=file_record.id,
+            )
+
+        detached = await store.detach_server_file_for_deletion(
+            asset.id,
+            scope=ResourceScope.from_record(asset),
+            operation_id="del_bound_delete",
+            expected_server_file_id=file_record.id,
+        )
+        repeated = await store.detach_server_file_for_deletion(
+            asset.id,
+            scope=ResourceScope.from_record(asset),
+            operation_id="del_bound_delete",
+            expected_server_file_id=file_record.id,
+        )
+
+        assert bound.server_file_id == file_record.id
+        assert detached.server_file_id is None
+        assert repeated.server_file_id is None
+        assert repeated.lifecycle_status == "deleting"
+        assert repeated.deletion_operation_id == "del_bound_delete"
+        assert await registry.delete(file_record.id, tenant_id="default") == file_record
+        assert (await store.get_asset(asset.id)).server_file_id is None
+    finally:
+        await registry_engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -160,7 +364,7 @@ async def test_asset_upsert_preserves_created_at_and_owner(store) -> None:
         id="fa_1", section_id="fsec_1", group_id=None, title="renamed", label="A",
         file_name="a.pdf", mime_type="application/pdf", origin="library",
         page_count=2, parse_status="parsed", parse_warning=None, text_truncated=False,
-        size_bytes=10, server_file_id="fl_1", extracted_text="v2",
+        size_bytes=10, server_file_id=None, extracted_text="v2",
         created_at=999.0, updated_at=200.0,
         created_by_user_id=USER_1_ID, workspace_id=None,
     )
@@ -190,8 +394,8 @@ async def test_asset_cross_owner_id_collision_is_not_found(store) -> None:
 
 @pytest.mark.asyncio
 async def test_section_cascade_and_group_orphan(store) -> None:
-    await _section(store, "fsec_1")
-    await store.upsert_group(
+    section = await _section(store, "fsec_1")
+    group = await store.upsert_group(
         id="fg_1", section_id="fsec_1", title="G", created_at=1.0, updated_at=1.0,
         created_by_user_id=USER_ID, workspace_id=None,
     )
@@ -199,13 +403,13 @@ async def test_section_cascade_and_group_orphan(store) -> None:
     # Group delete -> asset orphans to ungrouped (SET NULL).
     await store.delete_group(
         "fg_1",
-        scope=ResourceScope.from_record(await store.get_group("fg_1")),
+        scope=ResourceScope.from_record(group),
     )
     assert (await store.get_asset("fa_1")).group_id is None
     # Section delete -> cascades its assets (FK CASCADE).
     await store.delete_section(
         "fsec_1",
-        scope=ResourceScope.from_record(await store.get_section("fsec_1")),
+        scope=ResourceScope.from_record(section),
     )
     page, _ = await store.list_assets_page(
         created_by_user_id=USER_ID,
@@ -214,3 +418,148 @@ async def test_section_cascade_and_group_orphan(store) -> None:
         after=None,
     )
     assert page == []
+
+
+@pytest.mark.asyncio
+async def test_group_receipt_fences_upload_and_commits_orphaning_atomically(
+    store,
+) -> None:
+    """A retained group receipt is the lock and the terminal DB truth.
+
+    The group must remain addressable while its worker is running, upload
+    finalisation must not enter it, and the FK orphaning must land in the same
+    commit that makes the receipt terminal.
+    """
+
+    await _section(store, "fsec_group_receipt")
+    group = await store.upsert_group(
+        id="fg_group_receipt",
+        section_id="fsec_group_receipt",
+        title="G",
+        created_at=1.0,
+        updated_at=1.0,
+        created_by_user_id=USER_ID,
+        workspace_id=None,
+    )
+    asset = await _asset(
+        store,
+        "fa_group_receipt",
+        section_id="fsec_group_receipt",
+        group_id=group.id,
+    )
+
+    operation_engine = build_engine(TEST_DATABASE_URL)
+    deletion_store = PostgresDeletionOperationStore(
+        engine=operation_engine,
+        app_role=APP_ROLE,
+        queue=None,
+        max_concurrent=1,
+        completed_ttl_seconds=3600,
+        worker_id="asset-group-receipt-test",
+        recover_orphans=False,
+    )
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    operation_id: str | None = None
+
+    def _work(handle) -> None:
+        worker_started.set()
+        if not release_worker.wait(timeout=10):
+            raise RuntimeError("test did not release group deletion worker")
+        handle.complete()
+
+    try:
+        summary = deletion_store.submit(
+            target_kind=DeletionTargetKind.GROUP,
+            target_id=group.id,
+            manifest=(),
+            tenant_id="default",
+            created_by_user_id=USER_ID,
+            workspace_id=None,
+            work=_work,
+            total_items=1,
+        )
+        operation_id = str(summary["operation_id"])
+        assert await asyncio.to_thread(worker_started.wait, 5)
+
+        assert any(
+            item.id == group.id
+            for item in await store.list_groups(
+                created_by_user_id=USER_ID,
+                workspace_id=None,
+            )
+        )
+        with pytest.raises(GroupNotFound):
+            await store.finalize_asset_upload(
+                id=asset.id,
+                section_id=asset.section_id,
+                group_id=asset.group_id,
+                title=asset.title,
+                label=asset.label,
+                file_name=asset.file_name,
+                mime_type=asset.mime_type,
+                origin=asset.origin,
+                page_count=asset.page_count,
+                parse_status=asset.parse_status,
+                parse_warning=asset.parse_warning,
+                text_truncated=asset.text_truncated,
+                size_bytes=asset.size_bytes,
+                server_file_id="file_group_receipt",
+                parser_id="markitdown:test",
+                created_at=asset.created_at,
+                updated_at=2.0,
+                scope=ResourceScope.from_record(asset),
+                upload_operation_id="upload_group_receipt",
+            )
+
+        release_worker.set()
+        deadline = time.monotonic() + 10
+        while True:
+            receipt = deletion_store.get(
+                operation_id,
+                tenant_id="default",
+                created_by_user_id=USER_ID,
+                workspace_id=None,
+            )
+            if receipt["status"] == "deleted":
+                break
+            if time.monotonic() >= deadline:
+                pytest.fail(f"group deletion did not finish: {receipt}")
+            await asyncio.sleep(0.05)
+
+        assert all(
+            item.id != group.id
+            for item in await store.list_groups(
+                created_by_user_id=USER_ID,
+                workspace_id=None,
+            )
+        )
+        orphaned = await store.get_asset(asset.id)
+        assert orphaned.group_id is None
+        assert orphaned.server_file_id is None
+    finally:
+        release_worker.set()
+        deletion_store.close()
+        if operation_id is not None:
+            cleanup_engine = build_engine(TEST_DATABASE_URL)
+            cleanup_factory = build_session_factory(cleanup_engine)
+            async with cleanup_factory() as session:
+                async with session.begin():
+                    await session.execute(
+                        deletion_operation_events.delete().where(
+                            deletion_operation_events.c.operation_id
+                            == operation_id
+                        )
+                    )
+                    await session.execute(
+                        deletion_operation_assets.delete().where(
+                            deletion_operation_assets.c.operation_id
+                            == operation_id
+                        )
+                    )
+                    await session.execute(
+                        deletion_operations.delete().where(
+                            deletion_operations.c.operation_id == operation_id
+                        )
+                    )
+            await cleanup_engine.dispose()

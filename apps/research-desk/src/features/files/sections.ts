@@ -1,4 +1,7 @@
-import type { FileLibrarySectionRecord } from '@/features/project/types'
+import type {
+  FileLibrarySectionRecord,
+  FileSectionSemanticRole,
+} from '@/features/project/types'
 import { createProjectEntityId } from '@/features/project/entityId'
 
 export const LEGACY_FILE_SECTION_IDS = [
@@ -6,6 +9,12 @@ export const LEGACY_FILE_SECTION_IDS = [
   'file-section-library',
   'file-section-sources',
 ] as const
+
+const DEFAULT_FILE_SECTION_SIGNATURES = new Set([
+  'temporary:Temporäre Dateien',
+  'custom:Bibliothek',
+  'custom:Projekt-Quellen',
+])
 
 export function createFileSectionId(): string {
   return createProjectEntityId('file-section')
@@ -18,10 +27,17 @@ export function createFileSectionId(): string {
  */
 export function createDefaultFileLibrarySections(now: string): FileLibrarySectionRecord[] {
   return [
-    { createdAt: now, id: createFileSectionId(), kind: 'temporary', title: 'Temporäre Dateien', updatedAt: now },
-    { createdAt: now, id: createFileSectionId(), kind: 'custom', title: 'Bibliothek', updatedAt: now },
-    { createdAt: now, id: createFileSectionId(), kind: 'custom', title: 'Projekt-Quellen', updatedAt: now },
+    { createdAt: now, id: createFileSectionId(), isBootstrapPlaceholder: true, kind: 'temporary', semanticRole: 'temporary', title: 'Temporäre Dateien', updatedAt: now },
+    { createdAt: now, id: createFileSectionId(), isBootstrapPlaceholder: true, kind: 'custom', semanticRole: 'library', title: 'Bibliothek', updatedAt: now },
+    { createdAt: now, id: createFileSectionId(), isBootstrapPlaceholder: true, kind: 'custom', semanticRole: 'project_sources', title: 'Projekt-Quellen', updatedAt: now },
   ]
+}
+
+export function isPristineDefaultFileSection(
+  section: FileLibrarySectionRecord,
+): boolean {
+  return section.createdAt === section.updatedAt
+    && DEFAULT_FILE_SECTION_SIGNATURES.has(`${section.kind}:${section.title}`)
 }
 
 export function temporaryFileSectionId(
@@ -47,4 +63,42 @@ export function legacyFileSectionIdReplacements(
     replacements[legacyId] = replacement
   }
   return replacements
+}
+
+const PREPARED_ROLES: ReadonlySet<FileSectionSemanticRole> = new Set([
+  'temporary',
+  'library',
+  'project_sources',
+])
+
+/**
+ * Redirect local bootstrap IDs to the server's canonical prepared-role IDs.
+ *
+ * A user-created/renamed section is never rekeyed merely because its title
+ * matches a default. Only an explicit local bootstrap role participates.
+ */
+export function defaultFileSectionIdReplacements(
+  sections: Record<string, FileLibrarySectionRecord>,
+  canonicalSections: readonly FileLibrarySectionRecord[],
+): Record<string, string> {
+  const canonicalByRole = new Map(
+    canonicalSections.flatMap((section) => (
+      section.semanticRole && PREPARED_ROLES.has(section.semanticRole)
+        ? [[section.semanticRole, section.id] as const]
+        : []
+    )),
+  )
+  return Object.fromEntries(
+    Object.values(sections).flatMap((section) => {
+      if (
+        section.isBootstrapPlaceholder !== true
+        || !section.semanticRole
+        || !PREPARED_ROLES.has(section.semanticRole)
+      ) return []
+      const canonicalId = canonicalByRole.get(section.semanticRole)
+      return canonicalId && canonicalId !== section.id
+        ? [[section.id, canonicalId] as const]
+        : []
+    }),
+  )
 }

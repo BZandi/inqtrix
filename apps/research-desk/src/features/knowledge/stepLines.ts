@@ -1,11 +1,17 @@
 import type { KnowledgeRunStepRecord } from '@/features/project/types'
 import type { TranslationDictionary } from '@/i18n/translations'
+import {
+  knowledgeRetrievalDegradationText,
+  knowledgeSearchWarningNotice,
+} from './retrievalDegradation'
 
 export type KnowledgeStepLine = {
   id: string
+  information?: string
   status: 'running' | 'done'
   primary: string
   secondary?: string
+  warning?: string
 }
 
 type KnowledgeStrings = TranslationDictionary['knowledge']
@@ -54,8 +60,25 @@ export function knowledgeStepLine(
         : facts.collectionDocumentCount !== undefined
           ? t.stepRetrievalDoneDocs
           : collectionCount === 1 ? t.stepRetrievalDoneOne : t.stepRetrievalDone
+      const searchWarningNotices = (facts.retrievalWarnings ?? []).map(
+        (warning) => knowledgeSearchWarningNotice(warning, t),
+      )
+      const warningMessages = [
+        ...(facts.retrievalDegradations ?? []).map(
+          (degradation) => knowledgeRetrievalDegradationText(degradation, t),
+        ),
+        ...searchWarningNotices
+          .filter((notice) => notice.tone === 'warning')
+          .map((notice) => notice.message),
+      ]
+      const informationalMessages = searchWarningNotices
+        .filter((notice) => notice.tone === 'informational')
+        .map((notice) => notice.message)
       return {
         id: step.id,
+        information: informationalMessages.length > 0
+          ? [...new Set(informationalMessages)].join(' ')
+          : undefined,
         primary: template
           .replace('{count}', String(collectionCount))
           .replace('{docs}', String(facts.collectionDocumentCount ?? 0))
@@ -68,6 +91,9 @@ export function knowledgeStepLine(
               .replace('{finalK}', String(facts.finalK))
           : undefined,
         status: step.status,
+        warning: warningMessages.length > 0
+          ? [...new Set(warningMessages)].join(' ')
+          : undefined,
       }
     }
     case 'evidence': {
@@ -83,12 +109,15 @@ export function knowledgeStepLine(
     case 'gate': {
       const verdict = facts.sufficient ? t.stepGateSufficient : t.stepGateInsufficient
       const rewrite = facts.rewritten ? ` · ${t.stepGateRewritten}` : ''
+      const degraded = facts.gateMarker?.includes('fallback')
+        ? ` · ${t.stepGateFallback}`
+        : ''
       return {
         id: step.id,
         primary: t.stepGate
           .replace('{round}', String(facts.round ?? 1))
           .replace('{total}', String(facts.roundsTotal ?? 1)),
-        secondary: `${verdict}${rewrite}`,
+        secondary: `${verdict}${rewrite}${degraded}`,
         status: step.status,
       }
     }
@@ -107,9 +136,11 @@ export function knowledgeStepLine(
     case 'grounding':
       return {
         id: step.id,
-        primary: t.stepGrounding
-          .replace('{total}', String(facts.quotesTotal ?? 0))
-          .replace('{verified}', String(facts.quotesVerified ?? 0)),
+        primary: facts.groundingMarker?.includes('fallback')
+          ? t.stepGroundingUnavailable
+          : t.stepGrounding
+            .replace('{total}', String(facts.quotesTotal ?? 0))
+            .replace('{verified}', String(facts.quotesVerified ?? 0)),
         status: step.status,
       }
   }

@@ -143,6 +143,29 @@ class _ProbeService:
         return self.instance
 
 
+class _ClosedBrowser:
+    """Browser peer whose ASGI response completed before a final Node frame."""
+
+    async def send_bytes(self, payload: bytes) -> None:
+        del payload
+        raise RuntimeError(
+            "Unexpected ASGI message 'websocket.send', after sending "
+            "'websocket.close' or response already completed."
+        )
+
+
+@pytest.mark.asyncio
+async def test_late_upstream_frame_after_browser_close_is_a_clean_exit() -> None:
+    """A normal close race must not become an upstream-unavailable warning."""
+    upstream = _FakeUpstream(incoming=(b"late-frame",))
+    async with upstream:
+        await collaboration_gateway._relay_node_to_browser(
+            upstream,
+            _ClosedBrowser(),  # type: ignore[arg-type]
+            SimpleNamespace(max_frame_bytes=64),
+        )
+
+
 def _gateway_client(
     monkeypatch: pytest.MonkeyPatch,
     connector: _Connector,

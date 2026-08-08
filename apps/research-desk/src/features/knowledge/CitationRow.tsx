@@ -144,7 +144,7 @@ function DocumentGroupHeader({
       <FileText className="icon-sm shrink-0 text-muted-foreground/70" />
       <span className="min-w-0 truncate t-list font-medium text-foreground">{group.title}</span>
       {group.citations.length > 1 ? (
-        <span className="shrink-0 t-hint tabular-nums text-muted-foreground/60">
+        <span className="shrink-0 t-hint tabular-nums text-muted-foreground">
           {group.citations.length}
         </span>
       ) : null}
@@ -156,7 +156,7 @@ function DocumentGroupHeader({
   return (
     <button
       className={cn(
-        'flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left transition-colors hover:bg-accent/60',
+        'flex min-h-6 w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left transition-colors hover:bg-accent/60',
         active && 'bg-brand-subtle/60',
       )}
       onClick={() => onOpenDocument?.(group)}

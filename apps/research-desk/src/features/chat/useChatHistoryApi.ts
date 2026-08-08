@@ -26,7 +26,7 @@
  * project-level useProjectServerImport (which pushes chat AND editor in one
  * flow). This hook only hydrates + autosaves once the project is opted in
  * (syncActive), seeding its synced fingerprint to WHAT THE SERVER HOLDS so a
- * local-newer entity is pushed up rather than stranded (the M6a P1 lesson).
+ * local-newer entity is pushed up rather than stranded.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -52,6 +52,7 @@ import {
   serverMessagePayload,
   serverThreadPayload,
   shouldFetchMessageBaselineBeforePush,
+  shouldLoadServerChatMessages,
   threadNeedsSync,
   threadRecordFromServer,
   type ThreadFingerprint,
@@ -393,11 +394,20 @@ export function useChatHistoryApi({
   const loadThreadMessages = useCallback(
     async (threadId: string, { surfaceErrors }: { surfaceErrors: boolean }) => {
       const thread = threadsRef.current[threadId]
-      if (!thread || thread.messages.length > 0) return
-      if (loadedThreadsRef.current.has(threadId)) return
-      loadedThreadsRef.current.add(threadId)
       const markResolved = () =>
         setMessageLoadResolved((prev) => (prev.has(threadId) ? prev : new Set(prev).add(threadId)))
+      const serverThreadKnown = syncedThreadsRef.current.has(threadId)
+      if (!shouldLoadServerChatMessages(
+        thread,
+        serverThreadKnown,
+        loadedThreadsRef.current.has(threadId),
+      )) {
+        if (thread && !serverThreadKnown && thread.messages.length === 0) {
+          markResolved()
+        }
+        return
+      }
+      loadedThreadsRef.current.add(threadId)
       try {
         const messages: ReturnType<typeof messageRecordFromServer>[] = []
         let cursor: string | undefined

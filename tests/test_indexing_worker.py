@@ -59,6 +59,47 @@ class StubStore:
     def document_completed(self, job_id, document_id, *, fence_attempt=None):
         self.calls.append(("document_completed", document_id, fence_attempt))
 
+    def document_started(self, job_id, document_id, *, fence_attempt=None):
+        self.calls.append(("document_started", document_id, fence_attempt))
+
+    def document_progress(
+        self,
+        job_id,
+        document_id,
+        phase,
+        *,
+        current_batch=0,
+        total_batches=0,
+        fence_attempt=None,
+    ):
+        self.calls.append(
+            (
+                "document_progress",
+                document_id,
+                phase,
+                current_batch,
+                total_batches,
+                fence_attempt,
+            )
+        )
+
+    def checkpoint_document(
+        self,
+        job_id,
+        document_id,
+        *,
+        embedding_receipt=None,
+        fence_attempt=None,
+    ):
+        self.calls.append(
+            (
+                "checkpoint_document",
+                document_id,
+                embedding_receipt,
+                fence_attempt,
+            )
+        )
+
 
 class StubQueue:
     """Recording queue surface used by direct worker-execution tests."""
@@ -105,14 +146,33 @@ def test_fenced_handle_threads_the_attempt_into_every_write():
 
     handle.begin(5)
     handle.progress(completed_documents=2, current_document_title="doc")
+    handle.document_started("kd_1")
+    handle.document_progress(
+        "kd_1",
+        "contextualization",
+        current_batch=3,
+        total_batches=8,
+    )
     handle.document_completed("kd_1")
+    receipt = {"adjustment_id": "knowledge-generation:one"}
+    handle.checkpoint_document("kd_1", embedding_receipt=receipt)
     handle.complete()
     handle.fail("kaputt")
     handle.cancel("client_requested_cancel")
 
     assert ("set_total", 5, 7) in store.calls
     assert ("progress", 2, 7) in store.calls
+    assert ("document_started", "kd_1", 7) in store.calls
+    assert (
+        "document_progress",
+        "kd_1",
+        "contextualization",
+        3,
+        8,
+        7,
+    ) in store.calls
     assert ("document_completed", "kd_1", 7) in store.calls
+    assert ("checkpoint_document", "kd_1", receipt, 7) in store.calls
     assert ("complete", 7) in store.calls
     assert any(c[0] == "fail" and c[3] == 7 for c in store.calls)
     assert ("cancelled", "client_requested_cancel", 7) in store.calls
@@ -129,6 +189,33 @@ def test_fenced_out_terminal_write_records_no_landing():
     handle.complete()
 
     assert handle.terminal_landed is False
+
+
+def test_indexing_worker_uses_reconcile_cadence_for_generation_retention() -> None:
+    class KnowledgeMaintenance:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def prune_expired_generations_all(self):
+            self.calls += 1
+            return {"collections": 0, "chunks": 0}
+
+    knowledge = KnowledgeMaintenance()
+    loop = IndexingWorkerLoop(
+        store=StubStore(),
+        queue=StubQueue(),
+        knowledge_service=knowledge,
+        concurrency=1,
+        max_attempts=3,
+        heartbeat_seconds=1.0,
+        claim_idle_seconds=5.0,
+    )
+    try:
+        loop._periodic_maintenance()
+    finally:
+        loop._executor.shutdown(wait=True)
+
+    assert knowledge.calls == 1
 
 
 def test_ownerless_worker_job_executes_with_an_explicit_null_actor(
@@ -149,7 +236,7 @@ def test_ownerless_worker_job_executes_with_an_explicit_null_actor(
         handle.complete()
 
     monkeypatch.setattr(
-        "inqtrix.worker.indexing_loop.execute_reindex_job",
+        "inqtrix.worker.indexing_loop.execute_indexing_operation",
         execute,
     )
     loop = make_loop(
@@ -202,7 +289,7 @@ def test_worker_fails_closed_on_incomplete_requester_attribution(
         executed = True
 
     monkeypatch.setattr(
-        "inqtrix.worker.indexing_loop.execute_reindex_job",
+        "inqtrix.worker.indexing_loop.execute_indexing_operation",
         execute,
     )
     loop = make_loop(store=store, queue=queue)
@@ -225,9 +312,7 @@ def test_worker_fails_closed_on_incomplete_requester_attribution(
 
     assert executed is False
     assert any(
-        call[0] == "fail"
-        and call[2] == "authorization_revoked"
-        and call[3] == 4
+        call[0] == "fail" and call[2] == "authorization_revoked" and call[3] == 4
         for call in store.calls
     )
     assert queue.calls == [("ack", "1-0")]

@@ -1,6 +1,6 @@
 import { FileText, Paperclip, Table2, type LucideIcon } from '@/components/icons'
 import type { Locale } from '@/i18n/translations'
-import type { FileAssetRecord, IndexingJobLive, VectorIndexMemberState } from '@/features/project/types'
+import type { FileAssetRecord, IndexingJobLive, VectorIndexMemberState, VectorIndexRecord } from '@/features/project/types'
 import type { VectorIndexMemberResolved } from '@/features/project/selectors'
 
 /** Whether *fileId* is part of the actively running job's working set — only
@@ -104,6 +104,53 @@ export function typeMeta(asset: Pick<FileAssetRecord, 'fileName'>): FileTypeMeta
   return TYPE_BY_EXT[ext] ?? { Icon: Paperclip, label: ext.toUpperCase() || 'DATEI', paged: false }
 }
 
+/** Whether an index member can NEVER embed as it stands: no extracted text,
+ * no server original to re-parse from, AND no upload/parse still in flight
+ * that could deliver either. A fresh placeholder (upload or parse pending)
+ * is "queued", not "no text" — the two read very differently in the UI. */
+export function memberHasNoEmbeddableText(
+  asset: Pick<FileAssetRecord, 'extractedText' | 'parsePending' | 'serverFileId' | 'uploadPending'>,
+): boolean {
+  return (
+    asset.extractedText.trim().length === 0
+    && !asset.serverFileId
+    && !asset.parsePending
+    && !asset.uploadPending
+  )
+}
+
+/** The visual-order id range between the selection anchor and the shift-click
+ * target, inclusive, band-boundary-agnostic (both endpoints live in the same
+ * flattened render order). No anchor or an unknown target degrades to just
+ * the target — a shift-click is then an ordinary toggle. */
+export function rangeBetween(
+  orderedIds: readonly string[],
+  anchorId: string | null,
+  targetId: string,
+): string[] {
+  const to = orderedIds.indexOf(targetId)
+  if (to < 0) return []
+  const from = anchorId ? orderedIds.indexOf(anchorId) : -1
+  if (from < 0) return [targetId]
+  const [start, end] = from < to ? [from, to] : [to, from]
+  return orderedIds.slice(start, end + 1)
+}
+
+export type IngestBadgeState = 'uploading' | 'upload-error' | 'parsing' | null
+
+/** Which transient ingest badge a row shows, in precedence order: the upload
+ * in flight, then a failed upload (retryable), then the parse in flight.
+ * `null` = settled — the row falls back to the provenance badge. Pure so the
+ * precedence is unit-testable like {@link memberCellState}. */
+export function ingestBadgeState(
+  asset: Pick<FileAssetRecord, 'parsePending' | 'uploadError' | 'uploadPending'>,
+): IngestBadgeState {
+  if (asset.uploadPending) return 'uploading'
+  if (asset.uploadError != null) return 'upload-error'
+  if (asset.parsePending) return 'parsing'
+  return null
+}
+
 export type FileStatusKind = 'ok' | 'truncated' | 'failed'
 
 /** Maps the parser's `parseStatus`/`textTruncated` onto the single colored
@@ -127,6 +174,29 @@ export function chunkEstimate(asset: FileAssetRecord): number {
  * collapse to hyphens); the chat/editor resolver owns the authoritative label. */
 export function groupSlug(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'group'
+}
+
+/** The knowledge-collection ids that merely BACK a local vector index. Such a
+ * collection is the index's server-side storage, not a thing of its own, so the
+ * rail must never list it a second time under the server collections. */
+export function indexBackedCollectionIds(
+  indexes: readonly Pick<VectorIndexRecord, 'serverCollectionId'>[],
+): Set<string> {
+  const ids = new Set<string>()
+  for (const index of indexes) {
+    if (index.serverCollectionId) ids.add(index.serverCollectionId)
+  }
+  return ids
+}
+
+/** Server collections the rail shows in their own right: everything that is
+ * not the storage of a local vector index (shared-with-me collections and
+ * collections created outside an index). */
+export function railVisibleServerCollections<T extends { id: string }>(
+  collections: readonly T[],
+  backedIds: ReadonlySet<string>,
+): T[] {
+  return collections.filter((collection) => !backedIds.has(collection.id))
 }
 
 /** Total vectors an index serves = sum of chunk estimates over its embedded

@@ -37,6 +37,8 @@ if TYPE_CHECKING:
         EditorSuggestRequestData,
         EditorSuggestResult,
     )
+from inqtrix.observability.context import with_feature
+from inqtrix.observability.otel import operation_root_span
 
 log = logging.getLogger("inqtrix")
 
@@ -114,6 +116,8 @@ def _structured_tokens(structured: object) -> int:
     )
 
 
+@operation_root_span("editor:suggest", **{"inqtrix.mode": "editor_suggest"})
+@with_feature("editor")
 def run_editor_suggest(
     request: "EditorSuggestRequestData",
     *,
@@ -276,6 +280,8 @@ def run_editor_suggest(
     return result, consumed
 
 
+@operation_root_span("editor:instruct", **{"inqtrix.mode": "editor_instruct"})
+@with_feature("editor")
 def run_editor_instruct(
     request: "EditorInstructRequestData",
     *,

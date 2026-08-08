@@ -504,3 +504,56 @@ async def test_invalid_role_and_source_rejected(service) -> None:
                        "content_markdown": "x", "created_at": 1.0}],
             visible_to=_scoped(USER_A),
         )
+
+
+@pytest.mark.asyncio
+async def test_thread_model_selection_round_trips_and_survives_second_save(service) -> None:
+    """The picked model sticks to the thread across saves.
+
+    The overwrite on the SECOND save is the load-bearing half: a column
+    missing from the upsert's mutable set is written once and then silently
+    frozen, and only a second save exposes that.
+    """
+    user = uuid.uuid4()
+    selection = '{"model":"gpt-5.4-nano","tier":null,"effort":null}'
+    await service.save_thread(
+        id="ct_pick", title="T", preview="", source="api", group_id=None,
+        created_at=1.0, updated_at=1.0, caller_user_id=user,
+        workspace_id=None, visible_to=_scoped(user),
+        model_selection=selection,
+    )
+    stored = await service.get_thread("ct_pick", visible_to=_scoped(user))
+    assert stored.model_selection == selection
+
+    changed = '{"model":null,"tier":"high","effort":null}'
+    await service.save_thread(
+        id="ct_pick", title="T", preview="", source="api", group_id=None,
+        created_at=1.0, updated_at=2.0, caller_user_id=user,
+        workspace_id=None, visible_to=_scoped(user),
+        model_selection=changed,
+    )
+    stored = await service.get_thread("ct_pick", visible_to=_scoped(user))
+    assert stored.model_selection == changed
+
+
+@pytest.mark.asyncio
+async def test_thread_without_selection_stays_empty(service) -> None:
+    """'' is the no-pick value old rows and old clients resolve to."""
+    user = uuid.uuid4()
+    await _save_thread(
+        service, thread_id="ct_plain", caller_user_id=user, created_at=1.0,
+    )
+    stored = await service.get_thread("ct_plain", visible_to=_scoped(user))
+    assert stored.model_selection == ""
+
+
+@pytest.mark.asyncio
+async def test_thread_model_selection_is_length_capped(service) -> None:
+    user = uuid.uuid4()
+    with pytest.raises(ChatValidationError):
+        await service.save_thread(
+            id="ct_blob", title="T", preview="", source="api", group_id=None,
+            created_at=1.0, updated_at=1.0, caller_user_id=user,
+            workspace_id=None, visible_to=_scoped(user),
+            model_selection="x" * 2001,
+        )

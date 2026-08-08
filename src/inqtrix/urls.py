@@ -4,10 +4,236 @@ from __future__ import annotations
 
 import datetime
 import re
-from urllib.parse import urlparse
+from dataclasses import dataclass
+from urllib.parse import (
+    SplitResult,
+    quote,
+    unquote,
+    unquote_plus,
+    urlparse,
+    urlsplit,
+    urlunsplit,
+)
 
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 _BROKEN_BARE_MARKDOWN_URL_RE = re.compile(r"\[\s*https?://[^\]\s)]+(?:\)|\])?")
+
+
+class CredentialBearingUrlError(ValueError):
+    """Raised when a public URL itself carries authentication material.
+
+    Search providers and public pages are untrusted inputs.  A credential in
+    userinfo or a query parameter must therefore never become a durable
+    source identity, a follow-up fetch target, or a user-visible failure
+    string.  The exception deliberately contains no URL or parameter value.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class SafePublicUrlIdentity:
+    """Validated HTTP(S) identity shared by discovery and source reading."""
+
+    url: str
+    canonical_url: str
+    origin: tuple[str, str, int]
+
+
+_CREDENTIAL_KEY_EXACT = frozenset(
+    {
+        "apikey",
+        "xapikey",
+        "key",
+        "accesskey",
+        "accesskeyid",
+        "awsaccesskeyid",
+        "subscriptionkey",
+        "clientkey",
+        "privatekey",
+        "token",
+        "accesstoken",
+        "authtoken",
+        "bearertoken",
+        "idtoken",
+        "refreshtoken",
+        "sessiontoken",
+        "secret",
+        "clientsecret",
+        "apisecret",
+        "signature",
+        "sig",
+        "xamzsignature",
+        "xgoogsignature",
+        "password",
+        "passwd",
+        "pwd",
+        "credential",
+        "xamzcredential",
+    }
+)
+_CREDENTIAL_KEY_MARKERS = (
+    "apikey",
+    "accesskey",
+    "privatekey",
+    "subscriptionkey",
+    "accesstoken",
+    "authtoken",
+    "bearertoken",
+    "idtoken",
+    "refreshtoken",
+    "sessiontoken",
+    "secret",
+    "signature",
+    "password",
+    "passwd",
+    "credential",
+)
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+_URL_START_RE = re.compile(r"https?://", re.IGNORECASE)
+_URL_COMPONENT_SAFE = "/:@!$&'()*+,;=-._~%?"
+_MAX_URL_DECODE_ROUNDS = 3
+
+
+def is_credential_query_key(key: str) -> bool:
+    """Return whether a decoded query key denotes authentication material.
+
+    Separators and casing are ignored so spellings such as ``client_secret``,
+    ``client-secret``, ``X-Api-Key`` and ``X-Amz-Signature`` have the same
+    security meaning.  A lone ``key`` is treated as sensitive: public APIs
+    commonly use exactly that spelling for access credentials.
+    """
+
+    compact = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+    if not compact:
+        return False
+    return compact in _CREDENTIAL_KEY_EXACT or any(
+        marker in compact for marker in _CREDENTIAL_KEY_MARKERS
+    )
+
+
+def _split_url_without_credentials(url: str) -> tuple[SplitResult, bool]:
+    """Return a parsed URL and whether it contains credential material."""
+
+    split = urlsplit(str(url).strip())
+    credential_bearing = split.username is not None or split.password is not None
+    for parameter_string in (split.query, split.fragment):
+        for component in re.split(r"[&;]", parameter_string):
+            raw_key, _separator, _value = component.partition("=")
+            if is_credential_query_key(unquote_plus(raw_key)):
+                credential_bearing = True
+                break
+    return split, credential_bearing
+
+
+def _encoded_public_url(url: str) -> str:
+    """Percent-encode whitespace/control characters without hiding syntax."""
+
+    split = urlsplit(str(url).strip())
+    path = quote(split.path, safe=_URL_COMPONENT_SAFE)
+    query = quote(split.query, safe=_URL_COMPONENT_SAFE)
+    return urlunsplit((split.scheme, split.netloc, path, query, split.fragment))
+
+
+def _embedded_public_url(value: str) -> bool:
+    """Detect a second literal or repeatedly percent-encoded HTTP(S) URL."""
+
+    decoded = str(value)
+    for _round in range(_MAX_URL_DECODE_ROUNDS + 1):
+        starts = list(_URL_START_RE.finditer(decoded))
+        if len(starts) > 1:
+            return True
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    return False
+
+
+def safe_public_url_identity(url: str) -> SafePublicUrlIdentity:
+    """Validate and canonicalize a credential-free public HTTP(S) URL.
+
+    Network-address safety remains the responsibility of the egress guard,
+    which resolves and pins DNS immediately before a connection.  This helper
+    owns the orthogonal durable-identity contract and is intentionally used
+    before a URL enters an evidence ledger.
+    """
+
+    try:
+        raw = str(url).strip()
+        if _embedded_public_url(raw):
+            raise ValueError(
+                "public source URL must not contain another HTTP(S) URL"
+            )
+        encoded = _encoded_public_url(raw)
+        split, credential_bearing = _split_url_without_credentials(encoded)
+        scheme = str(split.scheme).casefold()
+        host = split.hostname
+        if scheme not in {"http", "https"} or not host:
+            raise ValueError("public source URL must use HTTP(S) and include a host")
+        if any(
+            character.isspace() or ord(character) < 32
+            for character in split.netloc
+        ):
+            raise ValueError("public source URL contains invalid host characters")
+        if any(character in "\"'<>\\\\" for character in host):
+            raise ValueError("public source URL contains invalid host characters")
+        if credential_bearing:
+            raise CredentialBearingUrlError(
+                "credential-bearing public source URL is not allowed"
+            )
+        port = split.port or (443 if scheme == "https" else 80)
+    except CredentialBearingUrlError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid public source URL") from exc
+
+    cleaned = urlunsplit((scheme, split.netloc, split.path, split.query, ""))
+    return SafePublicUrlIdentity(
+        url=cleaned,
+        canonical_url=normalize_url(cleaned),
+        origin=(scheme, host.casefold().rstrip("."), port),
+    )
+
+
+def redact_credential_url(url: str) -> str:
+    """Return a persistence-safe URL without userinfo or secret values.
+
+    Benign query parameters remain available for diagnostics.  Credential
+    keys remain named, but their values are replaced so operators can see why
+    a read was blocked without exposing the credential itself.
+    """
+
+    try:
+        split = urlsplit(str(url).strip())
+        host = split.hostname or ""
+        if not host:
+            return "[REDACTED_URL]"
+        host_text = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        if split.port is not None:
+            host_text += f":{split.port}"
+
+        def redact_parameters(value: str) -> str:
+            parts = re.split(r"([&;])", value)
+            for index in range(0, len(parts), 2):
+                component = parts[index]
+                raw_key, separator, _raw_value = component.partition("=")
+                if separator and is_credential_query_key(unquote_plus(raw_key)):
+                    parts[index] = f"{raw_key}=[REDACTED]"
+            return "".join(parts)
+
+        query = redact_parameters(split.query)
+        fragment = redact_parameters(split.fragment)
+        return urlunsplit((split.scheme, host_text, split.path, query, fragment))
+    except (TypeError, ValueError):
+        return "[REDACTED_URL]"
+
+
+def scrub_credential_urls(text: str) -> str:
+    """Redact credentials in every HTTP(S) URL embedded in free text."""
+
+    return _URL_IN_TEXT_RE.sub(
+        lambda match: redact_credential_url(match.group(0)),
+        str(text),
+    )
 
 
 def today() -> str:
@@ -20,7 +246,12 @@ def normalize_url(url: str) -> str:
 
     Removes trailing slashes, fragments, and tracking parameters.
     """
-    url = url.rstrip(".,;:!?)")
+    url = str(url).strip()
+    url = url.rstrip(".,;:!?")
+    while url.endswith("'") and url.count("'") % 2:
+        url = url[:-1]
+    while url.endswith(")") and url.count(")") > url.count("("):
+        url = url[:-1]
     url = re.sub(r'#[^?]*$', '', url)
     if url.count('/') > 3:
         url = url.rstrip('/')
@@ -29,16 +260,101 @@ def normalize_url(url: str) -> str:
     return url
 
 
-def extract_urls(text: str) -> list[str]:
-    """Extract and deduplicate URLs from text."""
-    urls = re.findall(r'https?://[^\s\)\]\},\"\']+', text)
+def _scan_url_candidate(text: str, start: int) -> str:
+    """Read one angle, Markdown, or bare URL beginning at ``start``."""
+
+    angle_wrapped = start > 0 and text[start - 1] == "<"
+    markdown_target = (
+        start > 1
+        and text[start - 1] == "("
+        and text[start - 2] == "]"
+    )
+    if angle_wrapped:
+        end = text.find(">", start)
+        return text[start:] if end < 0 else text[start:end]
+
+    allow_spaces = markdown_target
+    parenthesis_depth = 0
+    end = start
+    while end < len(text):
+        character = text[end]
+        if character.isspace() and not allow_spaces:
+            break
+        if character in '<>"[]{}':
+            break
+        if character == "(":
+            parenthesis_depth += 1
+        elif character == ")":
+            if parenthesis_depth == 0:
+                break
+            parenthesis_depth -= 1
+        end += 1
+    return text[start:end]
+
+
+def _decoded_embedded_url_text(candidate: str) -> str:
+    """Return the decoded second-URL suffix, or ``""`` when absent."""
+
+    decoded = candidate
+    for _round in range(_MAX_URL_DECODE_ROUNDS):
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            return ""
+        decoded = next_value
+        starts = list(_URL_START_RE.finditer(decoded))
+        if len(starts) > 1:
+            return decoded[starts[1].start():]
+    return ""
+
+
+def extract_urls(text: str, *, limit: int | None = None) -> list[str]:
+    """Extract ordered public-URL candidates from prose.
+
+    Angle links and Markdown destinations may contain legal spaces (for
+    example in an OData expression); those characters are percent-encoded.
+    Concatenated literal URLs are split.  When a second URL is percent-encoded
+    inside a wrapper URL, only the decoded target is returned so the compound
+    identity can never enter persistence.
+    """
+
+    if limit is not None and int(limit) <= 0:
+        return []
+    value = str(text or "")
     seen: set[str] = set()
     unique: list[str] = []
-    for url in urls:
-        normalized = normalize_url(url)
+    pending: list[str] = []
+    for match in _URL_START_RE.finditer(value):
+        candidate = _scan_url_candidate(value, match.start()).strip()
+        if not candidate:
+            continue
+        decoded_inner = _decoded_embedded_url_text(candidate)
+        if decoded_inner:
+            pending.extend(extract_urls(decoded_inner, limit=limit))
+            continue
+        direct_inner = _URL_START_RE.search(candidate, len(match.group(0)))
+        if direct_inner is not None:
+            candidate = candidate[: direct_inner.start()]
+        pending.append(candidate)
+
+    for candidate in pending:
+        try:
+            encoded = _encoded_public_url(candidate)
+            split = urlsplit(encoded)
+            if (
+                split.scheme.casefold() not in {"http", "https"}
+                or not split.hostname
+            ):
+                continue
+            # Accessing port catches malformed netlocs such as ``:not-a-port``.
+            _ = split.port
+        except (TypeError, ValueError):
+            continue
+        normalized = normalize_url(encoded)
         if normalized not in seen:
             seen.add(normalized)
             unique.append(normalized)
+            if limit is not None and len(unique) >= max(0, int(limit)):
+                break
     return unique
 
 
@@ -98,10 +414,8 @@ def domain_matches(domain: str, candidates: set[str]) -> bool:
     return False
 
 
-_CREDENTIAL_QUERY_PARAM_RE = re.compile(
-    r"(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|"
-    r"client[_-]?secret|password|secret|token|signature|sig|x-[a-z-]*key)"
-    r"=([^&\s\"'<>]+)"
+_EDITOR_GUEST_ROUTE_TOKEN_RE = re.compile(
+    r"(?i)(/s/|/v1/editor/share-links/)[^/?#\s\"'<>]+"
 )
 
 
@@ -112,7 +426,7 @@ def _redact_credential_url(url: str) -> str:
     A URL like ``https://example.com/api?api_key=sk-abc&page=2`` becomes
     ``https://example.com/api?api_key=[REDACTED]&page=2``.
     """
-    return _CREDENTIAL_QUERY_PARAM_RE.sub(r"\1=[REDACTED]", url)
+    return redact_credential_url(url)
 
 
 def _scrub_credentials(msg: str) -> str:
@@ -123,12 +437,15 @@ def _scrub_credentials(msg: str) -> str:
     by ``[URL]`` — final answers, citation lists, and trace logs need to keep
     their links intact for debugging.
     """
-    # Per-URL credential redaction first so that the surrounding URL stays visible.
-    msg = re.sub(
-        r"https?://[^\s\"'<>]+",
-        lambda m: _redact_credential_url(m.group(0)),
+    # Editor guest-link path segments are bearer credentials rather than
+    # ordinary identifiers. Keep the route visible for diagnostics while
+    # removing the complete token from access, proxy, and exception logs.
+    msg = _EDITOR_GUEST_ROUTE_TOKEN_RE.sub(
+        lambda match: f"{match.group(1)}[REDACTED]",
         msg,
     )
+    # Per-URL credential redaction first so that the surrounding URL stays visible.
+    msg = scrub_credential_urls(msg)
     # URL userinfo credentials (redis://:pw@..., postgresql+asyncpg://
     # user:pw@host/db) — connection strings travel inside driver
     # exceptions and would otherwise leak broker/database passwords.

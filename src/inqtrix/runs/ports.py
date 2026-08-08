@@ -73,9 +73,10 @@ class RunStorePort(Protocol):
     ) -> dict[str, Any]:
         """Accept one run; returns the public summary (HTTP 202 body).
 
-        The agent-tree kwargs (``kind``/``parent_run_id``/``root_run_id``/
-        ``session_id``) default to the standard-run shape; summaries omit
-        them entirely at defaults, so historical callers are untouched.
+        The tree kwargs (``kind``/``parent_run_id``/``root_run_id``) and the
+        saved-session relation (``session_id``) default to the standard-run
+        shape; summaries omit them entirely at defaults, so historical
+        callers are untouched.
         """
         ...
 
@@ -248,6 +249,18 @@ class RunStorePort(Protocol):
         """
         ...
 
+    def trace_id(self, run_id: str) -> str | None:
+        """Hex trace id of the run's LAST execution segment, or None.
+
+        Reads the durable ``inqtrix.run.trace`` event (retries emit it
+        again — recency wins). Deliberately NOT visibility-gated: the
+        only caller is the instance-admin trace surface, whose
+        authorization happens in ``require_instance_admin`` before the
+        store is touched (``owner_user_id`` precedent). ``None`` for
+        unknown runs and for runs executed with tracing off alike.
+        """
+        ...
+
     def execution_request_body(self, run_id: str) -> dict[str, Any]:
         """Return the persisted execution body for internal validation.
 
@@ -264,6 +277,15 @@ class RunStorePort(Protocol):
         fallback: "Principal | None" = None,
     ) -> "Principal | None":
         """Reconstruct the effective actor persisted for the run segment."""
+        ...
+
+    def total_elapsed_seconds(self, run_id: str) -> float:
+        """Return durable wall time for an admitted worker-owned run.
+
+        This is an internal lifecycle read and deliberately does not use the
+        public owner/share visibility projection. Missing rows still raise
+        ``RunNotFound``.
+        """
         ...
 
     def emit(

@@ -9,7 +9,8 @@ Short, task-oriented entry points for the most common configuration questions. E
 ### I only have LiteLLM + Perplexity via environment variables
 
 1. Copy [`.env.example`](../../.env.example) to `.env` and fill keys (never commit `.env`).
-2. Follow [First research run](../getting-started/first-research-run.md) Path A (library) or Path B (HTTP).
+2. Follow [First research run](../getting-started/first-research-run.md) Path A
+   (HTTP) or Path B (library).
 3. Cross-check variable names and defaults in [Settings and env](settings-and-env.md); note the **Effect** column when present.
 
 ### I need explicit providers in Python (no env auto-magic)

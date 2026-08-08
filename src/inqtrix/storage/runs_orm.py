@@ -61,9 +61,9 @@ runs = Table(
     ),
     Column("mode", Text, nullable=False, server_default=text("'research'")),
     # Agent-tree columns (migration 0029): role of the run in an agent
-    # tree plus its parent/root links and desk-session grouping. All
-    # additive with defaults so historical rows and callers are
-    # untouched; summaries omit the defaults entirely.
+    # tree plus its parent/root links. ``session_id`` is the shared durable
+    # relation to a saved Agent or Knowledge session. All remain additive
+    # with defaults; summaries omit the defaults entirely.
     Column("kind", Text, nullable=False, server_default=text("'standard'")),
     Column("parent_run_id", Text, nullable=True),
     Column("root_run_id", Text, nullable=True),
@@ -100,13 +100,24 @@ runs = Table(
     Column("created_at", Float, nullable=False),
     Column("started_at", Float, nullable=True),
     Column("finished_at", Float, nullable=True),
+    # Execution timing is accumulated at lifecycle boundaries. ``started_at``
+    # remains the immutable first-start timestamp; every later dispatch uses a
+    # separately identified segment.
+    Column("segment_count", Integer, nullable=False, server_default=text("0")),
+    Column("current_segment_id", Text, nullable=True),
+    Column("current_segment_reason", Text, nullable=True),
+    Column("queued_since", Float, nullable=True),
+    Column("active_started_at", Float, nullable=True),
+    Column("active_seconds", Float, nullable=False, server_default=text("0")),
+    Column("waiting_seconds", Float, nullable=False, server_default=text("0")),
+    Column("queued_seconds", Float, nullable=False, server_default=text("0")),
     # Keyset-pagination index: the id tiebreaker after created_at is
     # mandatory — created_at is a float epoch and collides on bulk inserts,
     # so a (created_at, run_id) cursor needs both columns to page without
     # skipping or repeating rows. Supersedes the old (tenant_id, created_at).
     Index("ix_runs_tenant_created_id", "tenant_id", "created_at", "run_id"),
     Index("ix_runs_tenant_status", "tenant_id", "status"),
-    # Child listing + session grouping for agent trees (0029).
+    # Child listing plus saved-session grouping.
     Index("ix_runs_tenant_parent", "tenant_id", "parent_run_id"),
     Index("ix_runs_tenant_session", "tenant_id", "session_id"),
     Index(

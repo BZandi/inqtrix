@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
+from inqtrix.auth.log_redaction import pseudonymous_log_reference
 from inqtrix.auth.permissions import (
     AuditEntry,
     SharePermission,
@@ -31,6 +32,7 @@ from inqtrix.auth.permissions import (
 
 if TYPE_CHECKING:
     from inqtrix.auth.memory_authority import MemoryAuthorityCoordinator
+    from inqtrix.auth.shares import ShareRecord
 
 log = logging.getLogger("inqtrix")
 
@@ -64,12 +66,17 @@ class MemoryIdentityStore:
         default=None, init=False, repr=False
     )
     restrict_to_workspace_members: bool = False
+    sharing_enabled: bool = True
     _workspaces: dict[str, MemoryWorkspace] = field(default_factory=dict)
     _members: dict[tuple[str, uuid.UUID], WorkspaceRole] = field(default_factory=dict)
     _share_records: dict[str, "ShareRecord"] = field(default_factory=dict)
     """Full share history keyed by share id; active rows have no revoke time."""
     audit_entries: list[AuditEntry] = field(default_factory=list)
     """Recorded audit facts, oldest first (assert target in tests)."""
+    audit_rows: list[dict] = field(default_factory=list)
+    """Panel projection of the same facts, with the synthetic id and
+    timestamp the frozen ``AuditEntry`` deliberately lacks (
+    the memory twin of the Postgres audit_log read model)."""
     _event_sink: Callable[..., Any] | None = field(default=None, repr=False)
     _active_admin_user_ids: Callable[[str], Sequence[uuid.UUID]] | None = field(
         default=None, repr=False
@@ -113,6 +120,8 @@ class MemoryIdentityStore:
         recipient_user_id: uuid.UUID,
     ) -> SharePermission | None:
         """Return one accepted permission while the identity lock is held."""
+        if not self.sharing_enabled:
+            return None
         matches = [
             record.permission
             for record in self._share_records.values()
@@ -134,10 +143,11 @@ class MemoryIdentityStore:
             return None
         if len(matches) > 1:
             log.error(
-                "Multiple active accepted memory shares for %s/%s and user %s",
+                "Multiple active accepted memory shares for "
+                "resource_type=%s resource_ref=%s recipient_ref=%s",
                 resource_type,
-                resource_id,
-                recipient_user_id,
+                pseudonymous_log_reference("res", resource_id),
+                pseudonymous_log_reference("usr", recipient_user_id),
             )
             return None
         return matches[0] if matches else None
@@ -186,18 +196,31 @@ class MemoryIdentityStore:
         resource_type: str,
         resource_id: str,
         detail: dict[str, str] | None = None,
+        outcome: str = "success",
+        correlation: dict[str, str] | None = None,
+        workspace_id: uuid.UUID | None = None,
     ) -> None:
         """Append one audit fact within the enclosing memory mutation."""
-        self.audit_entries.append(
-            AuditEntry(
-                tenant_id=tenant_id,
-                actor_user_id=actor_user_id,
-                action=action,
-                resource_type=resource_type,
-                resource_id=resource_id,
-                detail=dict(detail or {}),
-            )
+        from inqtrix.auth.log_redaction import stable_pseudonym
+
+        entry = AuditEntry(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            detail=dict(detail or {}),
+            outcome=outcome,
+            correlation=dict(correlation or {}),
+            actor_pseudonym=(
+                stable_pseudonym("usr", actor_user_id)
+                if actor_user_id is not None
+                else None
+            ),
+            workspace_id=workspace_id,
         )
+        self.audit_entries.append(entry)
+        self._append_audit_row_locked(entry)
 
     def _append_resource_effects_locked(
         self,
@@ -1407,7 +1430,93 @@ class MemoryIdentityStore:
     # AuditSink
     # ------------------------------------------------------------- #
 
+    def _append_audit_row_locked(self, entry: AuditEntry) -> None:
+        import time as _time
+
+        self.audit_rows.append(
+            {
+                "id": len(self.audit_rows) + 1,
+                "occurred_at": _time.time(),
+                "action": entry.action,
+                "resource_type": entry.resource_type,
+                "resource_id": entry.resource_id,
+                "actor_pseudonym": entry.actor_pseudonym,
+                "actor_type": entry.actor_type,
+                "outcome": entry.outcome,
+                "workspace_id": (
+                    str(entry.workspace_id) if entry.workspace_id else None
+                ),
+                "detail": dict(entry.detail),
+                "origin": dict(entry.origin),
+                "correlation": dict(entry.correlation),
+                "tenant_id": entry.tenant_id,
+            }
+        )
+
     async def record(self, entry: AuditEntry) -> None:
         """Append one audit fact (in-memory list, oldest first)."""
         with self._lock:
             self.audit_entries.append(entry)
+            self._append_audit_row_locked(entry)
+
+    async def list_audit_entries(
+        self,
+        *,
+        tenant_id: str,
+        action_prefix: str = "",
+        actor_pseudonym: str = "",
+        outcome: str = "",
+        resource_type: str = "",
+        resource_id: str = "",
+        occurred_from: float | None = None,
+        occurred_to: float | None = None,
+        before_id: int | None = None,
+        limit: int = 50,
+    ) -> tuple[list[dict], int | None]:
+        """Newest-first audit page — memory twin of the Postgres reader."""
+        with self._lock:
+            rows = [dict(row) for row in self.audit_rows]
+        filtered = []
+        for row in reversed(rows):  # newest first
+            if row.get("tenant_id") != tenant_id:
+                continue
+            if action_prefix and not row["action"].startswith(action_prefix):
+                continue
+            if (
+                actor_pseudonym
+                and row.get("actor_pseudonym") != actor_pseudonym
+            ):
+                continue
+            if outcome and row["outcome"] != outcome:
+                continue
+            if resource_type and row["resource_type"] != resource_type:
+                continue
+            if resource_id and row["resource_id"] != resource_id:
+                continue
+            if (
+                occurred_from is not None
+                and row["occurred_at"] < occurred_from
+            ):
+                continue
+            if occurred_to is not None and row["occurred_at"] > occurred_to:
+                continue
+            if before_id is not None and row["id"] >= before_id:
+                continue
+            row.pop("tenant_id", None)
+            filtered.append(row)
+        page_size = max(1, min(int(limit), 200))
+        page = filtered[:page_size]
+        next_before = (
+            page[-1]["id"] if len(filtered) > page_size and page else None
+        )
+        return page, next_before
+
+    async def prune_audit_log(self, *, days: int) -> int:
+        """No-op twin of the Postgres prune (dev backend).
+
+        In-memory entries live only for the process lifetime and carry
+        no timestamps — time-based retention does not apply. Returns 0
+        so callers can log honestly.
+        """
+        del days
+        return 0

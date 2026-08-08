@@ -29,6 +29,8 @@ const INDEX_DOT: Record<VectorIndexStatus, { className: string; pulse: boolean }
   indexing: { className: 'bg-brand', pulse: true },
   stale: { className: 'bg-warning', pulse: false },
   error: { className: 'bg-destructive', pulse: false },
+  deleting: { className: 'bg-warning', pulse: true },
+  delete_failed: { className: 'bg-destructive', pulse: false },
 }
 
 type DropProps = {
@@ -75,7 +77,7 @@ function NavItem({
         ) : null}
       </span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      <span className={cn('shrink-0 t-meta-sm tabular-nums', active ? 'text-brand/80' : 'text-muted-foreground')}>{count}</span>
+      <span className={cn('shrink-0 t-meta-sm tabular-nums', active ? 'text-brand' : 'text-muted-foreground')}>{count}</span>
     </button>
   )
 }
@@ -238,7 +240,7 @@ export function Rail({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-        <p className="px-1.5 pb-1 pt-2 t-caption text-muted-foreground/80">{t.fileLibrary.sectionCollections}</p>
+        <p className="px-1.5 pb-1 pt-2 t-caption text-muted-foreground">{t.fileLibrary.sectionCollections}</p>
         <div className="flex flex-col gap-0.5">
           <NavItem
             active={active.kind === 'all'}
@@ -262,7 +264,7 @@ export function Rail({
         </div>
 
         <div className="mt-3 flex items-center gap-1.5 px-1.5 pb-1 pt-1">
-          <p className="t-caption text-muted-foreground/80">{t.fileLibrary.sectionServerCollections}</p>
+          <p className="t-caption text-muted-foreground">{t.fileLibrary.sectionServerCollections}</p>
         </div>
         <div className="flex flex-col gap-0.5">
           {serverCollections.map((collection) => (
@@ -278,7 +280,7 @@ export function Rail({
         </div>
 
         <div className="mt-3 flex items-center gap-1.5 px-1.5 pb-1 pt-1">
-          <p className="t-caption text-muted-foreground/80">{t.fileLibrary.sectionIndexes}</p>
+          <p className="t-caption text-muted-foreground">{t.fileLibrary.sectionIndexes}</p>
           <Tooltip>
             <TooltipTrigger asChild>
               <span className="inline-flex cursor-help items-center text-muted-foreground/60">

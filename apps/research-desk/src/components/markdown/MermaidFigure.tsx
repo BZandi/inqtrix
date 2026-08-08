@@ -21,7 +21,7 @@ import { useMarkdownCacheEntry } from './useMarkdownCacheEntry'
 import { useProgressiveMarkdownWork } from './useProgressiveMarkdownWork'
 
 /**
- * Renders a ```mermaid fence as a diagram (plan M1 S6).
+ * Renders a ```mermaid fence as a diagram.
  *
  * Follows the EXACT `markdownTokenCache` discipline of the code
  * highlighter (gotcha #29): chat history re-renders stay synchronous —

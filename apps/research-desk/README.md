@@ -9,70 +9,42 @@ HTTP server through `/health`, `/v1/stacks`, and `/v1/runs*`; it never imports
 ## Prerequisites
 
 - Node.js >= 22.12 (see root `package.json` `engines`).
-- One supported package manager:
-  - pnpm >= 11.1.1 activated via Corepack (recommended reference path).
-  - npm >= 10.9.0 when Corepack/pnpm is unavailable.
+- npm >= 10.9.0.
 
 ## Install
 
-### Recommended: pnpm via Corepack
-
-Corepack pins the package manager declared in the root `package.json`
-(`"packageManager": "pnpm@11.1.1"`). No global pnpm install required.
-
-```bash
-# One-time activation per machine:
-corepack enable
-
-# From the repository root, install dependencies for the workspace:
-corepack pnpm install --frozen-lockfile
-```
-
-The root `package.json` scripts keep this path on Corepack-backed pnpm when
-they are launched through `pnpm run ...`.
-
-### Alternative: globally installed pnpm
-
-```bash
-npm install -g pnpm@11.1.1
-pnpm install --frozen-lockfile
-```
-
-### Alternative: npm
-
-Use npm from the repository root when pnpm/Corepack is not available:
+Use npm from the repository root. `package-lock.json` is the sole JavaScript
+dependency lock:
 
 ```bash
 npm ci
 npm run ui:dev
 ```
 
-This path is supported through the committed root `package-lock.json`, but it
-has different supply-chain properties:
-
-- It does not honour `pnpm-workspace.yaml` security settings
-  (`minimumReleaseAge`, `blockExoticSubdeps`, `trustPolicy`); newly
-  published or exotic transitive dependencies are accepted as-is.
-- It resolves from `package-lock.json` rather than the reference
-  `pnpm-lock.yaml`.
-
-Do not switch package managers inside an existing `node_modules` tree. Use a
-fresh checkout or rebuild `node_modules` before moving between pnpm and npm.
+Dependency patches outside npm's lock contract are prohibited. Fixes must live
+in application code or an official dependency release.
 
 ## Development
 
-Start the API server in one terminal:
+Start the API server in one terminal. Choose either the uv or the standard
+Python/pip path:
 
 ```bash
+# uv
+uv sync --extra dev
 uv run python examples/webserver_stacks/multi_stack.py
+
+# or standard Python/pip
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+python examples/webserver_stacks/multi_stack.py
 ```
 
 ### Default dev server (Vite proxy to `http://localhost:5100`)
 
 ```bash
 # From the repository root:
-pnpm run ui:dev
-# or:
 npm run ui:dev
 # -> http://127.0.0.1:5173
 ```
@@ -88,8 +60,6 @@ preserving the production boundary between frontend and API.
 base URL (`apps/research-desk/src/api/inqtrixClient.ts`).
 
 ```bash
-VITE_INQTRIX_API_BASE_URL=http://127.0.0.1:6100 pnpm run ui:dev
-# or:
 VITE_INQTRIX_API_BASE_URL=http://127.0.0.1:6100 npm run ui:dev
 ```
 
@@ -105,7 +75,7 @@ into `VITE_*` variables because they are exposed in the browser bundle.
 
 | Variable | Stage | Default | Effect |
 |---|---|---|---|
-| `VITE_INQTRIX_API_BASE_URL` | dev + build | `""` (same-origin) | Backend origin baked into the bundle and used by the Vite dev-proxy. Leave unset for same-origin serving via nginx or `scripts/run_research_desk.py` (see [`docs/deployment/react-ui.md`](../../docs/deployment/react-ui.md)). |
+| `VITE_INQTRIX_API_BASE_URL` | dev + build | `""` (same-origin) | Backend origin baked into the bundle and used by the Vite dev-proxy. Leave unset for same-origin serving through the Python gateway or optional nginx adapter (see [`docs/deployment/react-ui.md`](../../docs/deployment/react-ui.md)). |
 
 No other `VITE_*` variables are read by the React app today.
 
@@ -219,14 +189,11 @@ syntax colors in chat and report Markdown code blocks.
 ### Same-origin build (recommended)
 
 Leave `VITE_INQTRIX_API_BASE_URL` unset. The resulting bundle uses
-relative URLs and works behind any nginx / launcher reverse-proxy
+relative URLs and works behind either the Python web gateway or the optional
+nginx adapter
 without rebuild.
 
 ```bash
-pnpm run ui:typecheck
-pnpm run ui:lint
-pnpm run ui:build
-# or run the same commands with npm:
 npm run ui:typecheck
 npm run ui:lint
 npm run ui:build
@@ -236,9 +203,6 @@ npm run ui:build
 ### Build for a fixed backend origin
 
 ```bash
-VITE_INQTRIX_API_BASE_URL=https://inqtrix-api.example.com \
-  pnpm run ui:build
-# or:
 VITE_INQTRIX_API_BASE_URL=https://inqtrix-api.example.com \
   npm run ui:build
 ```
@@ -251,4 +215,4 @@ The production bundle is written to `apps/research-desk/dist/`. That
 directory is build output and is intentionally not committed. See
 [`docs/deployment/react-ui.md`](../../docs/deployment/react-ui.md)
 for deployment options including the nginx pattern and the Python
-launcher `scripts/run_research_desk.py`.
+gateway started with `python -m inqtrix_web_gateway`.

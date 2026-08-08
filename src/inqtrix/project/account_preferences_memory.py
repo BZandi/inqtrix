@@ -33,11 +33,15 @@ class MemoryAccountPreferencesStore:
         user_bubble_tone,
         updated_at,
         enable_agent_memory=False,
+        chat_model_tier="",
+        agent_model_tier="",
     ) -> AccountPreferences:
         prefs = AccountPreferences(
             user_id=user_id, contrast_mode=contrast_mode, locale=locale, theme=theme,
             theme_preset=theme_preset, user_bubble_tone=user_bubble_tone,
             enable_agent_memory=enable_agent_memory,
+            chat_model_tier=chat_model_tier,
+            agent_model_tier=agent_model_tier,
             updated_at=updated_at,
         )
         self._rows[user_id] = prefs

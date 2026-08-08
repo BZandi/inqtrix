@@ -6,7 +6,7 @@ differs (a server-side email/password check instead of an IdP round-trip).
 The per-request principal path (Bearer -> PAT, cookie -> session, CSRF) is
 inherited unchanged; local sessions are minted by the login route in
 :mod:`inqtrix.server.routers.auth` exactly like the OIDC callback mints
-them, under the synthetic issuer ``"local"`` (ADR-AUTH-3).
+them, under the synthetic issuer ``"local"``.
 """
 
 from __future__ import annotations

@@ -2,14 +2,23 @@
 
 ## Scope
 
-How Inqtrix carries search results into the final report without losing the link between a fact, the source that supports it, and the citation shown in the answer. This page covers the internal evidence ledger, the single record-driven evidence overview rendered for the answer prompt, the final answer system prompt blocks built around it, and the post-answer audit binding. It does not describe provider authentication, full-page document fetching, or how individual stop heuristics are computed (see [stop-criteria.md](../scoring-and-stopping/stop-criteria.md), [confidence.md](../scoring-and-stopping/confidence.md), and [calculation-overview.md](../scoring-and-stopping/calculation-overview.md) for those).
+How Inqtrix carries provider-grounded search results into the final report
+without losing the exact query, the coherent provider answer, or the links
+returned with it. This page covers the Research graph's working evidence
+ledger, the durable web-search ledger used by the Agent, the answer-prompt
+projection, child-to-parent handoff, and post-answer audit binding. Inqtrix
+does not fetch the linked webpages. This page does not describe provider
+authentication or individual stop heuristics (see
+[stop-criteria.md](../scoring-and-stopping/stop-criteria.md),
+[confidence.md](../scoring-and-stopping/confidence.md), and
+[calculation-overview.md](../scoring-and-stopping/calculation-overview.md)).
 
 ## Flow
 
 This diagram answers: "How does a provider result become a cited answer
-sentence?" Provider outputs enter on the left; the **only** persisted internal
-evidence truth is `AgentState.evidence_ledger`; everything the answer prompt
-sees is one record-driven view rendered from it.
+sentence?" The full provider result remains available through synthesis. A
+domain tier may influence ordering and confidence, but it cannot discard an
+`unknown` result or require a second page read.
 
 ```mermaid
 flowchart TD
@@ -18,21 +27,26 @@ flowchart TD
     Perplexity{{"provider Perplexity search_results"}} --> QuerySynthesis
     Perplexity --> SourceEvidence
     Legacy{{"provider URL-only result"}} --> CitationInventory[("data citation inventory")]
-    QuerySynthesis --> Overview["fn render_evidence_ledger_overview()<br/>single canonical answer-prompt view"]
     SourceEvidence --> EvidenceLedger[("data AgentState.evidence_ledger<br/>single evidence truth")]
     CitationInventory --> EvidenceLedger
     EvidenceLedger --> ClaimLedger["fn derive_claim_ledger_from_evidence()<br/>(local, not persisted)"]
     ClaimLedger --> ClaimIndex[("data consolidated_claims<br/>research-loop claim view")]
     ClaimIndex --> Verification["fn project_claim_verification_to_evidence()"]
     Verification --> EvidenceLedger
+    QuerySynthesis --> WebLedger[("data web_search_ledger<br/>query, provider answer, citations")]
+    CitationInventory --> WebLedger
     EvidenceLedger --> Overview["fn render_evidence_ledger_overview()<br/>single canonical answer-prompt view"]
     Overview --> AnswerPrompt{{"LLM call: answer prompt"}}
     AnswerPrompt --> AnswerAudit[("data AnswerEvidenceBinding<br/>audit view")]
+    AnswerPrompt --> Parent["kernel or mission parent"]
+    WebLedger --> Parent
+    WebLedger --> Canvas["Evidence Canvas<br/>query, answer, mapping, links"]
 ```
 
 Key transitions:
 
-- Provider-specific result shapes are normalized into `EvidenceRecord` rows.
+- Provider-specific result shapes are normalized into `EvidenceRecord` rows
+  without filtering records merely because a domain is unknown.
 - `EvidenceRecord.claims[]` are projected into a **local** raw claim ledger
   (`derive_claim_ledger_from_evidence`, recomputed in `search()`, not a state
   field) so the claim consolidator can operate.
@@ -47,8 +61,35 @@ Key transitions:
   allowlist is the union of visible source-block URLs. There
   is no parallel report-evidence-bundle / prompt-evidence-unit / rendered-
   context channel and no separate numbered prompt-citation map.
+- The durable `web_search_ledger` retains the exact query, provider identity,
+  coherent provider answer, every returned citation, timing, usage, status,
+  and non-fatal notice. It is audit state, not a second search pipeline.
+- A child research report reaches its parent together with this ledger. The
+  parent may evaluate, consolidate, or ask another question, but it does not
+  require a linked webpage to be fetched before it may use the provider result.
 
-The graph shows that provider output is not forced into one shape. Azure's synthesized web-search answer is stored once in `query_synthesis`; its cited URLs still become source records so the final report has concrete anchors. Perplexity `search_results` can become source-level evidence because the snippet belongs to one URL. URL-only providers contribute citation inventory until claim extraction or source snippets make them report eligible.
+The graph shows that provider output is not forced into one shape. Azure's
+synthesized web-search answer is stored once in `query_synthesis`; its cited
+URLs still become source records so the final report has concrete anchors.
+Per-source snippets remain associated with their URLs. URL-only providers
+contribute citation inventory. In every case the user can open the returned
+link, while the Canvas separately shows what Azure actually returned to
+Inqtrix.
+
+One coherent provider answer can synthesize several links. Therefore every
+ledger citation carries an honest mapping status:
+
+- `provider_answer_context`: the provider associated supporting answer context
+  with this citation;
+- `provider_snippet`: the provider returned URL-specific snippet metadata;
+- `source_only`: the provider listed the URL but supplied no exclusive passage.
+
+The Canvas shows the complete coherent answer for the query and never claims
+that a sentence came from exactly one URL unless the provider supplied that
+mapping. Credential-bearing URLs are redacted before provider output,
+metadata, prompts, checkpoints, or UI state can observe them. Provider prose
+is kept under a visible persistence bound; truncation includes an explicit
+marker rather than silently masquerading as a complete result.
 
 There is no LLM-backed grouping step in `search()` and no LLM step in the
 answer-prompt view: claim consolidation and the evidence overview are
@@ -70,10 +111,20 @@ stops all remain visible as `ALGO-FAIL claim_extraction`; a valid
 
 ## Primary truth vs views
 
-`evidence_ledger` is the **only persisted** internal truth for search-derived
-evidence. It joins the query, source, citation, source snippets/passages, raw
-claims, and -- after `project_claim_verification_to_evidence` --
-each claim's verification standing.
+`evidence_ledger` is the Research graph's canonical **working** truth. It joins
+the query, source, citation, provider snippets/passages, raw claims, and --
+after `project_claim_verification_to_evidence` -- each claim's verification
+standing. The Agent's `web_search_ledger` is the durable projection used
+across parent/child and Canvas boundaries. It is derived from the provider
+result and does not introduce another search, ranker, filter, or prompt
+renderer.
+
+Every ledger search retains the stable invocation/query id, exact query,
+provider and bounded parameters, start/end timestamps, provider-reported token
+usage, status, non-fatal notice, coherent provider answer, and citation list.
+This protected run audit distinguishes a bad search result from later
+extraction or synthesis errors without copying private queries into ordinary
+application logs.
 
 The other evidence-related fields are kept deliberately minimal:
 
@@ -104,7 +155,9 @@ Terminology used below:
 
 | Term | Role | Stored where | Read by |
 |---|---|---|---|
-| **Primary truth** | The single, complete internal representation of search-derived evidence (incl. projected verification) | `AgentState.evidence_ledger` | claim projection, evidence overview, answer audit |
+| **Working truth** | Complete graph-local representation of search-derived evidence and projected verification | `AgentState.evidence_ledger` | claim projection, evidence overview, answer audit |
+| **Durable web-search contract** | Exact queries, coherent provider answers, citation metadata, mapping precision, timing, usage, and status | `web_search_ledger` inside the existing evidence artifact | audit, resume, kernel/mission handoff, Canvas |
+| **Parent handoff** | Complete child report plus its translated references and web-search ledger | child tool result and evidence artifact | kernel or mission parent |
 | **Claims view** | The one persisted claims projection used by the research loop | `consolidated_claims` | `plan`, `evaluate`, stop diagnostics, observability |
 | **Answer-prompt view** | The single record-driven Markdown overview the answer composer consumes | rendered on demand by `render_evidence_ledger_overview()` (not persisted) | `answer()`, section composer |
 | **Audit view** | Post-answer check that cited URLs resolve to EvidenceRecords | `answer_evidence_bindings` | metrics, debugging |
@@ -204,9 +257,10 @@ treat hard facts conservatively. The raw view is never persisted on
 signature and decides whether the claim is `verified`, `contested`, or
 `unverified`, along with a more specific `verification_basis`. See
 [claims.md](../scoring-and-stopping/claims.md) for the full branch rules; the
-six possible bases are `verified_cross_checked`, `verified_primary`,
+possible bases are `verified_cross_checked`, `verified_primary`,
 `verified_quality_source`, `contested`, `missing_primary_source`, and
-`weak_evidence`.
+`weak_evidence`. Static source tiers remain ranking and confidence metadata.
+They do not filter provider-grounded content out of the answer path.
 
 ```python
 ConsolidatedClaim = {
@@ -390,9 +444,9 @@ claims of that record. Possible values:
 | Label | Trigger (across all claims of the record) | Allowed report use |
 |---|---|---|
 | `cross-checked` | At least one claim has `verification_basis == "verified_cross_checked"` | Hard fact, cite with the label. |
-| `primary-source` | All other verified claims rely on a primary-tier source (`verification_basis == "verified_primary"`) | Hard fact, cite with the label. |
+| `primary-source` | At least one claim is supported by a provider-cited primary-tier source (`verification_basis == "verified_primary"`) | Hard fact within that scope; cite with the label. |
 | `contested` | Some claim is `contested` (in status or basis) | Show both sides, attribute. |
-| `single-source verified` | At least one `verified` claim with no `verified_primary` / `verified_cross_checked` (e.g. a single Reuters / mainstream-tier source) | Allowed, but must be inline-attributed ("laut [E12] …"). |
+| `single-source verified` | At least one `verified` claim with no `verified_primary` / `verified_cross_checked` (one provider-grounded source) | Allowed, but must be inline-attributed ("laut [E12] …"). |
 | `source-context` | The record has no claims at all (claimless background) | Allowed for context / source-backed statements; not a cross-checked hard fact. |
 | `unverified` | All claims have `status="unverified"` | Discuss as uncertainty, never as a confirmed fact. |
 
@@ -523,14 +577,16 @@ audit contributes the `unknown_citation` signal that forces `needs_review`. See
 ## Mini example: one fact through the pipeline
 
 1. `SearchProvider.search()` returns a Bloomberg + Meta-IR result for the
-   query "Meta 2026 AI capital expenditures official filing".
+   query "Meta 2026 AI capital expenditures official filing" and records the
+   exact query, invocation id, timing, usage, provider parameters, provider
+   synthesis, snippets, and URLs.
 2. `search()` stores the provider answer once in `query_synthesis[query_id]`
-   and normalizes both cited URLs into `record_type="source"` records. Each
-   record carries its own `source_snippet`, `source_passages`, and `claims[]`.
+   and normalizes both cited URLs into `record_type="source"` records. The full
+   Azure answer and all returned links also enter `web_search_ledger`.
 3. `derive_claim_ledger_from_evidence()` projects the nested
    `EvidenceRecord.claims[]` into a flat list of `RawClaim`s (not persisted on
    state).
-4. `DefaultClaimConsolidator.consolidate()` groups the two raw claims by
+4. `DefaultClaimConsolidator.consolidate()` groups the two claims by
    signature "meta plans 2026 ai capital expenditures", finds 2 affirmed
    supports from 2 different non-low domains (`primary` + `mainstream`), sets
    `status="verified"` and `verification_basis="verified_cross_checked"`.
@@ -538,25 +594,30 @@ audit contributes the `unknown_citation` signal that forces `needs_review`. See
    `verification_status` / `verification_basis` /
    `supporting_evidence_ids=["ev_9f3c4f2a1b22d0", "ev_a4417c19cf8842"]` back
    onto every matching `record.claims[n]`.
-6. `render_evidence_ledger_overview(...)` ranks records by
+6. The child passes its complete report and `web_search_ledger` to the parent.
+   No URL is removed because its tier is `unknown`, and no page-read contract
+   is required.
+7. `render_evidence_ledger_overview(...)` ranks records by
    `_evidence_record_score()`, assigns one label per canonical URL (`E1` for
    Meta IR, `E2` for Bloomberg), groups them under their query, renders the
    Markdown block, and returns an `EvidenceOverview` with
    `rendered_record_count=2`, `omitted_record_count=0`,
    `allowed_urls=["https://investor.atmeta.com/...", "https://www.bloomberg.com/..."]`.
-7. `_build_answer_system_prompt_with_style()` assembles the final system
+8. `_build_answer_system_prompt_with_style()` assembles the final system
    prompt (Header → CLAIM-KALIBRIERUNG → EVIDENZ-UEBERSICHT → ZITATIONS-REGELN
    → embedded `evidence_overview.markdown`); the answer composer runs one LLM
    call per section with this system prompt and a section-specific user
    prompt (see [answer-composition.md](answer-composition.md)).
-8. `audit_answer_evidence_bindings()` records that the generated answer cited
+9. `audit_answer_evidence_bindings()` records that the generated answer cited
    both `https://investor.atmeta.com/...` and
    `https://www.bloomberg.com/...` near the capex sentence → binding status
    `matched`.
 
-The important maintenance rule: new evidence fields should be added to
-`EvidenceRecord` first, then projected into derived views only when a
-downstream consumer needs them. There is no second truth.
+The important maintenance rule: graph-local evidence fields originate in
+`EvidenceRecord`; durable web-search fields originate in the provider result
+and are deterministically projected into `web_search_ledger`. Neither
+consumer may silently invent or drop a claim, query, provider answer, or link
+to make the two representations agree.
 
 ## Related docs
 

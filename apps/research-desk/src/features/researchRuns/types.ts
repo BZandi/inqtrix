@@ -10,6 +10,13 @@ export type NodeModelResolution = {
 
 export type ChatModelTier = 'high' | 'mid' | 'fast'
 
+/** A saved tier preference, where `''` means "no preference" and the
+ * deployment default applies — the same thing the picker shows as its
+ * server-default entry. Lives beside {@link ChatModelTier} rather than next to
+ * its consumers because both the theme layer and the project layer need it,
+ * and this module imports nothing. */
+export type ModelTierPreference = '' | ChatModelTier
+
 export type ChatModelOption = NodeModelResolution & {
   tier: ChatModelTier | string
 }
@@ -152,12 +159,67 @@ export type KnowledgeProfileManifestEntry = {
 
 /** One retrieval hit from `POST /v1/knowledge/search`. */
 export type KnowledgeSearchHit = {
+  reference_id: string
+  chunk_id: string
   document_id: string
   collection_id: string
   document_title: string
   chunk_index: number
-  text: string
+  /** Original source evidence only; synthetic retrieval context is never sent. */
+  excerpt: string
+  page_number: number | null
+  source_span: {
+    start: number
+    end: number
+    offset_unit: 'utf8_byte'
+    document_content_hash: string
+  } | null
+  revision_id: string | null
+  generation_id: string | null
+  provenance_status: 'verified_span' | 'legacy_unspanned'
+  rank: number
   score: number
+}
+
+/** Bounded technical shortfall reported by the shared Knowledge retrieval
+ * layer. It is evidence metadata, not a provider error: results may still be
+ * useful, but the requested breadth was not fully filled. */
+export type KnowledgeRetrievalDegradation = {
+  reason: string
+  retrieval_mode: string
+  /** Retrieval stage at which the bounded shortfall occurred. */
+  stage: string
+  /** Candidate depth requested before final ranking/reranking. */
+  requested_candidate_pool: number
+  /** Active, verified candidates actually available to final ranking. */
+  returned_candidate_pool: number
+  /** Requested width of the final evidence set. */
+  final_top_k: number
+  /** True when the shallower candidate pool still filled final evidence. */
+  final_evidence_complete: boolean
+  /** Compatibility counters; these describe the final evidence outcome. */
+  requested_top_k: number
+  returned_hits: number
+  candidate_cap: number | null
+}
+
+/** One warning from the synchronous Knowledge-search envelope. Known
+ * retrieval degradations carry the bounded counters above; other warnings
+ * (visibility filtering, legacy chunks) retain their server message and
+ * optional count without being collapsed into a retrieval claim. */
+export type KnowledgeSearchWarning = Partial<KnowledgeRetrievalDegradation> & {
+  code: string
+  /** Search envelopes include a safe fallback message; text-free native run
+   * receipts intentionally omit it and localize by code. */
+  message?: string
+  count?: number
+  filtered_ids?: string[]
+  recommended_action?: string | null
+}
+
+export type KnowledgeSearchResponse = {
+  data: KnowledgeSearchHit[]
+  warnings: KnowledgeSearchWarning[]
 }
 
 /** Payload of `GET /v1/knowledge/documents/{id}/text` (document reader). */
@@ -215,7 +277,7 @@ export type AgentToolManifestEntry = {
 export type AgentPermissionModeEntry = {
   /** The initial plan parks for approval (E16). */
   plan_gate: boolean
-  /** A replan that ADDS web queries parks again (E16 amendment). */
+  /** A replan that adds web queries parks again for renewed consent. */
   web_replan_regate: boolean
   /** Editor patches always park — invariant across modes (E14). */
   patch_gate: boolean
@@ -236,8 +298,27 @@ export type InqtrixCapabilities = {
   features: {
     embedding_provider: boolean
     knowledge: boolean
+    /** Whether GET /v1/stacks exists; only the multi-stack factory mounts it. */
+    multi_stack: boolean
     openapi: boolean
     [key: string]: boolean
+  }
+  /** Additive operator-facing module state. `features.*` remains the simple
+   * runtime gate; this map distinguishes deliberately disabled modules from
+   * configured infrastructure that is currently degraded. */
+  feature_status?: Record<string, {
+    available: boolean
+    configured: boolean
+    reason_code: string | null
+    state: 'enabled' | 'disabled' | 'degraded'
+  }>
+  collaboration?: {
+    configured: boolean
+    mode: string
+    protocol_version: number
+    schema_version: number
+    service_available: boolean
+    transport_path: string
   }
   files?: {
     max_file_bytes: number
@@ -280,11 +361,11 @@ export type InqtrixCapabilities = {
   agent?: {
     autonomy_modes: string[]
     default_autonomy: string
-    /** The EFFECTIVE desk algorithm (plan M2 rollout): `workspace_agent`
+    /** The effective desk algorithm: `workspace_agent`
      * (phase machine) or `agent_kernel`; absent on older servers ->
      * workspace_agent. */
     default_mode?: string
-    /** Two-mode UI presets (plan M1 S7, Cowork pattern): the composer
+    /** Two-mode UI presets: the composer
      * shows Standard/Auto mapped onto the unchanged wire vocabulary.
      * Absent on older servers -> legacy three-way control. */
     mode_presets?: { id: string; autonomy: string }[]
@@ -301,6 +382,9 @@ export type InqtrixCapabilities = {
     max_parallel_children: number
     discovery_max_tool_calls: number
     max_plan_tasks: number
+    /** Server-enforced Agent Desk boundaries. Values are descriptive facts,
+     * never client-authored budget inputs. */
+    limits?: AgentLimitCapabilities
     durable: boolean
     tools: AgentToolManifestEntry[]
     /** Source controls and direct routes are optional for compatibility with
@@ -317,12 +401,44 @@ export type InqtrixCapabilities = {
     /** Per-mode gating facts for the run overview; absent on older
      * servers -> the overview hides its approvals group (never guesses). */
     permission_modes?: Record<string, AgentPermissionModeEntry>
-    /** Skill LIMITS (plan M3); the skill list itself comes from the
+    /** Skill limits; the skill list itself comes from the
      * authenticated GET /v1/skills. */
     skills?: {
       max_attached: number
       disclosure_budget_chars: number
     }
+  }
+}
+
+export type AgentLimitCapabilities = {
+  tokens: {
+    enabled: boolean
+    limit: number
+    ceiling: number
+    recoverable: false
+    extendable: false
+    reason: string
+  }
+  kernel: Record<'schnell' | 'normal' | 'deep', {
+    tool_calls: number
+    tool_calls_ceiling: number
+    steps: number
+    steps_ceiling: number
+  }>
+  directives: {
+    quick_web: {
+      web_searches: number
+    }
+  }
+  mission: {
+    discovery_tool_calls: number
+    plan_tasks: number
+    replan_rounds: number
+    clarification_rounds: number
+    parallel_children: number
+  }
+  research: {
+    rounds: number
   }
 }
 
@@ -378,7 +494,7 @@ export type AgentOverrides = {
   model?: string
   /** Reasoning effort for the picked model (model-dependent). */
   effort?: string
-  /** Thoroughness (plan M4): 'deep' = high effort, raised budgets,
+  /** Thoroughness: 'deep' = high effort, raised budgets,
    * DEEP child research and one verification pass. Legacy knob — a
    * tiers-aware composer sends `agentTier` instead (never both). */
   depth?: 'normal' | 'deep'
@@ -398,19 +514,19 @@ export type CreateResearchRunRequest = {
   /** Approval policy for `mode: 'workspace_agent'` (server default when
    * omitted; vocabulary from `capabilities.agent.autonomy_modes`). */
   autonomy?: string
-  /** Agent-session id linking follow-up turns to one memo canvas. */
+  /** Saved Agent or Knowledge session that owns this run. */
   sessionId?: string
   /** Target editor document for a patch assignment (M7); the agent
    * proposes always-gated edits against it instead of only a memo. */
   documentId?: string
-  /** Output-form override for `mode: 'workspace_agent'` (plan M1):
+  /** Output-form override for `mode: 'workspace_agent'`:
    * `chat` forces the inline answer, `canvas` the memo; `auto` (or
    * omitted) lets the agent's intake decide. */
   responseForm?: 'auto' | 'chat' | 'canvas'
-  /** Explicitly attached skills (plan M3, composer chips); the server
+  /** Explicitly attached skill chips; the server
    * admits them (visibility + count cap). Agent modes only. */
   skillIds?: string[]
-  /** Whitelisted composer tool hints (plan M3, `/`-functions group). */
+  /** Whitelisted composer tool hints from the `/`-functions group. */
   toolDirectives?: string[]
   /** Per-session availability policy for optional agent sources. */
   sourcePolicy?: import('@/features/agent/executionPolicy').AgentSourcePolicy
@@ -465,6 +581,14 @@ export type ResearchRunSnapshot = {
     }
     consent_reason?: string | null
     tool_use_counts?: { web?: number; knowledge?: number }
+    limits?: Record<string, {
+      used?: number | null
+      limit: number
+      ceiling: number
+      recoverable: boolean
+      extendable: boolean
+      reason?: string
+    }>
   }
 }
 
@@ -484,6 +608,18 @@ export type ResearchRunSummary = {
   started_at: number | null
   finished_at: number | null
   elapsed_seconds: number | null
+  /** Present for agent runs whose execution can park and resume. Wall time
+   * remains anchored at the immutable first `started_at`; these counters
+   * separate actual execution, explicit waits and queueing. */
+  timing?: {
+    total_seconds: number | null
+    active_seconds: number
+    waiting_seconds: number
+    queued_seconds: number
+    segment_count: number
+    resume_count: number
+    current_segment_id: string | null
+  }
   snapshot: ResearchRunSnapshot
   error: InqtrixError | null
   events_url: string
@@ -522,6 +658,33 @@ export type ReportReference = {
   url: string
   tier: SourceTier | string
   title?: string | null
+  /** Stable evidence-ledger identity. Optional for imported and legacy runs. */
+  reference_id?: string | null
+  source_id?: string | null
+  query_id?: string | null
+  query_ids?: string[]
+  citation_id?: string | null
+  citation_ids?: string[]
+  source_run_id?: string | null
+  source_run_ids?: string[]
+  provider_snippet?: string | null
+  document_id?: string | null
+  collection_id?: string | null
+  chunk_id?: string | null
+  chunk_index?: number | null
+  excerpt?: string | null
+  source_text?: string | null
+  grounded_support?: string | null
+  page_number?: number | null
+  source_span?: {
+    start: number
+    end: number
+    offset_unit: 'utf8_byte' | string
+    document_content_hash?: string | null
+  } | null
+  revision_id?: string | null
+  generation_id?: string | null
+  provenance_status?: string | null
 }
 
 export type ResearchClaim = {
@@ -595,22 +758,12 @@ export type ResearchRunResult = {
   }
   knowledge_grounding?: {
     enabled: boolean
+    marker?: string
     quotes_total?: number
     quotes_verified?: number
     quotes?: Array<{ label: string; text: string; verified: boolean }>
   }
-  report_references?: Array<{
-    label: string
-    url: string
-    tier: string
-    title?: string
-    document_id?: string | null
-    chunk_index?: number | null
-    excerpt?: string | null
-    source_text?: string | null
-    grounded_support?: string | null
-    page_number?: number | null
-  }>
+  report_references?: ReportReference[]
   knowledge_profile?: {
     id: string
     requested?: string | null
@@ -621,6 +774,10 @@ export type ResearchRunResult = {
   knowledge_candidates?: number
   knowledge_evidence_used?: number
   knowledge_collections?: string[]
+  knowledge_retrieval?: {
+    degradations?: KnowledgeRetrievalDegradation[]
+    warnings?: KnowledgeSearchWarning[]
+  }
 }
 
 export type InqtrixError = {

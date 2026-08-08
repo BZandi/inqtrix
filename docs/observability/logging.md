@@ -14,10 +14,10 @@ The library writes to `logging.getLogger("inqtrix")`. `configure_logging(...)` b
 
 Two public helpers live in `inqtrix.logging_config`:
 
-- `configure_logging(*, enabled, level, log_dir="logs", console=False, force=True) -> Path | None` — configures the `inqtrix` logger: optional file handler, optional stderr console handler, secret-redaction filter. Pass `force=False` to skip reconfiguration when another caller already set up handlers.
-- `build_uvicorn_log_config(log_file: Path | str | None, web_level: str = "INFO") -> dict` — produces a `logging.config.dictConfig`-compatible dict that mirrors uvicorn's default stderr/stdout setup and additionally writes `uvicorn.error` and `uvicorn.access` into the same `log_file` as Inqtrix. Pass this to `uvicorn.run(app, log_config=...)`.
+- `configure_logging(*, enabled, level, log_dir="logs", console=False, force=True, json_format=False) -> Path | None` — configures the `inqtrix` logger: optional file handler, optional console handler, secret-redaction filter. Pass `force=False` to skip reconfiguration when another caller already set up handlers. With `json_format=True` the console handler carries the full `level` (stdout is the canonical machine-readable sink); in text mode it stays at `WARNING`.
+- `build_uvicorn_log_config(log_file: Path | str | None, web_level: str = "INFO", json_format: bool = False) -> dict` — produces a `logging.config.dictConfig`-compatible dict that mirrors uvicorn's default stderr/stdout setup and additionally writes `uvicorn.error` and `uvicorn.access` into the same `log_file` as Inqtrix. Pass this to `uvicorn.run(app, log_config=...)`. **Pass the SAME `json_format` value as `configure_logging`** — uvicorn builds its handlers from its own dictConfig, so a mismatch mixes JSON and text lines on one stream.
 
-Structured runtime events are emitted by `inqtrix.runtime_logging.emit_runtime_event(...)`. It is not a second logging system and it does not create a separate JSON file: it formats sanitized JSON and sends it through the same `inqtrix` logger and handlers configured above. In file logging mode these records live in the same timestamped `logs/inqtrix_*.log` file as the human-readable `TRACE ...` lines.
+Structured runtime events are emitted by `inqtrix.runtime_logging.emit_runtime_event(...)`. It is not a second logging system and it does not create a separate JSON file. Iteration events first enter the protected run audit; the same logger receives a fail-closed operational projection containing only identifiers, lifecycle/status fields, models, counters, usage and timings. Exact queries, provider prose, snippets, claim/evidence text, prompt views and URLs are not mirrored into the timestamped `logs/inqtrix_*.log` file.
 
 Minimal library setup:
 
@@ -60,29 +60,63 @@ uvicorn.run(
 | `INQTRIX_LOG_CONSOLE` | `false` | Mirror WARNING+ records from the `inqtrix` logger to stderr in addition to any file sink. |
 | `INQTRIX_LOG_WEB_LEVEL` | `INFO` | Used by `build_uvicorn_log_config` for uvicorn/FastAPI logs. |
 | `INQTRIX_LOG_INCLUDE_WEB` | `true` | Opt-out for uvicorn mirroring. |
-| `OBSERVABILITY_PROFILE` | `summary` | `summary`, `debug`, or `forensic`. `forensic` produces source/citation/claim/answer lineage events; `debug` is currently reserved for future mid-level detail. |
+| `OBSERVABILITY_PROFILE` | `summary` | `summary`, `debug`, or `forensic`. `forensic` produces source/citation/claim/answer lineage in the protected run audit and an operational, content-minimized log projection; `debug` is currently reserved for future mid-level detail. |
+| `INQTRIX_LOG_FORMAT` | `text` | Line shape. `text` keeps the historical pipe format byte-identical; `json` renders one machine-readable object per line — for the `inqtrix` logger AND the mirrored uvicorn/FastAPI loggers. Authoritative definition: [Settings and environment variables](../configuration/settings-and-env.md#process-level-variables-outside-settings). |
 
 The example webserver scripts (`examples/webserver_stacks/*.py`) read these variables, call `configure_logging(...)` once at startup, and pass `log_config=build_uvicorn_log_config(...)` to `uvicorn.run` so the timestamped file under `logs/` holds Inqtrix lifecycle lines, uvicorn startup/shutdown, and `uvicorn.access` request lines in one place.
+
+## JSON log lines and correlation fields
+
+With `INQTRIX_LOG_FORMAT=json`, every record becomes one JSON object with a
+fixed envelope: `ts` (RFC3339 UTC), `level`, `logger`, `event`, `message`,
+`thread`, plus `exc` for exceptions and the correlation fields bound by the
+request/worker context: `request_id` (accepted from a valid incoming
+`X-Request-ID` or generated, and echoed on every response), `run_id`, `user`
+(the STABLE pseudonym `usr_<hex16>` — see `INQTRIX_PSEUDONYM_PEPPER`),
+`workspace`, and `tenant`. Once tracing is enabled, `trace_id`/`span_id`
+join the envelope so a log line and its trace correlate directly.
+
+Redaction is format-independent: the same `_RedactSecretsFilter` runs in
+front of both formatters, and structured field values are additionally
+scrubbed. Follow one user across api and worker containers with:
+
+```bash
+docker compose logs api worker | jq -c 'select(.user == "usr_ab12cd34ef56aa77")'
+```
+
+In JSON mode the console sink carries the FULL `INQTRIX_LOG_LEVEL` (stdout is
+the canonical machine-readable sink for container runtimes), so this works
+without a file sink. In text mode the console keeps its historical
+`WARNING`-and-above mirror.
 
 ## How the switches interact
 
 There are three separate concerns:
 
 - `INQTRIX_LOG_ENABLED` decides whether a persistent file under `logs/` is created.
-- `INQTRIX_LOG_LEVEL` decides which records reach that file. Structured runtime events are emitted at `DEBUG` level.
+- `INQTRIX_LOG_LEVEL` decides which records reach that file.
 - `OBSERVABILITY_PROFILE` decides whether detailed forensic lineage events are produced at all. Only `forensic` enables `query_record`, `query_summary`, `source_record`, `provider_citation_record`, `evidence_record`, `claim_record`, `claim_merge`, `evidence_verification_projection`, `evidence_selection`, `answer_prompt_inputs`, `answer_section`, `answer_claim_binding`, `answer_sentence_audit`, and related events.
 
-This means forensic lineage in the file log needs all three settings:
+**Lineage events live on the trace, not in the log.** They are attached to the
+span of the step that produced them, so the waterfall shows them in place
+instead of in a separate stream that has to be joined by hand. Recording them
+therefore needs a trace sink:
 
 ```bash
-INQTRIX_LOG_ENABLED=true
-INQTRIX_LOG_LEVEL=DEBUG
-OBSERVABILITY_PROFILE=forensic
+OBSERVABILITY_PROFILE=forensic       # how deep
+INQTRIX_TRACING=file                 # where to  (or otlp)
 ```
 
-If `OBSERVABILITY_PROFILE=forensic` is set but `INQTRIX_LOG_LEVEL=INFO`, the lineage events are created inside the run but their `ITERATION ...: {...}` log lines stay below the logger threshold and do not appear in the file. If `INQTRIX_LOG_LEVEL=DEBUG` is set without `OBSERVABILITY_PROFILE=forensic`, you get the detailed per-round algorithm trace and run metadata, but not the source/citation/claim/answer lineage events.
+`forensic` with `INQTRIX_TRACING=off` or `local`, or with a sample rate below
+`1.0`, records only part of what was asked for — the process warns about both
+combinations at startup. See [Tracing legend](tracing-legend.md) for what an
+event carries and [Debugging runs](debugging-runs.md) for the drill-down path.
 
-For audit work, treat the log file as the single durable artifact. The compact INFO lines are for fast operator reading; the structured DEBUG lines in the same file carry the reconstructable chain from provider result to per-query summary, EvidenceRecords, atomized claims, answer prompt inputs, generated answer sections, citation selection, and final answer/evidence bindings.
+The log keeps what it has always been good at: lifecycle lines, warnings,
+fallback markers and the operational per-round trace, each carrying the
+correlation fields so a log line and its trace join on `trace_id`.
+
+Do not treat the container/file log as the durable evidence audit. It is intentionally insufficient to reconstruct private content. Authorized run artifacts (including `web_search_ledger`, result/artifact records, or `iteration_logs` in testing/parity mode) carry the reconstructable, redacted chain; compact INFO/DEBUG lines are only operational signposts that can be joined through stable IDs.
 
 `TESTING_MODE=true` is separate from file logging. It exposes the HTTP `/v1/test/run` endpoint and attaches the sanitized `iteration_logs` list to test/parity results. With `OBSERVABILITY_PROFILE=forensic`, those exported iteration logs include the same forensic events even when file logging is disabled; never enable testing mode in production.
 
@@ -101,7 +135,7 @@ INQTRIX_LOG_LEVEL=DEBUG
 ```
 
 ```bash
-# Forensic file log: source -> claim -> answer lineage.
+# Forensic lineage (on the trace, see above) plus a persistent log file.
 INQTRIX_LOG_ENABLED=true
 INQTRIX_LOG_LEVEL=DEBUG
 OBSERVABILITY_PROFILE=forensic
@@ -118,15 +152,30 @@ OBSERVABILITY_PROFILE=forensic
 Every handler attached by `configure_logging(...)` includes `_RedactSecretsFilter` from `logging_config.py`. Structured events also pass through an allowlist-style serializer before the handler filter sees them. Together they provide two layers of protection:
 
 - Do not emit blocked structured fields such as `headers`, `authorization`, `request_kwargs`, `request_body`, `raw_response`, `api_key`, `client_secret`, `password`, `secret`, or credential objects.
-- Redact credential-bearing URL query parameters such as `api_key`, `token`, `sig`, `signature`, `client_secret`, and `password` while preserving benign URLs.
+- Redact credential-bearing URL query parameters such as `api_key`, `token`, `sig`, `signature`, `client_secret`, and `password`. Iteration-event console projections omit every URL, including benign and private URLs.
 - Redact bearer tokens, `sk-*`/`pplx-*` API-key-like strings, and AWS access/session tokens in nested dict/list payloads.
 - Keep raw provider request bodies, headers, SDK responses, and client configuration out of the standard and forensic logs.
+- Authorization-denial warnings never contain raw user, tenant, recipient, or
+  resource identifiers. They expose only bounded categorical fields and
+  domain-separated HMAC references (`actor_ref`, `tenant_ref`,
+  `resource_ref`). With `INQTRIX_PSEUDONYM_PEPPER` configured, references are
+  stable across processes and restarts; without it they deliberately fall
+  back to a process-local key and startup warns once.
+- Authentication warnings that need to correlate one browser session use the
+  same helper with the `ses` namespace. A full session identifier, or any
+  prefix sliced from it, is still bearer-derived credential material and must
+  never be logged.
+- Durable `auth.logout` audit rows use the same `ses_<hex16>` namespace at
+  their domain writer. The revoked browser credential itself belongs in
+  neither `audit_log` nor its admin list and CSV/NDJSON exports. Historical
+  rows are sanitized set-wise inside PostgreSQL with a domain-separated
+  SHA-256 derivation; migration output and errors expose only counts.
 
 The same filter is reused by the uvicorn mirror so access logs do not leak tokens.
 
 ## Evidence lineage events
 
-Forensic mode emits the following evidence-specific events:
+Forensic mode persists the following evidence-specific events in the protected audit. Their ordinary log projection contains only non-content operational fields:
 
 - `evidence_record`: one source/citation-level EvidenceRecord with source
   passages, source snippets, and raw claim supports.
@@ -148,13 +197,22 @@ Forensic mode emits the following evidence-specific events:
   prompt in normal logs.
 - `answer_sentence_audit`: answer-side audit row that marks `matched`, `source_context`, or `unknown_citation`.
 
-All event payloads go through `sanitize_event_payload(...)`. Source passages and provider excerpts are capped; raw provider responses, headers, request bodies, and credentials are never logged.
+All protected audit payloads go through `sanitize_event_payload(...)`. Source passages and provider excerpts are bounded and redacted there; the subsequent console projection removes all such content before logging. Raw provider responses, headers, request bodies and credentials enter neither sink.
 
-For live provider triage, run `uv run python scripts/debug_research_log.py
-logs/inqtrix_YYYYMMDD_HHMMSS.log` after a run. The script prints provider,
-source, EvidenceRecord, claim-extraction, `ALGO-FAIL`, bundle, answer
-input, prompt evidence, appendix, and final-confidence counts without echoing
-raw URLs or secrets.
+For live provider triage after a run, use either:
+
+```bash
+# uv
+uv run python scripts/debug_research_log.py logs/inqtrix_YYYYMMDD_HHMMSS.log
+
+# standard Python/pip
+python -m pip install -e .
+python scripts/debug_research_log.py logs/inqtrix_YYYYMMDD_HHMMSS.log
+```
+
+The script prints provider, source, EvidenceRecord, claim-extraction,
+`ALGO-FAIL`, bundle, answer input, prompt evidence, appendix, and
+final-confidence counts without echoing raw URLs or secrets.
 
 ## Fallback markers visibility
 
@@ -174,7 +232,9 @@ See [Iteration log](iteration-log.md) for the structured marker view and [Debugg
 
 `create_app(...)` and `create_multi_stack_app(...)` call `configure_logging(..., force=False)`. This preserves the example-script configuration when a user starts uvicorn from a script that already configured the `inqtrix` file handler. If you build your own bootstrap path, preserve that invariant so your file handler is not replaced by a later server default.
 
-## Related docs
+## Related
+
+- [Tracing legend](tracing-legend.md) — which span/observation type a step becomes, and which attributes are mandatory docs
 
 - [Progress events](progress-events.md)
 - [Iteration log](iteration-log.md)

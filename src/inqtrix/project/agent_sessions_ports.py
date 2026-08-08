@@ -76,6 +76,10 @@ class AgentSession:
     tenant_id: str = "default"
     created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
+    lifecycle_status: str = "active"
+    deletion_operation_id: str | None = None
+    deletion_stage: str | None = None
+    deletion_error: str | None = None
 
 
 @runtime_checkable
@@ -127,6 +131,21 @@ class AgentSessionStore(Protocol):
     async def delete_session(
         self, session_id: str, *, scope: ResourceScope
     ) -> None: ...
+
+    async def set_session_deletion_state(
+        self,
+        session_id: str,
+        *,
+        scope: ResourceScope,
+        lifecycle_status: str,
+        deletion_operation_id: str,
+        deletion_stage: str,
+        deletion_error: str | None,
+    ) -> None: ...
+
+    async def count_session_residuals(
+        self, session_id: str, *, scope: ResourceScope
+    ) -> int: ...
 
     async def upsert_group(
         self,

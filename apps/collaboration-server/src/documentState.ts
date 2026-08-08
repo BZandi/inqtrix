@@ -4,6 +4,7 @@ import {
   getEditorSchemaFingerprint,
   validateEditorYDoc,
 } from '@inqtrix/editor-schema'
+import type { JSONContent } from '@tiptap/core'
 import * as Y from 'yjs'
 
 import type {
@@ -19,6 +20,7 @@ import {
 } from './errors'
 
 export type ValidatedDocument = {
+  canonicalJson: JSONContent
   document: Y.Doc
   encodedState: Uint8Array
   stateHash: string
@@ -45,6 +47,24 @@ export async function reconstructDocument(
   documentLimitBytes: number,
   options: ReconstructionOptions = {},
 ): Promise<Y.Doc> {
+  return (await reconstructValidatedDocument(
+    state,
+    expected,
+    documentLimitBytes,
+    options,
+  )).document
+}
+
+export async function reconstructValidatedDocument(
+  state: LoadedDocumentState,
+  expected: {
+    documentId: string
+    generation: number
+    schemaVersion: number
+  },
+  documentLimitBytes: number,
+  options: ReconstructionOptions = {},
+): Promise<ValidatedDocument> {
   const schemaHash = await getEditorSchemaFingerprint()
   if (
     state.documentId !== expected.documentId
@@ -64,9 +84,9 @@ export async function reconstructDocument(
     const document = new Y.Doc()
     try {
       reconstructCandidate(document, candidate, state.persistedSequence)
-      validateDocument(document, documentLimitBytes)
+      const validated = validateDocument(document, documentLimitBytes)
       options.onCandidateSelected?.({ candidateIndex, updates: candidate.updates })
-      return document
+      return validated
     } catch (error) {
       document.destroy()
       const mapped = collaborationError(error)
@@ -134,13 +154,19 @@ function reconstructCandidate(
   }
 }
 
-function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return left.byteLength === right.byteLength && left.every((value, index) => value === right[index])
+export function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  // `Buffer.compare` is a memcmp and honours each view's own offset and
+  // length, so this stays a content comparison — not a comparison of the
+  // pooled ArrayBuffer that Yjs may hand out views into. The previous
+  // `every` callback ran one JS invocation per byte, which on a 126 kB
+  // encoded state is six figures of call overhead for an answer memcmp
+  // gives in one pass. Semantics are unchanged; only the cost is.
+  return left.byteLength === right.byteLength && Buffer.compare(left, right) === 0
 }
 
-export function cloneDocument(document: Y.Doc): Y.Doc {
+export function cloneDocument(document: Y.Doc, encodedState?: Uint8Array): Y.Doc {
   const clone = new Y.Doc()
-  Y.applyUpdate(clone, Y.encodeStateAsUpdate(document))
+  Y.applyUpdate(clone, encodedState ?? Y.encodeStateAsUpdate(document))
   return clone
 }
 
@@ -148,8 +174,9 @@ export function validateDocument(
   document: Y.Doc,
   documentLimitBytes: number,
 ): ValidatedDocument {
+  let canonicalJson: JSONContent
   try {
-    validateEditorYDoc(document)
+    canonicalJson = validateEditorYDoc(document)
   } catch {
     throw new CollaborationError('invalid_schema', {
       closeCode: CloseCodes.incompatible,
@@ -164,10 +191,17 @@ export function validateDocument(
     })
   }
   return {
+    canonicalJson: freezeJson(canonicalJson),
     document,
     encodedState,
     stateHash: hashBytes(encodedState),
   }
+}
+
+function freezeJson<T>(value: T): T {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value
+  for (const child of Object.values(value)) freezeJson(child)
+  return Object.freeze(value)
 }
 
 export function hashBytes(value: Uint8Array): string {

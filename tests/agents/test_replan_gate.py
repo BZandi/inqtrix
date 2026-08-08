@@ -77,9 +77,9 @@ def _task(tool_kind: str):
         ("balanced", [], True),
         # Balanced: two INTERNAL read-only tasks -> approve.
         ("balanced", [_task("file_analysis"), _task("rag_query")], True),
-        # E16 amendment (plan M1 S7): a replan that adds WEB tasks always
-        # re-gates in Standard — the approved plan is the web consent,
-        # new queries must be seen before they run.
+        # A replan that adds WEB tasks always re-gates in Standard: the
+        # approved plan is the web consent, so new queries must be seen
+        # before they run.
         ("balanced", [_task("web_research")], False),
         ("balanced", [_task("web_instant"), _task("rag_query")], False),
         # Balanced: three internal tasks exceeds the <= 2 threshold.

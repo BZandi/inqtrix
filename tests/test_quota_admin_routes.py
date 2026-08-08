@@ -228,11 +228,17 @@ def test_guard_logs_authenticated_non_admin_denial(caplog):
     finally:
         logger.removeHandler(caplog.handler)
     assert error.status_code == 404
-    assert any(
-        "instance-admin denied" in record.getMessage()
-        and "reason=non_admin" in record.getMessage()
+    messages = [
+        record.getMessage()
         for record in caplog.records
+        if "authz denied" in record.getMessage()
+    ]
+    assert any(
+        "action=instance_admin" in message and "actor_ref=usr_" in message
+        for message in messages
     )
+    assert all(str(ADMIN_USER_ID) not in message for message in messages)
+    assert all("reason=" not in message for message in messages)
 
 
 # --------------------------------------------------------------------------- #

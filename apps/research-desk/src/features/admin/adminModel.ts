@@ -169,3 +169,38 @@ export function patRevealReducer(
       return state
   }
 }
+
+
+/** ``<input type="date">`` value for an epoch-seconds filter bound.
+ *
+ * Uses LOCAL calendar components, matching how the bound was created:
+ * an operator picks a day in their own timezone, so rendering it back
+ * through UTC would shift the field by a day either side of midnight.
+ */
+export function auditDateInputValue(
+  epochSeconds: number | undefined,
+): string {
+  if (epochSeconds === undefined) return ''
+  const asDate = new Date(epochSeconds * 1000)
+  if (Number.isNaN(asDate.getTime())) return ''
+  const month = String(asDate.getMonth() + 1).padStart(2, '0')
+  const day = String(asDate.getDate()).padStart(2, '0')
+  return `${asDate.getFullYear()}-${month}-${day}`
+}
+
+/** Local calendar day -> epoch seconds.
+ *
+ * ``endOfDay`` shifts to the FOLLOWING midnight because the audit
+ * range is half-open: picking a day as the upper bound must include
+ * that whole day, not stop at its first second.
+ */
+export function auditEpochFromDateInput(
+  value: string,
+  endOfDay = false,
+): number | undefined {
+  if (!value) return undefined
+  const parsed = new Date(`${value}T00:00:00`)
+  if (Number.isNaN(parsed.getTime())) return undefined
+  if (endOfDay) parsed.setDate(parsed.getDate() + 1)
+  return Math.floor(parsed.getTime() / 1000)
+}

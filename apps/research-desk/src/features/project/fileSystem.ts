@@ -6,6 +6,7 @@ import {
   parseFileAsset,
   parseProjectManifest,
   parseResearchRun,
+  type EditorDocumentImportIdentity,
   type ProjectFile,
 } from './markdown'
 import { createBootstrapKnowledgeSession } from './knowledgeSessionDefaults'
@@ -201,7 +202,11 @@ async function readProject(directoryHandle: FileSystemDirectoryHandle): Promise<
   const manifestMarkdown = await (await manifestFile.getFile()).text()
   const manifest = parseProjectManifest(manifestMarkdown)
   const researchRuns = await readResearchRuns(directoryHandle)
-  const { editorComments, editorDocuments } = await readEditorDocuments(directoryHandle)
+  const {
+    editorComments,
+    editorDocuments,
+    editorImportIdentities,
+  } = await readEditorDocuments(directoryHandle)
   const chatThreads = await readChatThreads(directoryHandle)
   const chatRules = await readChatRules(directoryHandle)
   const fileAssets = await readFileAssets(directoryHandle)
@@ -211,6 +216,7 @@ async function readProject(directoryHandle: FileSystemDirectoryHandle): Promise<
     directoryName: directoryHandle.name,
     editorComments,
     editorDocuments,
+    editorImportIdentities,
     fileAssets,
     manifest,
     researchRuns,
@@ -277,6 +283,7 @@ async function readProjectFromFiles(files: File[]): Promise<ProjectState> {
   const chatRules: ProjectState['chatRules'] = {}
   const editorDocuments: ProjectState['editorDocuments'] = {}
   const editorComments: ProjectState['editorComments'] = {}
+  const editorImportIdentities: EditorDocumentImportIdentity[] = []
   const fileAssets: Record<string, FileAssetRecord> = {}
 
   for (const file of markdownFiles) {
@@ -301,6 +308,7 @@ async function readProjectFromFiles(files: File[]): Promise<ProjectState> {
     if (relativePath.startsWith('documents/') && relativePath.endsWith('.md')) {
       const parsed = parseEditorDocument(file.contents)
       editorDocuments[parsed.document.id] = parsed.document
+      if (parsed.importIdentity) editorImportIdentities.push(parsed.importIdentity)
       for (const comment of parsed.comments) {
         editorComments[comment.id] = comment
       }
@@ -322,6 +330,7 @@ async function readProjectFromFiles(files: File[]): Promise<ProjectState> {
       chatRules,
       editorDocuments,
       editorComments,
+      editorImportIdentities,
       fileAssets,
     )
   }
@@ -332,10 +341,106 @@ async function readProjectFromFiles(files: File[]): Promise<ProjectState> {
     directoryName: projectDirectoryName(rootPrefix, manifest),
     editorComments,
     editorDocuments,
+    editorImportIdentities,
     fileAssets,
     manifest,
     researchRuns,
   })
+}
+
+function remapEditorManifestReferences(
+  manifest: Record<string, unknown>,
+  identities: EditorDocumentImportIdentity[],
+): Record<string, unknown> {
+  if (identities.length === 0) return manifest
+
+  const documentIds = uniqueImportIdentityMap(
+    identities.map((identity) => identity.documentId),
+  )
+  const commentIds = uniqueImportIdentityMap(
+    identities.flatMap((identity) => identity.commentIds),
+  )
+  const editorUi = recordValue(manifest.editor_ui)
+  const ui = recordValue(manifest.ui)
+  const pinnedExplorer = recordValue(ui?.pinnedExplorer)
+
+  return {
+    ...manifest,
+    editor_document_order: remapImportReference(
+      manifest.editor_document_order,
+      documentIds,
+    ),
+    ...(editorUi
+      ? {
+          editor_ui: remapRecordReferences(editorUi, {
+            activeDocumentId: documentIds,
+            active_document_id: documentIds,
+            openDocumentIds: documentIds,
+            open_document_ids: documentIds,
+            selectedCommentId: commentIds,
+            selected_comment_id: commentIds,
+          }),
+        }
+      : {}),
+    ...(ui
+      ? {
+          ui: {
+            ...ui,
+            ...(pinnedExplorer
+              ? {
+                  pinnedExplorer: remapRecordReferences(pinnedExplorer, {
+                    editorDocumentIds: documentIds,
+                  }),
+                }
+              : {}),
+          },
+        }
+      : {}),
+  }
+}
+
+function uniqueImportIdentityMap(
+  identities: Array<{ sourceId: string; targetId: string }>,
+): Map<string, string | null> {
+  const result = new Map<string, string | null>()
+  for (const { sourceId, targetId } of identities) {
+    if (!result.has(sourceId)) {
+      result.set(sourceId, targetId)
+      continue
+    }
+    if (result.get(sourceId) !== targetId) result.set(sourceId, null)
+  }
+  return result
+}
+
+function remapRecordReferences(
+  record: Record<string, unknown>,
+  references: Record<string, ReadonlyMap<string, string | null>>,
+) {
+  const remapped = { ...record }
+  for (const [key, identities] of Object.entries(references)) {
+    if (key in record) remapped[key] = remapImportReference(record[key], identities)
+  }
+  return remapped
+}
+
+function remapImportReference(
+  value: unknown,
+  identities: ReadonlyMap<string, string | null>,
+): unknown {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => remapImportReference(item, identities))
+      .filter((item) => item !== null)
+  }
+  if (typeof value !== 'string' || !identities.has(value)) return value
+  return identities.get(value) ?? null
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
 }
 
 function buildProjectStateFromFiles({
@@ -344,8 +449,9 @@ function buildProjectStateFromFiles({
   directoryName,
   editorComments,
   editorDocuments,
+  editorImportIdentities,
   fileAssets,
-  manifest,
+  manifest: rawManifest,
   researchRuns,
 }: {
   chatRules: ProjectState['chatRules']
@@ -353,10 +459,12 @@ function buildProjectStateFromFiles({
   directoryName: string
   editorComments: ProjectState['editorComments']
   editorDocuments: ProjectState['editorDocuments']
+  editorImportIdentities: EditorDocumentImportIdentity[]
   fileAssets: Record<string, FileAssetRecord>
   manifest: Record<string, unknown>
   researchRuns: ProjectState['researchRuns']
 }): ProjectState {
+  const manifest = remapEditorManifestReferences(rawManifest, editorImportIdentities)
   const project = manifest.project
   const ui = manifest.ui
   const editorUi = manifest.editor_ui
@@ -506,20 +614,17 @@ function buildProjectStateFromFiles({
           editorDocumentIds: editorDocumentOrder,
         },
       ),
-      selectedChatModelTier: chatModelTierOrDefault(
-        (ui as Record<string, unknown>).selectedChatModelTier,
-      ),
-      selectedAgentModelTier: chatModelTierOrDefault(
-        (ui as Record<string, unknown>).selectedAgentModelTier,
-      ),
-      selectedAgentModel:
-        stringOrDefault((ui as Record<string, unknown>).selectedAgentModel, '') || null,
-      selectedAgentEffort:
-        stringOrDefault((ui as Record<string, unknown>).selectedAgentEffort, '') || null,
-      selectedChatModel:
-        stringOrDefault((ui as Record<string, unknown>).selectedChatModel, '') || null,
-      selectedChatEffort:
-        stringOrDefault((ui as Record<string, unknown>).selectedChatEffort, '') || null,
+      // Never restored from the file: the account preferences own the model
+      // selection now. A manifest written by an older build still carries
+      // these keys; ignoring them is what keeps the account row the single
+      // source, and the cast above tolerates the surplus frontmatter without
+      // a schema bump.
+      selectedAgentEffort: null,
+      selectedAgentModel: null,
+      selectedAgentModelTier: null,
+      selectedChatEffort: null,
+      selectedChatModel: null,
+      selectedChatModelTier: null,
       selectedChatThreadId: chatThreadOrder.includes((ui as Record<string, unknown>).selectedChatThreadId as string)
         ? (ui as Record<string, unknown>).selectedChatThreadId as string
         : chatThreadOrder[0] ?? null,
@@ -793,6 +898,7 @@ function parseUnscopedProjectFiles(
   chatRules: ProjectState['chatRules'],
   editorDocuments: ProjectState['editorDocuments'],
   editorComments: ProjectState['editorComments'],
+  editorImportIdentities: EditorDocumentImportIdentity[],
   fileAssets: Record<string, FileAssetRecord>,
 ) {
   for (const file of files) {
@@ -800,6 +906,7 @@ function parseUnscopedProjectFiles(
     try {
       const parsed = parseEditorDocument(file.contents)
       editorDocuments[parsed.document.id] = parsed.document
+      if (parsed.importIdentity) editorImportIdentities.push(parsed.importIdentity)
       for (const comment of parsed.comments) {
         editorComments[comment.id] = comment
       }
@@ -855,19 +962,21 @@ async function readEditorDocuments(directoryHandle: FileSystemDirectoryHandle) {
   const directory = await getOptionalDirectory(directoryHandle, 'documents')
   const editorDocuments: ProjectState['editorDocuments'] = {}
   const editorComments: ProjectState['editorComments'] = {}
-  if (!directory) return { editorComments, editorDocuments }
+  const editorImportIdentities: EditorDocumentImportIdentity[] = []
+  if (!directory) return { editorComments, editorDocuments, editorImportIdentities }
 
   for await (const [, handle] of (directory as IterableDirectoryHandle).entries()) {
     if (handle.kind !== 'file' || !handle.name.endsWith('.md')) continue
     const file = await (handle as FileSystemFileHandle).getFile()
     const parsed = parseEditorDocument(await file.text())
     editorDocuments[parsed.document.id] = parsed.document
+    if (parsed.importIdentity) editorImportIdentities.push(parsed.importIdentity)
     for (const comment of parsed.comments) {
       editorComments[comment.id] = comment
     }
   }
 
-  return { editorComments, editorDocuments }
+  return { editorComments, editorDocuments, editorImportIdentities }
 }
 
 async function readChatThreads(directoryHandle: FileSystemDirectoryHandle) {
@@ -989,10 +1098,56 @@ function fileLibrarySectionsFromManifest(value: unknown): FileLibrarySectionReco
     const id = typeof record.id === 'string' && record.id.trim() ? record.id : ''
     const title = typeof record.title === 'string' && record.title.trim() ? record.title : ''
     if (!id || !title) continue
+    const lifecycleStatus = record.lifecycleStatus ?? record.lifecycle_status
+    const semanticRole = record.semanticRole ?? record.semantic_role
     sections.push({
       createdAt: stringOrNow(record.createdAt ?? record.created_at),
+      ...(record.deletionError !== undefined || record.deletion_error !== undefined
+        ? {
+            deletionError:
+              typeof (record.deletionError ?? record.deletion_error) === 'string'
+                ? String(record.deletionError ?? record.deletion_error)
+                : null,
+          }
+        : {}),
+      ...(record.deletionOperationId !== undefined
+        || record.deletion_operation_id !== undefined
+        ? {
+            deletionOperationId:
+              typeof (record.deletionOperationId ?? record.deletion_operation_id) === 'string'
+                ? String(record.deletionOperationId ?? record.deletion_operation_id)
+                : null,
+          }
+        : {}),
+      ...(record.deletionStage !== undefined || record.deletion_stage !== undefined
+        ? {
+            deletionStage:
+              typeof (record.deletionStage ?? record.deletion_stage) === 'string'
+                ? String(record.deletionStage ?? record.deletion_stage)
+                : null,
+          }
+        : {}),
       id,
+      isBootstrapPlaceholder:
+        record.isBootstrapPlaceholder === true
+        || record.is_bootstrap_placeholder === true,
       kind: record.kind === 'temporary' ? 'temporary' : 'custom',
+      ...(semanticRole === 'temporary'
+      || semanticRole === 'library'
+      || semanticRole === 'project_sources'
+      || semanticRole === 'custom'
+        ? { semanticRole }
+        : {}),
+      ...(lifecycleStatus === 'active'
+        || lifecycleStatus === 'deleting'
+        || lifecycleStatus === 'delete_failed'
+        ? { lifecycleStatus }
+        : {}),
+      ...(typeof record.serverSynced === 'boolean'
+        ? { serverSynced: record.serverSynced }
+        : typeof record.server_synced === 'boolean'
+          ? { serverSynced: record.server_synced }
+          : {}),
       title,
       updatedAt: stringOrNow(record.updatedAt ?? record.updated_at),
     })
@@ -1050,7 +1205,12 @@ function vectorIndexStatusOrDefault(
   if (value === 'indexing') {
     return members.some((member) => member.state === 'pending') ? 'stale' : 'ready'
   }
-  return value === 'stale' || value === 'error' ? value : 'ready'
+  return value === 'stale'
+    || value === 'error'
+    || value === 'deleting'
+    || value === 'delete_failed'
+    ? value
+    : 'ready'
 }
 
 function vectorIndexHistoryFromManifest(
@@ -1316,12 +1476,23 @@ function preferencesOrDefault(value: unknown): ProjectState['preferences'] {
     // Privacy default OFF; only an explicit true opts in (the server row is
     // authoritative and wins on login regardless of this device cache).
     agentMemoryEnabled: preferences.agentMemoryEnabled === true,
+    agentModelTier: modelTierPreferenceOrDefault(preferences.agentModelTier),
+    chatModelTier: modelTierPreferenceOrDefault(preferences.chatModelTier),
     contrastMode: contrastModeOrDefault(preferences.contrastMode),
     locale: localeOrDefault(preferences.locale),
     theme: themeOrDefault(preferences.theme),
     themePreset: themePresetOrDefault(preferences.themePreset),
     userBubbleTone: userBubbleToneOrDefault(preferences.userBubbleTone),
   }
+}
+
+/** An unknown tier resolves to `''` (no preference) rather than an invented
+ * one, so a file written by a future version cannot silently pin a tier this
+ * build does not know. */
+function modelTierPreferenceOrDefault(
+  value: unknown,
+): ProjectState['preferences']['chatModelTier'] {
+  return value === 'high' || value === 'mid' || value === 'fast' ? value : ''
 }
 
 function localeOrDefault(value: unknown): ProjectState['preferences']['locale'] {
@@ -1356,10 +1527,6 @@ function userBubbleToneOrDefault(value: unknown): ProjectState['preferences']['u
     || value === 'ink'
     ? value
     : 'gray'
-}
-
-function chatModelTierOrDefault(value: unknown): ProjectState['ui']['selectedChatModelTier'] {
-  return value === 'high' || value === 'mid' || value === 'fast' ? value : null
 }
 
 function pendingReportRunIdOrDefault(

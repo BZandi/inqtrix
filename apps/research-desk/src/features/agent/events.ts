@@ -106,6 +106,11 @@ export function applyAgentRunEvent(
       next.status = 'running'
       next.startedAt ??= isoFromUnixSeconds(event.created_at)
       return next
+    case 'inqtrix.run.resumed':
+      // A resume starts another execution segment; the original start remains
+      // the wall-clock anchor for the user's complete wait time.
+      next.status = 'running'
+      return next
     case 'inqtrix.run.waiting': {
       const status = stringField(data, 'status')
       next.status =
@@ -120,15 +125,28 @@ export function applyAgentRunEvent(
       next.status = 'completed'
       next.artifactsStale = true
       applyTerminalRunTime(next, event)
+      settleOpenKernelToolRows(next, record, 'completed')
       return next
-    case 'inqtrix.run.failed':
+    case 'inqtrix.run.failed': {
       next.status = 'failed'
-      next.error = stringField(data, 'message') || record.error
+      next.artifactsStale = true
+      // Structured error first (message + stable code), the legacy
+      // bare-message field only as fallback — a typed failure like
+      // iteration_limit must not degrade to an empty generic line.
+      const parsedFailure = errorInfo(data.error)
+      next.error =
+        parsedFailure.message
+        || stringField(data, 'message')
+        || record.error
       applyTerminalRunTime(next, event)
+      settleOpenKernelToolRows(next, record, 'failed')
       return next
+    }
     case 'inqtrix.run.cancelled':
       next.status = 'cancelled'
+      next.artifactsStale = true
       applyTerminalRunTime(next, event)
+      settleOpenKernelToolRows(next, record, 'failed')
       return next
     case 'inqtrix.run.snapshot': {
       const snapshot = data.snapshot as ResearchRunSnapshot | undefined
@@ -423,9 +441,110 @@ export function applyAgentRunEvent(
       return next
     }
 
+    case 'inqtrix.answer.started': {
+      const artifactId = stringField(data, 'artifact_id')
+      const publicationId = stringField(data, 'publication_id')
+      if (!artifactId || !publicationId) return next
+      const existing = record.artifacts[artifactId]
+      next.artifacts = {
+        ...record.artifacts,
+        [artifactId]: {
+          artifactId,
+          kind: 'answer',
+          title: existing?.title ?? 'Antwort',
+          status: 'writing',
+          revision: existing?.revision ?? 1,
+          updatedBy: 'agent',
+          refsCount: existing?.refsCount ?? 0,
+          createdAt: existing?.createdAt ?? event.created_at,
+          updatedAt: event.created_at,
+          contentMarkdown: '',
+          refs: existing?.refs,
+          revisions: existing?.revisions,
+          publicationId,
+          publicationOffset: 0,
+          publicationNeedsReconcile: true,
+        },
+      }
+      next.artifactOrder = record.artifactOrder.includes(artifactId)
+        ? record.artifactOrder
+        : [...record.artifactOrder, artifactId]
+      next.artifactsStale = false
+      return next
+    }
+
+    case 'inqtrix.output_text.delta': {
+      const artifactId = stringField(data, 'artifact_id')
+      const publicationId = stringField(data, 'publication_id')
+      const delta = stringField(data, 'delta')
+      const offset = numberField(data, 'offset')
+      const existing = artifactId ? record.artifacts[artifactId] : undefined
+      if (
+        !artifactId
+        || !publicationId
+        || !existing
+        || existing.status !== 'writing'
+        || existing.publicationId !== publicationId
+        || offset === undefined
+      ) {
+        return next
+      }
+      if (offset !== (existing.publicationOffset ?? 0)) {
+        // A gap or out-of-order frame is repaired from the authoritative
+        // artifact; never concatenate guessed Markdown.
+        next.artifactsStale = true
+        return next
+      }
+      next.artifacts = {
+        ...record.artifacts,
+        [artifactId]: {
+          ...existing,
+          contentMarkdown: `${existing.contentMarkdown ?? ''}${delta}`,
+          publicationOffset: offset + new TextEncoder().encode(delta).byteLength,
+          updatedAt: event.created_at,
+        },
+      }
+      return next
+    }
+
+    case 'inqtrix.answer.ready':
+    case 'inqtrix.answer.interrupted': {
+      const artifactId = stringField(data, 'artifact_id')
+      const publicationId = stringField(data, 'publication_id')
+      const existing = artifactId ? record.artifacts[artifactId] : undefined
+      if (!artifactId || !existing || existing.publicationId !== publicationId) {
+        return next
+      }
+      next.artifacts = {
+        ...record.artifacts,
+        [artifactId]: {
+          ...existing,
+          status: event.type === 'inqtrix.answer.ready' ? 'ready' : 'interrupted',
+          publicationId: undefined,
+          publicationOffset: undefined,
+          publicationNeedsReconcile: true,
+          updatedAt: event.created_at,
+        },
+      }
+      // Ready refetches the canonical body + references. Interrupted also
+      // refetches so a checkpointed partial artifact can be recovered.
+      next.artifactsStale = true
+      return next
+    }
+
     case 'inqtrix.agent.artifact.created':
     case 'inqtrix.agent.artifact.updated':
     case 'inqtrix.agent.artifact.edit_conflict':
+      // Kernel answer persistence happens immediately before the common
+      // answer publication. Fetching its already-complete row here would
+      // flash the full body and then clear it again on answer.started.
+      // Terminal events still force a reconciliation if publication fails.
+      if (
+        stringField(data, 'kind') === 'answer'
+        && !['cancelled', 'completed', 'failed'].includes(record.status)
+      ) {
+        return next
+      }
       // Signal only (rule R1): the cached row must NOT adopt the event's
       // revision — a bumped revision over the OLD body would defeat the
       // list-refetch staleness check and let a user edit of stale text
@@ -477,7 +596,7 @@ export function applyAgentRunEvent(
           : ''
       )
       // The transcript is an append-only protocol. Contract per event
-      // shape (P3):
+      // shape:
       //   started (new invocation)   -> append one row
       //   started (same invocation)  -> upsert row (retry/progress text)
       //   completed/failed           -> settle THAT row in place
@@ -581,6 +700,61 @@ export function applyAgentRunEvent(
       return next
     }
 
+    case 'inqtrix.agent.tool.started':
+    case 'inqtrix.agent.tool.finished': {
+      // Kernel ReAct-loop tool events ride the ONE activity-step
+      // protocol: started appends a running row,
+      // finished settles THAT row via the shared activityKey upsert.
+      // write_todos has its own todo channel; ask_user parks the run
+      // (clarification rows are the story there).
+      const tool = stringField(data, 'tool')
+      const started = event.type === 'inqtrix.agent.tool.started'
+      const callId = stringField(data, 'invocation_id')
+        || stringField(data, 'tool_call_id')
+      // finished settles by call id even when the ToolMessage lost its
+      // name; started without a tool has nothing to show.
+      if ((started && !tool) || (!started && !tool && !callId)) {
+        return next
+      }
+      if (tool === 'write_todos' || tool === 'ask_user') {
+        return next
+      }
+      const operation = normalizeAgentOperation(tool)
+      // Phase-free key: the call id IS the identity — a phase flip
+      // between started and finished must still settle the same row.
+      const activityKey = `tool:${callId || tool}`
+      const detail = started
+        ? toolArgsPreviewText(stringField(data, 'args_preview'))
+        : record.stepLog.find((item) => item.activityKey === activityKey)
+          ?.detail
+      const status = started
+        ? 'running'
+        : stringField(data, 'status') === 'error'
+          ? 'failed'
+          : 'completed'
+      next.activity = {
+        kind: 'searching',
+        detail: detail || '',
+        label: operation ? undefined : tool,
+        status,
+        operation,
+        operationCode: tool,
+        count: 1,
+        at: event.created_at,
+      }
+      appendActivityStep(next, {
+        activityKey,
+        activityKind: 'searching',
+        activityOperation: operation,
+        activityOperationCode: tool,
+        detail: detail || undefined,
+        kind: 'activity',
+        label: operation ? undefined : tool,
+        status,
+      })
+      return next
+    }
+
     case 'inqtrix.agent.narration': {
       const text = stringField(data, 'text')
       if (text) {
@@ -643,7 +817,11 @@ export function applyAgentRunEvent(
     entry: Omit<AgentStepEntry, 'at' | 'seq'>,
   ): void {
     const operation = entry.activityOperation
-    if (!operation) {
+    // An explicit activityKey upserts even without a normalized
+    // operation (kernel tool rows of tools outside the vocabulary) —
+    // otherwise tool.finished would append a SECOND line instead of
+    // settling the running one.
+    if (!operation && !entry.activityKey) {
       appendStep(target, entry)
       return
     }
@@ -704,6 +882,32 @@ function applyTerminalRunTime(
   )
 }
 
+/** Settle still-running kernel tool rows at a terminal run event: a run
+ * that dies mid-call never emits ``tool.finished``, and the task-terminal
+ * sweep only covers rows WITH a ``taskId`` — a kernel tool row has none
+ * and would show a running glyph forever. */
+function settleOpenKernelToolRows(
+  next: AgentRunRecord,
+  record: AgentRunRecord,
+  status: 'completed' | 'failed',
+): void {
+  const isOpenToolRow = (item: AgentStepEntry) =>
+    item.kind === 'activity'
+    && item.activityKey !== undefined
+    && item.activityKey.startsWith('tool:')
+    && item.status === 'running'
+  if (!next.stepLog.some(isOpenToolRow)) return
+  const log =
+    next.stepLog === record.stepLog ? [...next.stepLog] : next.stepLog
+  for (let index = 0; index < log.length; index += 1) {
+    const item = log[index]
+    if (item && isOpenToolRow(item)) {
+      log[index] = { ...item, status }
+    }
+  }
+  next.stepLog = log
+}
+
 /** ``(data, key)`` accessor with the '' fallback this module's call sites
  * expect; the coercion itself is the shared {@link asString}. */
 function stringField(data: Record<string, unknown>, key: string): string {
@@ -726,6 +930,24 @@ function recordField(
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined
+}
+
+/** args_preview arrives in ONE canonical form (the bare query) from
+ * current servers; older segments may still carry the raw JSON dump of
+ * the tool args — parse-then-fallback keeps those readable too. */
+function toolArgsPreviewText(preview: string): string {
+  const trimmed = preview.trim()
+  if (!trimmed.startsWith('{')) return trimmed
+  try {
+    const parsed = JSON.parse(trimmed) as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const query = (parsed as Record<string, unknown>).query
+      if (typeof query === 'string' && query.trim()) return query.trim()
+    }
+  } catch {
+    // Truncated dump (the backend caps previews) — show it as-is.
+  }
+  return trimmed
 }
 
 function errorInfo(value: unknown): { code?: string; message?: string } {

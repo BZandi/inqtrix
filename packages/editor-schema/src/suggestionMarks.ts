@@ -1,12 +1,28 @@
 import { mergeAttributes, Mark, type MarkConfig } from '@tiptap/core'
 
-export type SuggestionKind = 'deletion' | 'insertion' | 'modification'
+/**
+ * The three physical ProseMirror marks used by the pinned suggest-changes
+ * transformer. They are an implementation detail and deliberately differ
+ * from the reader-facing change vocabulary below.
+ */
+export type SuggestionMarkKind = 'deletion' | 'insertion' | 'modification'
+
+/** Reader-facing tracked-change vocabulary persisted in patch metadata. */
+export type SuggestionKind =
+  | 'deletion'
+  | 'format'
+  | 'insertion'
+  | 'replacement'
+  | 'structure'
+
+/** `modification` is accepted when reading pre-v2 documents only. */
+export type SerializedSuggestionKind = SuggestionKind | 'modification'
 
 export type SuggestionMarkAttributes = {
   authorId: string | null
   createdAt: number | null
   id: string
-  kind: SuggestionKind | null
+  kind: SerializedSuggestionKind | null
   patchId: string | null
   suggestionId: string | null
 }
@@ -120,7 +136,7 @@ export const SuggestionModification = suggestionMark({
   newValue: { default: null },
 })
 
-export const SUGGESTION_MARK_NAMES = new Set<SuggestionKind>([
+export const SUGGESTION_MARK_NAMES: ReadonlySet<string> = new Set<SuggestionMarkKind>([
   'deletion',
   'insertion',
   'modification',

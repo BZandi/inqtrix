@@ -7,7 +7,10 @@
 import type { AgentSessionGroupRecord, AgentSessionRecord } from './model'
 import type { ServerAgentSession, ServerAgentSessionGroup } from './types'
 import {
+  agentModelSelectionKey,
+  normalizeAgentModelSelection,
   normalizeAgentSourcePolicy,
+  type AgentSessionModelSelection,
   type AgentSourcePolicy,
 } from './executionPolicy'
 
@@ -21,6 +24,27 @@ export function agentSessionFingerprint(
     session.updatedAt,
     sourcePolicy.web,
     sourcePolicy.knowledge,
+    // Without this a model change never reaches the server: the autosave
+    // diffs on this key alone, so an omitted field fails silently.
+    agentModelSelectionKey(session.modelSelection),
+  ].join('\u0000')
+}
+
+/** Fingerprint the authoritative list response without depending on a reducer
+ * update having committed already. This preserves local-newer-wins: the sync
+ * baseline describes the server row, while a newer local record remains
+ * detectably different and is flushed afterwards. */
+export function serverAgentSessionFingerprint(
+  session: ServerAgentSession,
+): string {
+  const metadata = agentSessionMetadataFromJson(session.items_json)
+  return [
+    session.title,
+    session.group_id ?? '',
+    new Date(session.updated_at * 1000).toISOString(),
+    metadata.sourcePolicy.web,
+    metadata.sourcePolicy.knowledge,
+    agentModelSelectionKey(metadata.modelSelection),
   ].join('\u0000')
 }
 
@@ -47,6 +71,9 @@ export function serverAgentSessionPayload(session: AgentSessionRecord): {
     title: session.title,
     items_json: JSON.stringify({
       source_policy: normalizeAgentSourcePolicy(session.sourcePolicy),
+      // Whole-value write like the policy above: the field must ride every
+      // save or the stored selection is dropped on the next one.
+      model_selection: session.modelSelection ?? null,
     }),
     group_id: session.groupId,
     created_at: secondsFromIso(session.createdAt),
@@ -58,17 +85,24 @@ export function serverAgentSessionPayload(session: AgentSessionRecord): {
  * fields are ignored so older and newer server rows remain loadable. */
 export function agentSessionMetadataFromJson(value: string | undefined): {
   sourcePolicy: AgentSourcePolicy
+  modelSelection: AgentSessionModelSelection | null
 } {
-  if (!value) return { sourcePolicy: normalizeAgentSourcePolicy(null) }
+  const empty = {
+    modelSelection: null,
+    sourcePolicy: normalizeAgentSourcePolicy(null),
+  }
+  if (!value) return empty
   try {
     const parsed = JSON.parse(value) as unknown
-    const sourcePolicy =
-      parsed && typeof parsed === 'object'
-        ? (parsed as Record<string, unknown>).source_policy
-        : null
-    return { sourcePolicy: normalizeAgentSourcePolicy(sourcePolicy) }
+    const record = parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>)
+      : null
+    return {
+      modelSelection: normalizeAgentModelSelection(record?.model_selection),
+      sourcePolicy: normalizeAgentSourcePolicy(record?.source_policy),
+    }
   } catch {
-    return { sourcePolicy: normalizeAgentSourcePolicy(null) }
+    return empty
   }
 }
 

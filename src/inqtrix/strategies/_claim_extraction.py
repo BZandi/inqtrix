@@ -505,6 +505,16 @@ class LLMClaimExtractor(_NonFatalNoticeMixin, ClaimExtractionStrategy):
                 _CLAIM_EXTRACTION_SCHEMA_NAME if structured_supported else ""
             ),
             "claim_extraction_structured_supported": structured_supported,
+            "input_char_count": len(text),
+            "input_prompt_char_count": min(len(text), text_char_limit),
+            "input_omitted_chars": max(0, len(text) - text_char_limit),
+            "citation_count": len(normalized_citations),
+            "citation_prompt_count": min(
+                len(normalized_citations), citation_cap
+            ),
+            "citation_omitted_count": max(
+                0, len(normalized_citations) - citation_cap
+            ),
         }
         self._set_extraction_metadata(extraction_metadata)
 
@@ -682,9 +692,10 @@ class LLMClaimExtractor(_NonFatalNoticeMixin, ClaimExtractionStrategy):
         except AgentStructuredOutputError as exc:
             exc_message = str(exc)[:200]
             log.warning(
-                "ALGO-FAIL claim_extraction structured_output (model=%s): %s",
+                "ALGO-FAIL claim_extraction structured_output "
+                "(model=%s, error_type=%s)",
                 use_model,
-                exc_message,
+                type(exc).__name__,
             )
             self._set_nonfatal_notice(
                 "ALGO-FAIL claim_extraction: "
@@ -695,9 +706,10 @@ class LLMClaimExtractor(_NonFatalNoticeMixin, ClaimExtractionStrategy):
         except NotImplementedError as exc:
             exc_message = str(exc)[:200]
             log.warning(
-                "ALGO-FAIL claim_extraction structured_output_missing (model=%s): %s",
+                "ALGO-FAIL claim_extraction structured_output_missing "
+                "(model=%s, error_type=%s)",
                 use_model,
-                exc_message,
+                type(exc).__name__,
             )
             self._set_nonfatal_notice(
                 "ALGO-FAIL claim_extraction: "
@@ -708,9 +720,10 @@ class LLMClaimExtractor(_NonFatalNoticeMixin, ClaimExtractionStrategy):
         except AgentModelCapacityError as exc:
             exc_message = str(exc)[:200]
             log.warning(
-                "ALGO-FAIL claim_extraction model_capacity (model=%s): %s",
+                "ALGO-FAIL claim_extraction model_capacity "
+                "(model=%s, error_type=%s)",
                 use_model,
-                exc_message,
+                type(exc).__name__,
             )
             self._set_nonfatal_notice(
                 "ALGO-FAIL model_capacity: "
@@ -729,10 +742,10 @@ class LLMClaimExtractor(_NonFatalNoticeMixin, ClaimExtractionStrategy):
             exc_label = type(exc).__name__
             exc_message = str(exc)[:200]
             log.warning(
-                "ALGO-FAIL claim_extraction provider error (model=%s, %s): %s",
+                "ALGO-FAIL claim_extraction provider error "
+                "(model=%s, error_type=%s)",
                 use_model,
                 exc_label,
-                exc_message,
             )
             self._set_nonfatal_notice(
                 "ALGO-FAIL claim_extraction: "

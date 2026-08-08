@@ -7,7 +7,12 @@ import {
   type UserEvent,
 } from '@/api/inqtrixClient'
 
-export type UserEventAction = 'ignore' | 'refetch' | 'reload'
+export type UserEventAction = 'consume' | 'ignore' | 'refetch' | 'reload'
+
+const COLLABORATION_TRANSPORT_SCOPES = new Set([
+  'collaboration_comment_changed',
+  'collaboration_comment_mention',
+])
 
 /**
  * Translate the content-free user event into a shell action. The ready frame
@@ -21,6 +26,10 @@ export function userEventAction(
   if (event.type === 'ready') {
     return event.data.user_id === expectedUserId ? 'refetch' : 'reload'
   }
+  if (
+    event.type === 'invalidate'
+    && COLLABORATION_TRANSPORT_SCOPES.has(event.data.scope)
+  ) return 'consume'
   if (event.type === 'invalidate' || event.type === 'reset') return 'refetch'
   return 'ignore'
 }
@@ -189,6 +198,15 @@ export function useUserInvalidationEvents({
               stopped = true
               controller.abort()
               window.location.reload()
+              return
+            }
+            if (action === 'consume') {
+              // Collaboration comment events are already delivered to the
+              // document room by the sidecar. Consuming the duplicate
+              // user-outbox coordinate here prevents one comment from
+              // reloading runs, skills, knowledge, folders, documents and
+              // auth state in every open participant tab.
+              lastEventId = event.id ?? lastEventId
               return
             }
             if (event.type === 'ready') {

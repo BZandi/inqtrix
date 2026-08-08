@@ -1,4 +1,4 @@
-import { Extension } from '@tiptap/core'
+import { Extension, type Editor } from '@tiptap/core'
 import { ReactRenderer } from '@tiptap/react'
 import {
   Suggestion,
@@ -34,10 +34,18 @@ export const SlashCommandExtension = Extension.create<SlashOptions>({
     const options: SuggestionOptions<SlashItem, SlashItem> = {
       editor: this.editor,
       char: '/',
+      // Tracked block splits use an invisible boundary marker. Treat it like
+      // whitespace so `/` still opens the command menu in a newly proposed
+      // empty paragraph.
+      allowedPrefixes: [' ', '\u200B'],
       startOfLine: false,
       allow: ({ editor }) => editor.isEditable,
-      items: ({ query }) => filterSlashItems(allItems, query),
+      items: ({ editor, query }) => filterSlashItems(
+        slashItemsForEditor(allItems, editor, config.labels),
+        query,
+      ),
       command: ({ editor, range, props }) => {
+        if (props.disabled) return
         runBlockAction(editor, props.id, range)
       },
       render: () => createSlashRenderer(config.labels),
@@ -54,11 +62,33 @@ function createSlashRenderer(labels: SlashLabels) {
   let command: ((item: SlashItem) => void) | null = null
 
   const toMenuItems = (list: SlashItem[]): CommandMenuItem[] =>
-    list.map((item) => ({ id: item.id, label: item.label, icon: item.icon, group: item.group }))
+    list.map((item) => ({
+      description: item.description,
+      disabled: item.disabled,
+      group: item.group,
+      icon: item.icon,
+      id: item.id,
+      label: item.label,
+    }))
+
+  const firstEnabled = () => items.findIndex((item) => !item.disabled)
+
+  const move = (direction: -1 | 1) => {
+    if (!items.some((item) => !item.disabled)) return
+    let candidate = active
+    for (let steps = 0; steps < items.length; steps += 1) {
+      candidate = (candidate + direction + items.length) % items.length
+      if (!items[candidate]?.disabled) {
+        active = candidate
+        renderer?.updateProps(menuProps())
+        return
+      }
+    }
+  }
 
   const select = (index: number) => {
     const item = items[index]
-    if (item && command) command(item)
+    if (item && !item.disabled && command) command(item)
   }
 
   const menuProps = () => ({
@@ -91,7 +121,7 @@ function createSlashRenderer(labels: SlashLabels) {
   return {
     onStart: (props: SuggestionProps<SlashItem, SlashItem>) => {
       items = props.items
-      active = 0
+      active = Math.max(0, firstEnabled())
       dismissed = false
       command = (item) => props.command(item)
       renderer = new ReactRenderer(CommandMenu, { editor: props.editor, props: menuProps() })
@@ -101,7 +131,9 @@ function createSlashRenderer(labels: SlashLabels) {
     onUpdate: (props: SuggestionProps<SlashItem, SlashItem>) => {
       items = props.items
       command = (item) => props.command(item)
-      if (active >= items.length) active = Math.max(0, items.length - 1)
+      if (active >= items.length || items[active]?.disabled) {
+        active = Math.max(0, firstEnabled())
+      }
       if (dismissed) return
       renderer?.updateProps(menuProps())
       position(props.clientRect?.())
@@ -117,13 +149,11 @@ function createSlashRenderer(labels: SlashLabels) {
       }
       if (items.length === 0) return false
       if (event.key === 'ArrowDown') {
-        active = (active + 1) % items.length
-        renderer?.updateProps(menuProps())
+        move(1)
         return true
       }
       if (event.key === 'ArrowUp') {
-        active = (active - 1 + items.length) % items.length
-        renderer?.updateProps(menuProps())
+        move(-1)
         return true
       }
       if (event.key === 'Enter') {
@@ -139,4 +169,31 @@ function createSlashRenderer(labels: SlashLabels) {
       renderer = null
     },
   }
+}
+
+export function slashItemsForEditor(
+  items: readonly SlashItem[],
+  editor: Editor,
+  labels: SlashLabels,
+): SlashItem[] {
+  const reviewStorage = (
+    editor.storage as unknown as Record<string, unknown>
+  ).collaborationReview as
+    | { writeMode?: string }
+    | undefined
+  if (reviewStorage?.writeMode !== 'suggest') {
+    return items.map((item) => ({
+      ...item,
+      description: undefined,
+      disabled: false,
+    }))
+  }
+  return items.map((item) => {
+    const disabled = item.id === 'table' || item.id === 'divider'
+    return {
+      ...item,
+      description: disabled ? labels.suggestUnavailable : undefined,
+      disabled,
+    }
+  })
 }

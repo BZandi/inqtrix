@@ -1,28 +1,34 @@
-import { Tiptap } from '@hocuspocus/transformer'
+import { ProsemirrorTransformer } from '@hocuspocus/transformer'
 import type { JSONContent } from '@tiptap/core'
 import { getSchema } from '@tiptap/core'
 import * as Y from 'yjs'
 import { EDITOR_YJS_FRAGMENT } from './constants.js'
 import { createEditorSchemaExtensions } from './extensions.js'
+import { isStructureSuggestionData } from './structureSuggestions.js'
 import { assertYjsCompatibleSuggestionStructure } from './suggestions.js'
 
-function createTransformer(): Tiptap {
-  return new Tiptap().extensions(createEditorSchemaExtensions({ enableUndoRedo: false }))
-}
+const EDITOR_YJS_SCHEMA = getSchema(
+  createEditorSchemaExtensions({ enableUndoRedo: false }),
+)
 
 export function editorJsonToYDoc(content: JSONContent): Y.Doc {
-  const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
-  const document = schema.nodeFromJSON(content)
+  const document = EDITOR_YJS_SCHEMA.nodeFromJSON(content)
   assertYjsCompatibleSuggestionStructure(document)
   document.check()
-  return createTransformer().toYdoc(content, EDITOR_YJS_FRAGMENT)
+  return ProsemirrorTransformer.toYdoc(
+    content,
+    EDITOR_YJS_FRAGMENT,
+    EDITOR_YJS_SCHEMA,
+  )
 }
 
 export function editorYDocToJson(document: Y.Doc): JSONContent {
   assertCanonicalEditorYDocRoots(document)
-  const content = createTransformer().fromYdoc(document, EDITOR_YJS_FRAGMENT) as JSONContent
-  const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
-  const editorDocument = schema.nodeFromJSON(content)
+  const content = ProsemirrorTransformer.fromYdoc(
+    document,
+    EDITOR_YJS_FRAGMENT,
+  ) as JSONContent
+  const editorDocument = EDITOR_YJS_SCHEMA.nodeFromJSON(content)
   editorDocument.check()
   return editorDocument.toJSON()
 }
@@ -63,13 +69,12 @@ function hasKeyedXmlFragmentState(fragment: Y.XmlFragment): boolean {
 export function validateEditorYDoc(document: Y.Doc): JSONContent {
   assertCausallyCompleteYDoc(document)
   const content = editorYDocToJson(document)
-  const sourceStructure = canonicalYjsStructure(document)
   const canonical = editorJsonToYDoc(content)
   try {
     const canonicalJson = editorYDocToJson(canonical)
     if (
       JSON.stringify(content) !== JSON.stringify(canonicalJson)
-      || sourceStructure !== canonicalYjsStructure(canonical)
+      || !sameCanonicalYjsStructure(document, canonical)
     ) {
       throw new Error('Yjs document is not canonical for the Inqtrix editor schema')
     }
@@ -80,19 +85,31 @@ export function validateEditorYDoc(document: Y.Doc): JSONContent {
 }
 
 /**
- * Requires a complete, unambiguous, canonical Yjs V1 update encoding.
+ * Requires a complete, unambiguous Yjs V1 update encoding.
  *
- * Merging with an empty update forces Yjs to decode and re-encode a single
- * payload instead of taking mergeUpdates' one-input identity fast path.
+ * Valid Yjs transaction updates are not guaranteed to be byte-identical after
+ * `mergeUpdates()` re-encodes them (notably when one transaction combines
+ * structure attributes and deletions). Decode through Yjs' public V1 reader
+ * instead and require the reader to consume the complete payload. This keeps
+ * trailing bytes and V2 payloads rejected without rejecting valid client
+ * transactions merely because Yjs chooses another equivalent encoding.
  */
 export function validateCanonicalYjsV1Update(update: Uint8Array): Uint8Array {
-  let canonical: Uint8Array
+  const document = new Y.Doc()
+  let consumedBytes = -1
   try {
-    canonical = Y.mergeUpdates([EMPTY_YJS_V1_UPDATE, update])
+    const decoder = {
+      arr: update,
+      pos: 0,
+    } as Parameters<typeof Y.readUpdate>[0]
+    Y.readUpdate(decoder, document)
+    consumedBytes = decoder.pos
   } catch {
     throw new Error('Client update is not a valid canonical Yjs V1 update')
+  } finally {
+    document.destroy()
   }
-  if (!sameYjsBytes(update, canonical)) {
+  if (consumedBytes !== update.byteLength) {
     throw new Error('Client update is not a fully consumed canonical Yjs V1 update')
   }
   return update
@@ -121,13 +138,28 @@ export function validateSuggestionYjsUpdate(update: Uint8Array): Uint8Array {
     ranges.push({ from: struct.id.clock, to: struct.id.clock + struct.length })
     inserted.set(struct.id.client, ranges)
 
-    if (
-      (typeof struct.parent === 'string' && struct.parent !== EDITOR_YJS_FRAGMENT)
-      || struct.parentSub !== null
-    ) {
+    if (typeof struct.parent === 'string' && struct.parent !== EDITOR_YJS_FRAGMENT) {
       throw new Error('Suggestion update contains a non-canonical Yjs parent')
     }
+    if (struct.parentSub !== null) {
+      if (
+        struct.content instanceof Y.ContentAny
+        && EDITOR_YJS_NODE_ATTRIBUTE_NAMES.has(struct.parentSub)
+      ) continue
+      throw new Error('Suggestion update contains a non-canonical Yjs attribute')
+    }
     if (struct.content instanceof Y.ContentString) continue
+    // Replacing an existing Y.Map/XmlElement attribute is encoded relative to
+    // the previous item. In that valid form Yjs omits `parentSub`, so the raw
+    // update alone cannot recover the attribute key. Admit only the one
+    // bounded object vocabulary that Suggest mode writes this way; the
+    // materialized-document validation immediately afterwards proves that it
+    // actually resolves to the canonical structure-suggestion attribute.
+    if (
+      struct.content instanceof Y.ContentAny
+      && struct.content.getContent().length === 1
+      && isStructureSuggestionData(struct.content.getContent()[0])
+    ) continue
     if (
       struct.content instanceof Y.ContentFormat
       && EDITOR_YJS_FORMAT_NAMES.has(struct.content.key)
@@ -136,7 +168,14 @@ export function validateSuggestionYjsUpdate(update: Uint8Array): Uint8Array {
       struct.content instanceof Y.ContentType
       && struct.content.type instanceof Y.XmlText
     ) continue
-    throw new Error('Suggestion update contains non-canonical Yjs content')
+    if (
+      struct.content instanceof Y.ContentType
+      && struct.content.type instanceof Y.XmlElement
+      && EDITOR_YJS_NODE_NAMES.has(struct.content.type.nodeName)
+    ) continue
+    throw new Error(
+      `Suggestion update contains non-canonical Yjs content: ${struct.content.constructor.name}`,
+    )
   }
 
   for (const [client, ranges] of decoded.ds.clients) {
@@ -176,67 +215,128 @@ export function assertCausallyCompleteYDoc(document: Y.Doc): void {
 }
 
 const EDITOR_YJS_FORMAT_NAMES = new Set(
-  Object.keys(getSchema(createEditorSchemaExtensions({ enableUndoRedo: false })).marks),
+  Object.keys(EDITOR_YJS_SCHEMA.marks),
 )
 
-const EMPTY_YJS_V1_UPDATE = (() => {
-  const document = new Y.Doc()
-  try {
-    return Y.encodeStateAsUpdate(document)
-  } finally {
-    document.destroy()
-  }
-})()
+const EDITOR_YJS_NODE_NAMES = new Set(
+  Object.keys(EDITOR_YJS_SCHEMA.nodes).filter((name) => name !== 'doc'),
+)
 
-function sameYjsBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return (
-    left.byteLength === right.byteLength
-    && left.every((value, index) => value === right[index])
+const EDITOR_YJS_NODE_ATTRIBUTE_NAMES = new Set(
+  Object.values(EDITOR_YJS_SCHEMA.nodes)
+    .flatMap((node) => Object.keys(node.spec.attrs ?? {})),
+)
+
+function sameCanonicalYjsStructure(left: Y.Doc, right: Y.Doc): boolean {
+  return sameCanonicalYjsNodes(
+    left.getXmlFragment(EDITOR_YJS_FRAGMENT).toArray(),
+    right.getXmlFragment(EDITOR_YJS_FRAGMENT).toArray(),
   )
 }
 
-function canonicalYjsStructure(document: Y.Doc): string {
-  const root = document.getXmlFragment(EDITOR_YJS_FRAGMENT)
-  return stableYjsJson(root.toArray().map(canonicalYjsNode))
+function sameCanonicalYjsNodes(left: unknown[], right: unknown[]): boolean {
+  if (left.length !== right.length) return false
+  return left.every((node, index) => sameCanonicalYjsNode(node, right[index]))
 }
 
-function canonicalYjsNode(node: unknown): unknown {
-  if (node instanceof Y.XmlElement) {
-    return {
-      attributes: node.getAttributes(),
-      children: node.toArray().map(canonicalYjsNode),
-      name: node.nodeName,
-      type: 'element',
-    }
+function sameCanonicalYjsNode(left: unknown, right: unknown): boolean {
+  if (left instanceof Y.XmlElement && right instanceof Y.XmlElement) {
+    return left.nodeName === right.nodeName
+      && sameCanonicalValue(left.getAttributes(), right.getAttributes())
+      && sameCanonicalYjsNodes(
+        canonicalYjsElementChildren(left),
+        canonicalYjsElementChildren(right),
+      )
   }
-  if (node instanceof Y.XmlText) {
-    return {
-      attributes: node.getAttributes(),
-      delta: node.toDelta(),
-      type: 'text',
-    }
+  if (left instanceof Y.XmlText && right instanceof Y.XmlText) {
+    return sameCanonicalValue(left.getAttributes(), right.getAttributes())
+      && sameCanonicalValue(left.toDelta(), right.toDelta())
   }
+  if (
+    left instanceof Y.XmlElement
+    || left instanceof Y.XmlText
+    || right instanceof Y.XmlElement
+    || right instanceof Y.XmlText
+  ) return false
   throw new Error('Yjs document contains a non-canonical XML child')
 }
 
-function stableYjsJson(value: unknown): string {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
-    return JSON.stringify(value)
+/**
+ * y-tiptap keeps one empty XmlText as a cursor-bearing placeholder after some
+ * structural transactions (notably deleting a slash query and changing the
+ * block type). The Hocuspocus transformer omits that placeholder when it
+ * rebuilds the same ProseMirror JSON. They are codec-equivalent, so normalize
+ * only this exact, inert shape. Additional children, text, marks/formatting or
+ * attributes remain part of the strict structural comparison.
+ */
+function canonicalYjsElementChildren(element: Y.XmlElement): unknown[] {
+  const children = element.toArray()
+  if (
+    EDITOR_YJS_TEXTBLOCK_NAMES.has(element.nodeName)
+    && children.length === 1
+    && isInertEmptyXmlText(children[0])
+  ) {
+    return []
   }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new Error('Yjs document contains a non-finite value')
-    return JSON.stringify(value)
+  return children
+}
+
+function isInertEmptyXmlText(node: unknown): node is Y.XmlText {
+  return (
+    node instanceof Y.XmlText
+    && Object.keys(node.getAttributes()).length === 0
+    && node.toDelta().length === 0
+  )
+}
+
+const EDITOR_YJS_TEXTBLOCK_NAMES = new Set(
+  Object.values(EDITOR_YJS_SCHEMA.nodes)
+    .filter((node) => node.isTextblock)
+    .map((node) => node.name),
+)
+
+function sameCanonicalValue(left: unknown, right: unknown): boolean {
+  if (left === null || right === null) return left === right
+  if (typeof left === 'number' || typeof right === 'number') {
+    if (
+      typeof left !== 'number'
+      || typeof right !== 'number'
+      || !Number.isFinite(left)
+      || !Number.isFinite(right)
+    ) {
+      throw new Error('Yjs document contains a non-finite value')
+    }
+    return left === right
   }
-  if (Array.isArray(value)) return `[${value.map(stableYjsJson).join(',')}]`
-  if (value && typeof value === 'object') {
-    const prototype = Object.getPrototypeOf(value)
-    if (prototype !== Object.prototype && prototype !== null) {
+  if (
+    typeof left === 'string'
+    || typeof left === 'boolean'
+    || typeof right === 'string'
+    || typeof right === 'boolean'
+  ) return left === right
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+      return false
+    }
+    return left.every((value, index) => sameCanonicalValue(value, right[index]))
+  }
+  if (left && right && typeof left === 'object' && typeof right === 'object') {
+    const leftPrototype = Object.getPrototypeOf(left)
+    const rightPrototype = Object.getPrototypeOf(right)
+    if (
+      (leftPrototype !== Object.prototype && leftPrototype !== null)
+      || (rightPrototype !== Object.prototype && rightPrototype !== null)
+    ) {
       throw new Error('Yjs document contains a non-canonical attribute value')
     }
-    return `{${Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => `${JSON.stringify(key)}:${stableYjsJson(item)}`)
-      .join(',')}}`
+    const leftEntries = Object.entries(left).sort(([a], [b]) => a.localeCompare(b))
+    const rightEntries = Object.entries(right).sort(([a], [b]) => a.localeCompare(b))
+    return leftEntries.length === rightEntries.length
+      && leftEntries.every(([key, value], index) => (
+        key === rightEntries[index]?.[0]
+        && sameCanonicalValue(value, rightEntries[index]?.[1])
+      ))
   }
+  if (left !== undefined || right !== undefined) return false
   throw new Error('Yjs document contains a non-canonical attribute value')
 }

@@ -1,4 +1,4 @@
-"""SKILL.md serialization roundtrip (plan M3 `3.1`).
+"""SKILL.md serialization roundtrip.
 
 Secures: export -> import -> re-validate reproduces every writable
 field byte-for-byte, foreign files without the x-inqtrix block import

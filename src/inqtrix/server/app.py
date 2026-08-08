@@ -49,10 +49,9 @@ def db_integrity_response(request: Request, exc: IntegrityError):
     orig = getattr(exc, "orig", None)
     code = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
     log.warning(
-        "DB-Integritaetsverletzung sqlstate=%s auf %s %s",
+        "DB-Integritaetsverletzung sqlstate=%s method=%s",
         code,
         request.method,
-        request.url.path,
     )
     if code == "23505":  # unique_violation
         return error_response(
@@ -84,6 +83,7 @@ def _placeholder_secret_fields(settings: Settings) -> list[str]:
     candidates = {
         "INQTRIX_SESSION_SECRET": settings.auth.session_secret,
         "INQTRIX_PAT_PEPPER": settings.auth.pat_pepper,
+        "INQTRIX_PSEUDONYM_PEPPER": settings.auth.pseudonym_pepper,
         "INQTRIX_SERVER_API_KEY": settings.server.api_key,
         "INQTRIX_DATABASE_URL": settings.storage.database_url,
         "INQTRIX_OIDC_CLIENT_SECRET": settings.auth.oidc_client_secret,
@@ -171,17 +171,39 @@ def create_app(
     # this guard the previous unconditional reset silently dropped every
     # INFO-level marker (``_classify_fallback``, ``Round 1``, ...) that
     # Designprinzip 1 relies on for "No Silent Fallbacks" visibility.
-    from inqtrix.logging_config import configure_logging
+    from inqtrix.logging_config import configure_logging, read_logging_env
     configure_logging(
         enabled=settings.agent.testing_mode,
         level="DEBUG" if settings.agent.testing_mode else "WARNING",
         console=True,
         force=False,
+        json_format=read_logging_env().json_format,
     )
+
+    # Install the instance-wide pseudonym key so every subject reference
+    # in logs (and later traces/audit correlation) is stable across the
+    # API server, the workers, and restarts. An empty pepper keeps the
+    # historical per-process references and logs one WARNING.
+    from inqtrix.auth.log_redaction import configure_stable_pseudonyms
+    configure_stable_pseudonyms(settings.auth.pseudonym_pepper)
+
+    # Tracing (INQTRIX_TRACING): off by default; local/file/otlp install
+    # the process-global tracer provider (idempotent across create_app
+    # calls; a missing extra degrades loudly to off).
+    from inqtrix.observability.otel import setup_tracing
+    setup_tracing(settings, service_role="api")
 
     # Resolve providers — injected wins over env-driven defaults.
     if providers is None:
         providers = create_providers(settings)
+    else:
+        # Injected providers get the SAME instrumentation as built ones:
+        # observability that depends on how a provider was constructed
+        # is observability an operator cannot rely on. The wrappers are
+        # idempotent, so an already-wrapped context passes through.
+        from inqtrix.providers import instrument_providers
+
+        providers = instrument_providers(providers, settings)
 
     # Resolve strategies — injected wins, otherwise defaults from LLM.
     # The claim_extract_model is resolved Constructor-First from the provider's
@@ -362,6 +384,12 @@ def create_app(
                 log.info(
                     "Workspace-Share-Reconciliation completed without changes."
                 )
+        startup_container = getattr(_app.state, "container", None)
+        upload_reconciler = getattr(
+            startup_container, "upload_reconciler", None
+        )
+        if upload_reconciler is not None and database_ready:
+            upload_reconciler.start()
         try:
             yield
         finally:
@@ -370,18 +398,56 @@ def create_app(
                 llm_label,
                 search_label,
             )
+            # Flush the last span batch before the process dies — the
+            # documented span-loss window of BatchSpanProcessor.
+            from inqtrix.observability.otel import shutdown_tracing
+
+            shutdown_tracing()
             # Durable run stores own an engine and a background loop
             # thread; the memory store has no close() and is skipped.
             container = getattr(_app.state, "container", None)
             run_store = getattr(container, "run_store", None)
             if run_store is not None and hasattr(run_store, "close"):
                 run_store.close()
+            indexing_service = getattr(container, "indexing_service", None)
+            indexing_store = getattr(indexing_service, "job_store", None)
+            if indexing_store is not None and hasattr(indexing_store, "close"):
+                indexing_store.close()
+            deletion_service = getattr(
+                container, "asset_deletion_service", None
+            )
+            deletion_store = getattr(
+                deletion_service, "operation_store", None
+            )
+            if deletion_store is not None and hasattr(deletion_store, "close"):
+                deletion_store.close()
+            upload_reconciler = getattr(container, "upload_reconciler", None)
+            if upload_reconciler is not None:
+                upload_reconciler.close()
+            upload_service = getattr(container, "upload_operation_service", None)
+            upload_store = getattr(upload_service, "operations", None)
+            if upload_store is not None and hasattr(upload_store, "close"):
+                upload_store.close()
             # The Postgres quota store owns a NullPool engine; dispose it
             # on the live loop here (record_blocking's throwaway loops
             # cannot). Memory store / disabled quota -> no-op.
             quota_service = getattr(container, "quota_service", None)
             if quota_service is not None:
                 await quota_service.aclose()
+            # Usage-ledger recorder: flush the remaining rows, then
+            # dispose its NullPool engine on the live loop.
+            from inqtrix.usage.recorder import (
+                active_usage_recorder,
+                set_active_usage_recorder,
+            )
+
+            usage_recorder = active_usage_recorder()
+            if usage_recorder is not None:
+                usage_recorder.close()
+                set_active_usage_recorder(None)
+                aclose_store = getattr(usage_recorder.store, "aclose", None)
+                if callable(aclose_store):
+                    await aclose_store()
             # The Postgres-canonical knowledge store owns its own NullPool
             # engine (loop-agnostic); dispose it on the live loop here.
             # Memory/Qdrant stores have no aclose -> guarded no-op.
@@ -440,6 +506,15 @@ def create_app(
             if collaboration_service is not None:
                 await collaboration_service.aclose()
 
+    # Usage ledger: the provider wrappers feed llm_usage rows through the
+    # process recorder; the lifespan finally closes it. Installed BEFORE the
+    # routes, because the usage read surface resolves the recorder while it
+    # is being built — a dependency created after its consumer silently
+    # leaves that surface unmounted.
+    from inqtrix.usage.recorder import install_usage_recorder
+
+    install_usage_recorder(settings)
+
     # Fresh router per create_app() call to avoid duplicate route handlers
     app_router = create_router()
 
@@ -463,6 +538,17 @@ def create_app(
     )
     if cors_kwargs is not None:
         app.add_middleware(CORSMiddleware, **cors_kwargs)
+
+    # Added LAST so Starlette places it OUTERMOST: the request id must
+    # wrap every other middleware and error path, and the context reset
+    # must be the final thing that runs. The proxy-hops policy is the
+    # SAME one the login throttle trusts (XFF from the right).
+    from inqtrix.server.request_context import RequestContextMiddleware
+
+    app.add_middleware(
+        RequestContextMiddleware,
+        trusted_proxy_hops=settings.auth.trusted_proxy_hops,
+    )
 
     @app.exception_handler(IntegrityError)
     async def _db_integrity_handler(

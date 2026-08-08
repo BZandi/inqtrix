@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import urllib.parse
 from typing import Any
@@ -183,11 +184,11 @@ def make_provider(
     return OidcAuthProvider(**arguments), users
 
 
-def make_app(provider: OidcAuthProvider) -> TestClient:
+def make_app(provider: OidcAuthProvider, *, audit: Any = None) -> TestClient:
     from fastapi import Depends
 
     app = FastAPI()
-    app.include_router(build_auth_router(provider))
+    app.include_router(build_auth_router(provider, audit=audit))
     principal_dep = provider.build_principal_dependency()
 
     @app.get("/v1/protected")
@@ -234,10 +235,12 @@ def test_full_login_roundtrip_establishes_a_session():
     assert callback.headers["location"] == "/"
     assert "inqtrix_session" in callback.cookies
 
-    info = client.get("/api/auth/session").json()
+    session_response = client.get("/api/auth/session")
+    info = session_response.json()
     assert info["authenticated"] is True
     assert info["user"]["display_name"] == "alice"
     assert info["csrf_token"]
+    assert session_response.cookies.get("inqtrix_csrf") == info["csrf_token"]
 
     protected = client.get("/v1/protected")
     assert protected.status_code == 200
@@ -278,10 +281,20 @@ def test_unsafe_method_requires_the_csrf_header():
 
 
 def test_logout_destroys_the_session():
+    class _RecordingSink:
+        def __init__(self) -> None:
+            self.entries = []
+
+        async def record(self, entry) -> None:
+            self.entries.append(entry)
+
     idp = FakeIdp()
     provider, _users = make_provider(idp)
-    client = make_app(provider)
+    audit = _RecordingSink()
+    client = make_app(provider, audit=audit)
     run_login(client, idp)
+    raw_session_id = client.cookies.get("inqtrix_session")
+    assert raw_session_id is not None and len(raw_session_id) == 43
     token = client.get("/api/auth/session").json()["csrf_token"]
 
     response = client.post(
@@ -292,6 +305,13 @@ def test_logout_destroys_the_session():
         "authenticated": False
     }
     assert client.get("/v1/protected").status_code == 401
+    logouts = [entry for entry in audit.entries if entry.action == "auth.logout"]
+    assert len(logouts) == 1
+    resource_id = logouts[0].resource_id
+    assert re.fullmatch(r"ses_[0-9a-f]{16}", resource_id)
+    assert raw_session_id not in resource_id
+    assert raw_session_id[:12] not in resource_id
+    assert raw_session_id[-12:] not in resource_id
 
 
 # ------------------------------------------------------------------ #

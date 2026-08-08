@@ -2,11 +2,18 @@ import type { ResearchRunResult } from '@/features/researchRuns/types'
 import type {
   KnowledgeAnswerRecord,
   KnowledgeReferenceRecord,
+  KnowledgeRunProgressRecord,
 } from '@/features/project/types'
 import {
   citationLabelFromHref as citationLabelFromHrefGeneric,
   linkifyCitationLabels as linkifyCitationLabelsGeneric,
 } from '@/components/markdown/citationLinks'
+import {
+  knowledgeRetrievalDegradations,
+  knowledgeRetrievalWarnings,
+  mergeKnowledgeRetrievalDegradations,
+  mergeKnowledgeRetrievalWarnings,
+} from './retrievalDegradation'
 
 /**
  * Parse the document target out of a knowledge citation URL. The
@@ -89,6 +96,7 @@ export function knowledgeAnswerFromRunResult(result: ResearchRunResult): Knowled
       : null,
     grounding: grounding?.enabled && grounding.quotes_total !== undefined
       ? {
+        degraded: grounding.marker?.includes('fallback') === true,
         total: grounding.quotes_total,
         verified: grounding.quotes_verified ?? 0,
       }
@@ -97,7 +105,45 @@ export function knowledgeAnswerFromRunResult(result: ResearchRunResult): Knowled
     quotes: grounding?.quotes ?? [],
     references,
     refusal: isKnowledgeRefusal(result.answer, references.length),
+    retrievalDegradations: knowledgeRetrievalDegradations(
+      result.knowledge_retrieval?.degradations,
+    ),
+    retrievalWarnings: knowledgeRetrievalWarnings(
+      result.knowledge_retrieval?.warnings,
+    ),
   }
+}
+
+/** Merge the live SSE ledger into the persisted result projection. Current
+ * servers persist the same degradation in `knowledge_retrieval`, but retaining
+ * the event copy makes reconnects and rolling upgrades fail visible rather
+ * than letting the final answer erase an already observed limitation. */
+export function knowledgeAnswerWithRunProgress(
+  answer: KnowledgeAnswerRecord,
+  progress: KnowledgeRunProgressRecord,
+): KnowledgeAnswerRecord {
+  const fromEvents = progress.steps.flatMap(
+    (step) => step.facts.retrievalDegradations ?? [],
+  )
+  const retrievalDegradations = mergeKnowledgeRetrievalDegradations(
+    answer.retrievalDegradations,
+    fromEvents,
+  )
+  const warningEvents = progress.steps.flatMap(
+    (step) => step.facts.retrievalWarnings ?? [],
+  )
+  const retrievalWarnings = mergeKnowledgeRetrievalWarnings(
+    answer.retrievalWarnings ?? [],
+    warningEvents,
+  )
+  const degradationsUnchanged = (
+    retrievalDegradations.length === answer.retrievalDegradations.length
+  )
+  const warningsUnchanged = JSON.stringify(retrievalWarnings)
+    === JSON.stringify(answer.retrievalWarnings ?? [])
+  return degradationsUnchanged && warningsUnchanged
+    ? answer
+    : { ...answer, retrievalDegradations, retrievalWarnings }
 }
 
 const isKnowledgeCitationLabel = (label: string): boolean => /^K\d+$/.test(label)

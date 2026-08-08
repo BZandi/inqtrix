@@ -226,11 +226,16 @@ venv/
 .DS_Store
 .vscode/
 .env
+.env.stack.azure
 .env.*
 *.env
 !.env.example
+# Curated, secret-free deployment templates are the only deploy `.env.*`
+# exceptions; runtime environment files remain covered by the private patterns.
 !deploy/.env.stack.example
-!deploy/.env.migrate.example
+!deploy/.env.stack.secrets.example
+!deploy/.env.migrate.secrets.example
+deploy/.secrets/
 inqtrix.yaml
 inqtrix.yml
 .inqtrix.yaml
@@ -240,24 +245,31 @@ inqtrix.yml
 tests/integration/runs/
 tests/integration/reports/
 
-# Claude
+# Local Claude state and instruction overlays may contain machine-specific
+# prompts, session data, or private operational context. These paths are a
+# permanent version-control boundary: never add, stage, commit, or mirror them
+# into the distributable product source.
 .claude/
 *.claude
-CLAUDE.md
+[Cc][Ll][Aa][Uu][Dd][Ee].md
 
-# Cursor
+# Local Cursor workspace state may contain caches, private architecture notes,
+# or editor-specific context. The whole tree is permanently local-only.
+# Internal development memory must never be copied into public documentation.
 .cursor/
+[Cc][Uu][Rr][Ss][Oo][Rr].md
 
 # Local testing
 main.py
 
 tests/integration/
 
-AGENTS.md
+# Local Codex/agent instruction overlay; permanently operator-specific and not
+# part of the distributable product source.
+[Aa][Gg][Ee][Nn][Tt][Ss].md
 
 # Frontend workspaces
 node_modules/
-.pnpm-store/
 apps/*/dist/
 apps/*/.vite/
 apps/*/node_modules/

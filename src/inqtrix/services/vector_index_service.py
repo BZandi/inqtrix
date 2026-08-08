@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 from inqtrix.auth.permissions import require_owned_access
 from inqtrix.services.workspace_guard import deny_cross_workspace
 from inqtrix.project.vector_index_ports import (
-    VectorIndexHistoryEntry,
     VectorIndexMember,
     VectorIndexNotFound,
     VectorIndexRecord,
@@ -24,7 +23,7 @@ from inqtrix.project.vector_index_ports import (
 from inqtrix.project.scoped_upsert import ResourceScope
 
 if TYPE_CHECKING:
-    from inqtrix.auth.principal import UserContext
+    pass
 
 _VALID_STATUS = frozenset({"error", "indexing", "ready", "stale"})
 # Mirrors the frontend VectorIndexMemberState union and the DB CHECK
@@ -81,6 +80,8 @@ class VectorIndexService:
         except VectorIndexNotFound:
             existing = None
         if existing is not None:
+            if existing.status in {"deleting", "delete_failed"}:
+                raise VectorIndexNotFound(id)
             require_owned_access(
                 owner_user_id=existing.created_by_user_id, resource_tenant_id=existing.tenant_id,
                 resource_id=existing.id, visible_to=visible_to,
@@ -122,6 +123,63 @@ class VectorIndexService:
         await self._store.delete_index(
             index_id, scope=ResourceScope.from_record(index)
         )
+
+    async def require_owned_index(
+        self, index_id, *, visible_to, request_workspace_id=None
+    ) -> VectorIndexRecord:
+        """Resolve the immutable deletion snapshot after owner/workspace checks."""
+
+        index = await self._store.get_index(index_id)
+        require_owned_access(
+            owner_user_id=index.created_by_user_id,
+            resource_tenant_id=index.tenant_id,
+            resource_id=index.id,
+            visible_to=visible_to,
+            not_found=VectorIndexNotFound,
+        )
+        deny_cross_workspace(
+            resource_workspace_id=index.workspace_id,
+            request_workspace_id=request_workspace_id,
+            not_found=lambda: VectorIndexNotFound(index_id),
+        )
+        return index
+
+    async def set_deletion_state(
+        self,
+        index_id: str,
+        *,
+        scope: ResourceScope,
+        failed_error: str | None = None,
+    ) -> None:
+        await self._store.set_deletion_state(
+            index_id,
+            scope=scope,
+            status="delete_failed" if failed_error is not None else "deleting",
+            error=failed_error,
+        )
+
+    async def delete_index_idempotent(
+        self, index_id: str, *, scope: ResourceScope
+    ) -> None:
+        try:
+            await self._store.delete_index(index_id, scope=scope)
+        except VectorIndexNotFound:
+            return
+
+    async def count_index(self, index_id: str, *, scope: ResourceScope) -> int:
+        return await self._store.count_index(index_id, scope=scope)
+
+    async def remove_asset_memberships(
+        self, file_id: str, *, scope: ResourceScope
+    ) -> int:
+        """Internal aggregate-cleanup primitive, scoped to the asset owner."""
+
+        return await self._store.remove_asset_memberships(file_id, scope=scope)
+
+    async def count_asset_memberships(
+        self, file_id: str, *, scope: ResourceScope
+    ) -> int:
+        return await self._store.count_asset_memberships(file_id, scope=scope)
 
 
 def _dedupe_members(members) -> tuple[VectorIndexMember, ...]:

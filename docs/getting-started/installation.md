@@ -11,7 +11,7 @@ How to install Inqtrix for local development and for consumer-style use, includi
 - Python 3.11 or newer.
 - A package manager: [`uv`](https://github.com/astral-sh/uv) is recommended; `conda` and plain `pip` also work.
 - Credentials for at least one LLM and one search provider if you intend to run real research.
-- For the Research Desk UI only: Node.js 22.12+ with pnpm via Corepack.
+- For the Research Desk UI only: Node.js 22.12+ with npm 10.9+.
 
 ## From a fresh clone
 
@@ -25,16 +25,21 @@ cd inqtrix
 uv sync --extra dev
 source .venv/bin/activate
 
-# Option B: conda
+# Option B: standard Python and pip
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+
+# Option C: conda with pip
 conda create -n inqtrix python=3.11
 conda activate inqtrix
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 ```
 
 Editable install is the recommended workflow for local development and testing:
 
-- `pip install -e .` — editable install for normal local use.
-- `pip install -e ".[dev]"` — editable install plus test dependencies.
+- `python -m pip install -e .` — editable install for normal local use.
+- `python -m pip install -e ".[dev]"` — editable install plus test dependencies.
 - `uv sync --extra dev` — equivalent for `uv` users.
 
 Code changes under `src/inqtrix/` are picked up immediately without re-installing after every edit.
@@ -51,19 +56,62 @@ Two platform backends pull optional dependencies; install them only when you use
 ```bash
 uv sync --extra knowledge-qdrant --extra queue-valkey
 # pip equivalent:
-pip install -e ".[knowledge-qdrant,queue-valkey]"
+python -m pip install -e ".[knowledge-qdrant,queue-valkey]"
 ```
 
 ## Frontend toolchain (optional)
 
-The Research Desk UI under `apps/research-desk/` needs Node.js 22.12+ and pnpm pinned via Corepack (`"packageManager": "pnpm@11.1.1"` in the root `package.json`):
+The Research Desk UI under `apps/research-desk/` needs Node.js 22.12+. npm and
+the root `package-lock.json` are the sole supported JavaScript install path:
 
 ```bash
-corepack enable                              # one-time per machine
-corepack pnpm install --frozen-lockfile      # from the repository root
+npm ci                                      # from the repository root
 ```
 
-`npm ci` works as a fallback; see [`apps/research-desk/README.md`](../../apps/research-desk/README.md) for the supply-chain trade-offs and build commands.
+See [`apps/research-desk/README.md`](../../apps/research-desk/README.md) for the
+npm workspace build commands.
+
+## Built Research Desk with the Python gateway
+
+Build the frontend once, then serve the resulting `dist/` directory through
+the default Python web gateway:
+
+```bash
+npm run ui:build
+
+# uv
+uv sync --only-group web-gateway
+uv run --only-group web-gateway python -m inqtrix_web_gateway \
+  --dist-dir apps/research-desk/dist \
+  --backend-url http://127.0.0.1:5100
+
+# or, after `python -m pip install -e .`
+python -m inqtrix_web_gateway \
+  --dist-dir apps/research-desk/dist \
+  --backend-url http://127.0.0.1:5100
+```
+
+## Optional deployment CLI
+
+`inqtrix-deploy` is a convenience frontend for the canonical Compose stack.
+It does not replace raw `docker compose` / `podman compose`, infer a provider,
+or maintain separate configuration.
+
+```bash
+# uv
+uv run inqtrix-deploy --help
+
+# Standard Python/pip, console entry point
+python -m pip install -e .
+inqtrix-deploy --help
+
+# Same pip installation without relying on a scripts directory in PATH
+python -m inqtrix.deploy --help
+```
+
+Raw Compose and CLI counterparts for start, stop, status, logs, maintenance,
+and named environment pairs are documented together in
+[Runbooks](../deployment/runbooks.md).
 
 ## The `src/` layout caveat
 
@@ -76,23 +124,30 @@ If you only want a quick experiment without installing, you can set `PYTHONPATH=
 This is the fastest offline regression check after cloning. It runs the local `pytest` suite only, does **not** call real model or search providers, and does not require API keys.
 
 ```bash
+# uv
 uv run pytest tests/ -v
+
+# standard Python/pip environment
+python -m pytest tests/ -v
 ```
 
-Use `uv run pytest tests/ --collect-only -q` when you need the exact current count; the suite grows as provider and server coverage expands.
+Use `uv run pytest tests/ --collect-only -q`, or
+`python -m pytest tests/ --collect-only -q` in the pip-installed environment,
+when you need the exact current count; the suite grows as provider and server
+coverage expands.
 
 ## Consumer-style install (non-editable)
 
 For a consumer-style install outside active development, use a normal non-editable install instead:
 
 ```bash
-pip install .
+python -m pip install .
 
 # Editable install without test extras
-pip install -e .
+python -m pip install -e .
 
 # Editable install with test extras
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 ```
 
 ## Next steps

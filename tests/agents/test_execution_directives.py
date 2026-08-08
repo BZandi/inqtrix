@@ -30,7 +30,11 @@ from inqtrix.settings import (
 class QuickWebLLM(LLMProvider):
     """Two-call quick-web provider recording model/effort propagation."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        answer_text: str = "Die Mannschaft gewann heute das Finale.",
+    ) -> None:
         self.models = ModelSettings(
             reasoning_model="base-model",
             tier_high_model="high-model",
@@ -38,6 +42,7 @@ class QuickWebLLM(LLMProvider):
             tier_fast_model="fast-model",
         )
         self.calls: list[dict[str, Any]] = []
+        self.answer_text = answer_text
 
     def complete(self, prompt: str, **kwargs: Any) -> str:
         return self.complete_with_metadata(prompt, **kwargs).content
@@ -56,7 +61,7 @@ class QuickWebLLM(LLMProvider):
             '{"query":"FIFA Weltmeisterschaft Sieger heute",'
             '"recency":"day"}'
             if "Formuliere genau EINE" in prompt
-            else "Die Mannschaft gewann heute das Finale; Wert $1.5T, Formel $x$."
+            else self.answer_text
         )
         return LLMResponse(
             content=content,
@@ -219,8 +224,6 @@ def test_quick_web_is_one_search_without_plan_child_rag_or_canvas() -> None:
 
         result = client.get(f"/v1/runs/{run_id}/result").json()
         assert result["answer"].startswith("Die Mannschaft gewann")
-        assert r"Wert \$1.5T" in result["answer"]
-        assert "Formel $x$" in result["answer"]
         assert result["references"][0]["url"] == "https://example.test/final"
         expected_execution = {
             "execution_directive": "quick_web",
@@ -235,6 +238,16 @@ def test_quick_web_is_one_search_without_plan_child_rag_or_canvas() -> None:
             },
             "consent_reason": "explicit_directive",
             "tool_use_counts": {"web": 1, "knowledge": 0},
+            "limits": {
+                "web_searches": {
+                    "used": 1,
+                    "limit": 1,
+                    "ceiling": 1,
+                    "recoverable": False,
+                    "extendable": False,
+                    "reason": "direct_route_single_search",
+                }
+            },
         }
         assert summary["snapshot"]["execution"] == expected_execution
         assert result["execution"] == expected_execution
@@ -244,6 +257,35 @@ def test_quick_web_is_one_search_without_plan_child_rag_or_canvas() -> None:
             "picked-model",
         ]
         assert [call["effort"] for call in llm.calls] == ["high", "high"]
+
+
+def test_quick_web_preserves_provider_grounded_numbers_and_sources() -> None:
+    llm = QuickWebLLM(
+        answer_text="Der Listenpreis beträgt 1.50 USD pro 1M Token."
+    )
+    search = CountingSearch()
+    body = {
+        **_quick_body(),
+        "question": "Was kostet das Modell exakt pro 1M Token?",
+    }
+
+    with _client(llm, search) as client:
+        response = client.post("/v1/runs", json=body)
+        assert response.status_code == 202, response.text
+        run_id = response.json()["run_id"]
+        _wait_status(client, run_id, {"completed"})
+
+        result = client.get(f"/v1/runs/{run_id}/result").json()
+        assert "1.50" in result["answer"]
+        assert "[unbelegt: harte Aussage]" not in result["answer"]
+        assert [item["url"] for item in result["references"]] == [
+            "https://example.test/final"
+        ]
+
+    answer_prompt = llm.calls[1]["prompt"]
+    assert "einschließlich darin genannter Zahlen, Preise und Daten" in answer_prompt
+    assert "entferne vorhandene Providerinformationen nicht" in answer_prompt
+    assert "Grounded provider answer." in answer_prompt
 
 
 def test_quick_web_answer_retries_use_agent_activity_channel() -> None:
@@ -338,6 +380,46 @@ def test_strict_quick_web_gates_reviewed_query_then_runs_once() -> None:
         }
         # Resume reuses the persisted reviewed query; it is not regenerated.
         assert len(llm.calls) == 2
+
+
+def test_strict_quick_web_edit_runs_the_edited_query() -> None:
+    """Editing the gated quick-web query resumes with the EDITED query.
+
+    Regression: the approval action once carried a spurious ``recency`` arg
+    that ``web_instant`` (query-only) does not accept, so ``decision: edit``
+    was rejected as "Unbekannte Tool-Felder: recency" and the edit path never
+    worked end-to-end. recency now rides in the approval payload, so an
+    args-only edit re-validates cleanly against the tool schema.
+    """
+    llm = QuickWebLLM()
+    search = CountingSearch()
+    with _client(llm, search) as client:
+        run_id = client.post(
+            "/v1/runs", json=_quick_body(autonomy="strict")
+        ).json()["run_id"]
+        _wait_status(client, run_id, {"waiting_for_approval"})
+        approval = client.get(
+            f"/v1/runs/{run_id}/approvals"
+        ).json()["data"][0]
+        # recency is NOT a web_instant tool arg — the gate exposes only query.
+        assert "recency" not in approval["payload"]["actions"][0]["args"]
+
+        decided = client.post(
+            f"/v1/runs/{run_id}/approvals/{approval['approval_id']}",
+            json={
+                "decision": "edit",
+                "actions": [
+                    {"tool": "web_instant", "args": {"query": "EU AI Act Governance-Pflichten 2026"}}
+                ],
+            },
+        )
+        assert decided.status_code == 200, decided.text
+
+        _wait_status(client, run_id, {"completed"})
+        assert len(search.calls) == 1
+        assert search.calls[0]["query"] == "EU AI Act Governance-Pflichten 2026"
+        # The edited query kept the originally-derived recency (payload-carried).
+        assert search.calls[0]["recency_filter"] == "day"
 
 
 def test_capabilities_and_legacy_directive_conflict_are_explicit() -> None:

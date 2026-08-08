@@ -3,6 +3,23 @@ import { CloseCodes, CollaborationError } from './errors'
 
 const MAX_AWARENESS_STATE_BYTES = 16 * 1024
 
+export function removeHocuspocusScratchAwarenessState(
+  states: Map<number, Record<string, unknown>>,
+): boolean {
+  const first = states.entries().next()
+  if (first.done) return false
+
+  const [clientId, state] = first.value
+  if (!isPlainEmptyRecord(state)) return false
+
+  // @hocuspocus/server 4.3 and 4.4 decode inbound awareness updates through
+  // a scratch Awareness instance. Its constructor inserts this leading empty
+  // local state before the real client states. Restrict the workaround to that
+  // exact shape so a changed upstream representation fails closed below.
+  states.delete(clientId)
+  return true
+}
+
 export function enforceAwarenessIdentity(
   states: Map<number, Record<string, unknown>>,
   context: ConnectionContext,
@@ -24,6 +41,16 @@ export function enforceAwarenessIdentity(
     }
     states.set(clientId, sanitized)
   }
+}
+
+function isPlainEmptyRecord(value: unknown): value is Record<string, never> {
+  return (
+    typeof value === 'object'
+    && value !== null
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype
+    && Object.keys(value).length === 0
+  )
 }
 
 function jsonClone(value: unknown): unknown {

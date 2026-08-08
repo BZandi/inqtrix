@@ -10,6 +10,12 @@ import {
   asNonEmptyString as stringFact,
   asStringArray as stringArrayFact,
 } from '@/lib/coerce'
+import {
+  knowledgeRetrievalDegradations,
+  knowledgeRetrievalWarnings,
+  mergeKnowledgeRetrievalDegradations,
+  mergeKnowledgeRetrievalWarnings,
+} from './retrievalDegradation'
 
 /**
  * Pure event-to-step mapping for the live knowledge run card.
@@ -54,6 +60,10 @@ export function applyKnowledgeRunEvent(
       })
     case 'inqtrix.knowledge.retrieval.completed':
       return applyRetrievalCompleted(progress, event)
+    case 'inqtrix.knowledge.retrieval.degraded':
+      return applyRetrievalDegraded(progress, event)
+    case 'inqtrix.knowledge.retrieval.warning':
+      return applyRetrievalWarning(progress, event)
     case 'inqtrix.knowledge.evidence.truncated':
       return appendStep(progress, {
         facts: {
@@ -121,12 +131,28 @@ function applyRetrievalCompleted(
   progress: KnowledgeRunProgressRecord,
   event: ResearchRunEvent,
 ): KnowledgeRunProgressRecord {
+  const existingDegradations = progress.steps.find(
+    (step) => step.id === 'retrieval',
+  )?.facts.retrievalDegradations ?? []
+  const completedDegradations = knowledgeRetrievalDegradations(event.data.degradations)
+  const existingWarnings = progress.steps.find(
+    (step) => step.id === 'retrieval',
+  )?.facts.retrievalWarnings ?? []
+  const completedWarnings = knowledgeRetrievalWarnings(event.data.warnings)
   const facts: KnowledgeStepFacts = {
     candidateCount: numberFact(event.data.candidate_count),
     collectionDocumentCount: numberFact(event.data.collection_document_count),
     topK: numberFact(event.data.top_k),
     finalK: numberFact(event.data.final_k),
     finalKOverridden: event.data.final_k_overridden === true,
+    retrievalDegradations: mergeKnowledgeRetrievalDegradations(
+      existingDegradations,
+      completedDegradations,
+    ),
+    retrievalWarnings: mergeKnowledgeRetrievalWarnings(
+      existingWarnings,
+      completedWarnings,
+    ),
   }
   let next = upsertStep(progress, {
     facts,
@@ -145,6 +171,46 @@ function applyRetrievalCompleted(
   return next
 }
 
+function applyRetrievalDegraded(
+  progress: KnowledgeRunProgressRecord,
+  event: ResearchRunEvent,
+): KnowledgeRunProgressRecord {
+  const degradation = knowledgeRetrievalDegradations([event.data])
+  if (degradation.length === 0) return progress
+  const existing = progress.steps.find((step) => step.id === 'retrieval')
+  return upsertStep(progress, {
+    facts: {
+      retrievalDegradations: mergeKnowledgeRetrievalDegradations(
+        existing?.facts.retrievalDegradations ?? [],
+        degradation,
+      ),
+    },
+    id: 'retrieval',
+    kind: 'retrieval',
+    status: existing?.status ?? 'running',
+  })
+}
+
+function applyRetrievalWarning(
+  progress: KnowledgeRunProgressRecord,
+  event: ResearchRunEvent,
+): KnowledgeRunProgressRecord {
+  const warnings = knowledgeRetrievalWarnings([event.data])
+  if (warnings.length === 0) return progress
+  const existing = progress.steps.find((step) => step.id === 'retrieval')
+  return upsertStep(progress, {
+    facts: {
+      retrievalWarnings: mergeKnowledgeRetrievalWarnings(
+        existing?.facts.retrievalWarnings ?? [],
+        warnings,
+      ),
+    },
+    id: 'retrieval',
+    kind: 'retrieval',
+    status: existing?.status ?? 'running',
+  })
+}
+
 function applyGateEvaluated(
   progress: KnowledgeRunProgressRecord,
   event: ResearchRunEvent,
@@ -156,6 +222,7 @@ function applyGateEvaluated(
   const roundsTotal = (progress.plan?.gateRounds ?? 0) + 1
   let next = appendStep(progress, {
     facts: {
+      gateMarker: stringFact(event.data.marker),
       rewritten: event.data.rewritten === true,
       round: round + 1,
       roundsTotal,
@@ -200,6 +267,7 @@ function applyGroundingChecked(
   next = markStepDone(next, 'answer')
   next = appendStep(next, {
     facts: {
+      groundingMarker: stringFact(event.data.marker),
       quotesTotal: numberFact(event.data.quotes_total),
       quotesVerified: numberFact(event.data.quotes_verified),
     },

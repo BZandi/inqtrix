@@ -1,12 +1,14 @@
 """Source tiering strategy — classify URLs into quality tiers.
 
-The source-tiering strategy is the primary signal Inqtrix uses to weight
-evidence quality. It assigns each citation URL a tier (``primary``,
+The source-tiering strategy is a discovery-quality and observability signal.
+It assigns each citation URL a tier (``primary``,
 ``mainstream``, ``stakeholder``, ``unknown``, ``low``) and aggregates a
 0.0–1.0 quality score over a batch of URLs. Implementations should be
 pure functions of the URL — no I/O, no per-call state — so they can be
 called freely inside hot loops (search-result post-processing, answer
-synthesis, metric aggregation).
+synthesis, metric aggregation). A tier never admits or rejects provider
+evidence and never verifies a claim. It is a quality signal used for ranking,
+diagnostics, and confidence calibration.
 """
 
 from __future__ import annotations
@@ -31,10 +33,12 @@ class SourceTieringStrategy(ABC):
 
     The strategy is consumed in three places: the search node tags each
     citation as it arrives, the evaluate node uses the aggregate
-    quality score as a stop-cascade input, and the answer node uses
-    the per-URL tier to order references. Implementations must be
-    deterministic for a given URL and side-effect-free; the same URL
-    must always classify to the same tier within one run.
+    discovery-quality score as a stop-cascade input, and the answer node uses
+    the per-URL tier to order references. Unknown classification must not
+    discard a search result or prevent its provider-grounded content reaching
+    synthesis. Implementations must be deterministic for a given URL and
+    side-effect-free; the same URL must always classify to the same tier
+    within one run.
     """
 
     @abstractmethod

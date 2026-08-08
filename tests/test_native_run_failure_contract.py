@@ -46,6 +46,27 @@ def test_failure_contract_modules_cold_import_without_service_cycle(
     assert completed.returncode == 0, completed.stderr
 
 
+def test_kernel_loop_ceilings_classify_by_name() -> None:
+    """The two kernel loop ceilings map onto stable codes WITHOUT the
+    classifier importing langgraph or the kernel middleware (worker
+    startup stays free of the optional agent extra)."""
+
+    class GraphRecursionError(RuntimeError):
+        pass
+
+    class KernelToolBudgetExceeded(RuntimeError):
+        pass
+
+    assert (
+        classify_execution_failure(GraphRecursionError("limit"))
+        == "iteration_limit"
+    )
+    assert (
+        classify_execution_failure(KernelToolBudgetExceeded("31 > 30"))
+        == "tool_budget_exceeded"
+    )
+
+
 def test_explicit_failure_codes_beat_ambiguous_http_and_builtin_types() -> None:
     class StructuredCapabilityFailure(RuntimeError):
         code = "provider_error"

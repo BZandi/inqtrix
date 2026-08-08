@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import socket
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 
 from inqtrix.server.database_gate import install_database_contract_gate
 from inqtrix.settings import Settings
 from inqtrix.storage.migration_contract import (
+    WORM_TENANT_TABLES,
     RUNTIME_REQUIRED_FUNCTIONS,
     RUNTIME_REQUIRED_SEQUENCES,
     RUNTIME_VERSION_TABLE,
@@ -20,6 +23,7 @@ from inqtrix.storage.migration_contract import (
 )
 from inqtrix.storage.runtime_contract import (
     DatabaseRuntimeContractError,
+    DatabaseRuntimeUnavailableError,
     verify_database_runtime_contract,
     verify_database_url_runtime_contract,
 )
@@ -161,8 +165,8 @@ def _valid_tenant_rows() -> list[dict[str, object]]:
             "has_tenant_id": True,
             "can_select": True,
             "can_insert": True,
-            "can_update": table_name != "audit_log",
-            "can_delete": table_name != "audit_log",
+            "can_update": table_name not in WORM_TENANT_TABLES,
+            "can_delete": table_name not in WORM_TENANT_TABLES,
             "can_truncate": False,
             "can_references": False,
             "can_trigger": False,
@@ -696,6 +700,138 @@ async def test_url_contract_always_disposes_probe_engine(monkeypatch) -> None:
             "postgresql+asyncpg://runtime.invalid/inqtrix",
             app_role="inqtrix_app",
         )
+    assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_url_contract_types_transient_connectivity_failures(
+    monkeypatch,
+) -> None:
+    engine = SimpleNamespace(disposed=False)
+
+    async def dispose() -> None:
+        engine.disposed = True
+
+    engine.dispose = dispose
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.build_engine",
+        lambda database_url, *, null_pool: engine,
+    )
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.build_session_factory",
+        lambda active_engine: _SESSION_FACTORY,
+    )
+
+    failure = socket.gaierror(-2, "temporary name resolution failure")
+
+    async def fail_contract(session_factory, *, app_role: str, login_policy: str):
+        raise failure
+
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.verify_database_runtime_contract",
+        fail_contract,
+    )
+
+    with pytest.raises(Exception) as caught:
+        await verify_database_url_runtime_contract(
+            "postgresql+asyncpg://runtime.invalid/inqtrix",
+            app_role="inqtrix_app",
+        )
+
+    assert isinstance(caught.value, DatabaseRuntimeUnavailableError)
+    assert caught.value.__cause__ is failure
+    assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_url_contract_does_not_hide_unknown_probe_failures(
+    monkeypatch,
+) -> None:
+    engine = SimpleNamespace(disposed=False)
+
+    async def dispose() -> None:
+        engine.disposed = True
+
+    engine.dispose = dispose
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.build_engine",
+        lambda database_url, *, null_pool: engine,
+    )
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.build_session_factory",
+        lambda active_engine: _SESSION_FACTORY,
+    )
+
+    failure = RuntimeError("unexpected verifier bug")
+
+    async def fail_contract(session_factory, *, app_role: str, login_policy: str):
+        raise failure
+
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.verify_database_runtime_contract",
+        fail_contract,
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        await verify_database_url_runtime_contract(
+            "postgresql+asyncpg://runtime.invalid/inqtrix",
+            app_role="inqtrix_app",
+        )
+
+    assert caught.value is failure
+    assert engine.disposed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sqlstate", "expected_type"),
+    [
+        ("57P03", DatabaseRuntimeUnavailableError),
+        ("28P01", OperationalError),
+    ],
+)
+async def test_url_contract_classifies_sqlstate_without_hiding_auth_errors(
+    monkeypatch,
+    sqlstate: str,
+    expected_type: type[BaseException],
+) -> None:
+    engine = SimpleNamespace(disposed=False)
+
+    async def dispose() -> None:
+        engine.disposed = True
+
+    engine.dispose = dispose
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.build_engine",
+        lambda database_url, *, null_pool: engine,
+    )
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.build_session_factory",
+        lambda active_engine: _SESSION_FACTORY,
+    )
+
+    origin = SimpleNamespace(sqlstate=sqlstate)
+    failure = OperationalError("runtime probe", {}, origin)
+
+    async def fail_contract(session_factory, *, app_role: str, login_policy: str):
+        raise failure
+
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.verify_database_runtime_contract",
+        fail_contract,
+    )
+
+    with pytest.raises(Exception) as caught:
+        await verify_database_url_runtime_contract(
+            "postgresql+asyncpg://runtime.invalid/inqtrix",
+            app_role="inqtrix_app",
+        )
+
+    assert isinstance(caught.value, expected_type)
+    if sqlstate == "57P03":
+        assert caught.value.__cause__ is failure
+    else:
+        assert caught.value is failure
     assert engine.disposed is True
 
 

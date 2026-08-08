@@ -1,4 +1,4 @@
-"""SKILL.md serialization (plan M3 `3.1`, agentskills.io compatibility).
+"""SKILL.md serialization with agentskills.io compatibility.
 
 One skill file = YAML frontmatter + the instruction body. The standard
 fields (``name``, ``description``) stay at the top level so foreign

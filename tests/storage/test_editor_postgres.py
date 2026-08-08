@@ -18,8 +18,9 @@ from datetime import datetime, timezone
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text
 
+import inqtrix.project.editor_postgres as editor_postgres
 from inqtrix.pagination import decode_cursor
 from inqtrix.project.editor_postgres import PostgresEditorStore
 from inqtrix.project.editor_ports import DocumentNotFound, EditorComment
@@ -30,8 +31,9 @@ from inqtrix.storage.editor_orm import (
     editor_documents,
     editor_folders,
 )
-from inqtrix.storage.identity_orm import resource_shares
+from inqtrix.storage.identity_orm import audit_log, resource_shares
 from inqtrix.storage.migrate import run_migrations
+from inqtrix.storage.user_event_orm import user_events
 from tests.storage._canonical_users import (
     canonical_user_id,
     ensure_canonical_users,
@@ -39,10 +41,7 @@ from tests.storage._canonical_users import (
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 USER_ID = canonical_user_id("editor-user")
@@ -62,36 +61,60 @@ def editor_schema_migrated():
 async def store():
     engine = build_engine(TEST_DATABASE_URL)
     factory = build_session_factory(engine)
-    async with factory() as session:
-        async with session.begin():
-            bypasses = (
+
+    async def reset(*, seed_users: bool) -> None:
+        async with factory() as session:
+            async with session.begin():
+                bypasses = (
+                    await session.execute(
+                        text(
+                            "SELECT rolsuper OR rolbypassrls FROM pg_roles "
+                            "WHERE rolname = current_user"
+                        )
+                    )
+                ).scalar_one()
+                if not bypasses:
+                    pytest.fail(
+                        "INQTRIX_TEST_DATABASE_URL must connect as a "
+                        "superuser/BYPASSRLS user (cross-tenant cleanup)."
+                    )
                 await session.execute(
-                    text(
-                        "SELECT rolsuper OR rolbypassrls FROM pg_roles "
-                        "WHERE rolname = current_user"
+                    user_events.delete().where(
+                        user_events.c.resource_type == "editor_document"
                     )
                 )
-            ).scalar_one()
-            if not bypasses:
-                pytest.fail(
-                    "INQTRIX_TEST_DATABASE_URL must connect as a "
-                    "superuser/BYPASSRLS user (cross-tenant cleanup)."
+                await session.execute(
+                    audit_log.delete().where(
+                        audit_log.c.resource_type == "editor_document"
+                    )
                 )
-            await session.execute(editor_comments.delete())
-            await session.execute(
-                resource_shares.delete().where(
-                    resource_shares.c.resource_type == "editor_document"
+                await session.execute(editor_comments.delete())
+                await session.execute(
+                    resource_shares.delete().where(
+                        resource_shares.c.resource_type == "editor_document"
+                    )
                 )
-            )
-            await session.execute(editor_documents.delete())
-            await session.execute(editor_folders.delete())
-            await ensure_canonical_users(
-                session,
-                (USER_ID, USER_1_ID, USER_2_ID, OTHER_USER_ID),
-            )
+                await session.execute(editor_documents.delete())
+                await session.execute(editor_folders.delete())
+                if seed_users:
+                    await ensure_canonical_users(
+                        session,
+                        (USER_ID, USER_1_ID, USER_2_ID, OTHER_USER_ID),
+                    )
+
+    await reset(seed_users=True)
     editor_store = PostgresEditorStore(engine=engine, app_role=APP_ROLE)
-    yield editor_store
-    await editor_store.aclose()
+    try:
+        yield editor_store
+    finally:
+        # Leave the disposable shared integration database as clean as this
+        # fixture found it.  A setup-only wipe leaks the final test's document
+        # into the next module, where its RESTRICT owner FK correctly prevents
+        # identity-fixture cleanup and makes the suite order-dependent.
+        try:
+            await reset(seed_users=False)
+        finally:
+            await editor_store.aclose()
 
 
 async def _save_doc(
@@ -153,10 +176,10 @@ async def _upsert_comments(
 async def test_patch_document_metadata_bumps_revision_via_sql_update(store) -> None:
     """The metadata PATCH executes its SQL UPDATE end-to-end.
 
-    Pins the statement construction itself: a missing sqlalchemy ``update``
-    import once turned every collaboration-metadata autosave into a
-    NameError 500 (live incident 2026-07-15) — a path only the real
-    Postgres store executes, so only this gated suite can catch it.
+    Pins the statement construction itself: a missing SQLAlchemy ``update``
+    import turns collaboration-metadata autosave into a ``NameError`` 500.
+    Only the real Postgres store executes this path, so the gated suite must
+    exercise it.
     """
     document_id = "doc-patch-metadata"
     await _save_doc(store, document_id)
@@ -287,7 +310,7 @@ async def test_cross_owner_document_id_collision_is_not_found(store) -> None:
     with pytest.raises(DocumentNotFound):
         await store.upsert_document(
             id="ed_1", title="hijack", content_markdown="Bob", folder_id=None,
-            source="api", source_run_id=None, revision=2,
+            source="blank", source_run_id=None, revision=2,
             diff_anchor_markdown=None, diff_anchor_updated_at=None,
             created_at=999.0, updated_at=200.0,
             created_by_user_id=OTHER_USER_ID, workspace_id=None,
@@ -317,6 +340,167 @@ async def test_comment_composite_pk_isolation_and_cascade(store) -> None:
     )
     gone, _ = await store.list_comments_page("ed_a", limit=50, after=None)
     assert gone == []
+
+
+@pytest.mark.asyncio
+async def test_document_delete_commits_audit_and_user_invalidations(store) -> None:
+    document_id = "ed_delete_effects"
+    await _save_doc(store, document_id, owner=USER_ID)
+    share_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    async with store._session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                resource_shares.insert().values(
+                    id=share_id,
+                    tenant_id="default",
+                    recipient_user_id=USER_1_ID,
+                    resource_type="editor_document",
+                    resource_id=document_id,
+                    permission="view",
+                    revision=1,
+                    granted_by_user_id=USER_ID,
+                    created_at=now,
+                    accepted_at=now,
+                )
+            )
+
+    await store.delete_document(
+        document_id,
+        scope=ResourceScope(
+            created_by_user_id=USER_ID,
+            workspace_id=None,
+        ),
+    )
+
+    assert store.atomic_delete_resource_effects is True
+    with pytest.raises(DocumentNotFound):
+        await store.get_document(document_id)
+    async with store._session_factory() as session:
+        events = (
+            await session.execute(
+                select(
+                    user_events.c.target_user_id,
+                    user_events.c.scope,
+                    user_events.c.resource_type,
+                    user_events.c.resource_id,
+                )
+                .where(user_events.c.resource_id == document_id)
+                .order_by(user_events.c.target_user_id)
+            )
+        ).all()
+        audits = (
+            await session.execute(
+                select(
+                    audit_log.c.actor_user_id,
+                    audit_log.c.action,
+                    audit_log.c.resource_type,
+                    audit_log.c.resource_id,
+                ).where(audit_log.c.resource_id == document_id)
+            )
+        ).all()
+        shares = (
+            await session.execute(
+                select(
+                    resource_shares.c.id,
+                    resource_shares.c.revoked_at,
+                    resource_shares.c.revoked_by_user_id,
+                ).where(
+                    resource_shares.c.id == share_id
+                )
+            )
+        ).all()
+
+    assert {
+        (
+            event.target_user_id,
+            event.scope,
+            event.resource_type,
+            event.resource_id,
+        )
+        for event in events
+    } == {
+        (
+            USER_ID,
+            "editor_documents",
+            "editor_document",
+            document_id,
+        ),
+        (
+            USER_1_ID,
+            "editor_documents",
+            "editor_document",
+            document_id,
+        ),
+    }
+    assert [
+        (
+            audit.actor_user_id,
+            audit.action,
+            audit.resource_type,
+            audit.resource_id,
+        )
+        for audit in audits
+    ] == [
+        (
+            USER_ID,
+            "editor_document.deleted",
+            "editor_document",
+            document_id,
+        )
+    ]
+    assert len(shares) == 1
+    assert shares[0].id == share_id
+    assert shares[0].revoked_at is not None
+    assert shares[0].revoked_by_user_id == USER_ID
+
+
+@pytest.mark.asyncio
+async def test_document_delete_rolls_back_when_resource_effects_fail(
+    store,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document_id = "ed_delete_effects_rollback"
+    await _save_doc(store, document_id, owner=USER_ID)
+    append_resource_effects = editor_postgres.append_resource_effects
+
+    async def append_then_fail(*args, **kwargs) -> None:
+        await append_resource_effects(*args, **kwargs)
+        raise RuntimeError("forced resource-effect failure")
+
+    monkeypatch.setattr(
+        editor_postgres,
+        "append_resource_effects",
+        append_then_fail,
+    )
+
+    with pytest.raises(RuntimeError, match="forced resource-effect failure"):
+        await store.delete_document(
+            document_id,
+            scope=ResourceScope(
+                created_by_user_id=USER_ID,
+                workspace_id=None,
+            ),
+        )
+
+    assert (await store.get_document(document_id)).id == document_id
+    async with store._session_factory() as session:
+        event_count = (
+            await session.execute(
+                select(user_events.c.id).where(
+                    user_events.c.resource_id == document_id
+                )
+            )
+        ).all()
+        audit_count = (
+            await session.execute(
+                select(audit_log.c.id).where(
+                    audit_log.c.resource_id == document_id
+                )
+            )
+        ).all()
+    assert event_count == []
+    assert audit_count == []
 
 
 @pytest.mark.asyncio
@@ -463,7 +647,7 @@ async def test_comment_write_revalidates_live_share_inside_store_transaction(
 
 @pytest.mark.asyncio
 async def test_folder_delete_orphans_documents(store) -> None:
-    await store.upsert_folder(
+    folder = await store.upsert_folder(
         id="edf_1", title="F", created_at=1.0, updated_at=1.0,
         created_by_user_id=USER_ID, workspace_id=None,
     )
@@ -476,7 +660,7 @@ async def test_folder_delete_orphans_documents(store) -> None:
     )
     await store.delete_folder(
         "edf_1",
-        scope=ResourceScope.from_record(await store.get_folder("edf_1")),
+        scope=ResourceScope.from_record(folder),
     )
     doc = await store.get_document("ed_1")
     assert doc.folder_id is None

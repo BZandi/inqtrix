@@ -2,7 +2,6 @@
 
 Revision ID: 0034_agent_memory_feedback
 Revises: 0033_agent_memory
-Create Date: 2026-07-03
 """
 
 from __future__ import annotations

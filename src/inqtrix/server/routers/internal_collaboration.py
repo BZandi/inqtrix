@@ -42,10 +42,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("inqtrix")
 
-_ACTOR_KINDS = frozenset({"human", "assistant", "agent", "system"})
+_ACTOR_KINDS = frozenset({"human", "guest", "assistant", "agent", "system"})
 _CHANGE_KINDS = frozenset({"direct", "suggestion", "decision", "system"})
 _DECISIONS = frozenset({"accept", "reject"})
-_SUGGESTION_KINDS = frozenset({"insertion", "deletion", "modification"})
+_DECISION_OUTCOMES = frozenset({"accepted", "rejected"})
+_SUGGESTION_KINDS = frozenset(
+    {"insertion", "deletion", "replacement", "format", "structure"}
+)
 
 
 def build_router(container: "AppContainer") -> APIRouter:
@@ -202,12 +205,28 @@ def build_router(container: "AppContainer") -> APIRouter:
             suggestions = _suggestions(body)
             patches = _patch_states(body)
             decision = _optional_enum(body, "decision", _DECISIONS)
+            decision_outcome = _optional_enum(
+                body, "decision_outcome", _DECISION_OUTCOMES
+            )
+            if (
+                (decision == "accept" and decision_outcome != "accepted")
+                or (
+                    decision == "reject"
+                    and decision_outcome != "rejected"
+                )
+                or (decision is None and decision_outcome is not None)
+            ):
+                raise ValueError("invalid_decision_outcome")
             command_id = _optional_uuid(body, "command_id")
             command_payload_hash = _optional_sha256(
                 body, "command_payload_hash"
             )
             lease_id = _optional_uuid(body, "lease_id")
-            actor_user_id = _uuid(body, "actor_user_id")
+            actor_id = _uuid(body, "actor_user_id")
+            actor_user_id = None if actor_kind == "guest" else actor_id
+            actor_guest_identity_id = (
+                actor_id if actor_kind == "guest" else None
+            )
             persisted = await service.persist_update(
                 update=PersistCollaborationUpdate(
                     tenant_id=_bounded_string(
@@ -221,10 +240,13 @@ def build_router(container: "AppContainer") -> APIRouter:
                     instance_epoch=_positive_int(body, "epoch"),
                     lease_id=lease_id,
                     actor_user_id=actor_user_id,
+                    actor_guest_identity_id=actor_guest_identity_id,
                     update_hash=update_hash,
                     update_bytes=update_bytes,
                     actor_kind=cast(
-                        Literal["human", "assistant", "agent", "system"],
+                        Literal[
+                            "human", "guest", "assistant", "agent", "system"
+                        ],
                         actor_kind,
                     ),
                     change_kind=cast(
@@ -234,6 +256,11 @@ def build_router(container: "AppContainer") -> APIRouter:
                         change_kind,
                     ),
                     suggestion_ids=suggestion_ids,
+                    change_summary=_change_summary(body),
+                    decision_outcome=cast(
+                        Literal["accepted", "rejected"] | None,
+                        decision_outcome,
+                    ),
                     suggestions=suggestions,
                     patches=patches,
                     decision=cast(Literal["accept", "reject"] | None, decision),
@@ -702,7 +729,13 @@ def _suggestions(
                 author_id=_uuid(item, "author_id"),
                 created_at=_non_negative_number(item, "created_at"),
                 kind=cast(
-                    Literal["insertion", "deletion", "modification"],
+                    Literal[
+                        "insertion",
+                        "deletion",
+                        "replacement",
+                        "format",
+                        "structure",
+                    ],
                     _enum(item, "kind", _SUGGESTION_KINDS),
                 ),
             )
@@ -724,11 +757,17 @@ def _patch_states(
         if not isinstance(item, dict):
             raise ValueError("invalid_patches")
         kinds_raw = item.get("kinds")
-        if not isinstance(kinds_raw, list) or len(kinds_raw) > 3:
+        if not isinstance(kinds_raw, list) or len(kinds_raw) > 5:
             raise ValueError("invalid_patch_kinds")
         kinds = tuple(
             cast(
-                Literal["insertion", "deletion", "modification"],
+                Literal[
+                    "insertion",
+                    "deletion",
+                    "replacement",
+                    "format",
+                    "structure",
+                ],
                 _enum({"kind": kind}, "kind", _SUGGESTION_KINDS),
             )
             for kind in kinds_raw
@@ -744,12 +783,71 @@ def _patch_states(
                     item, "active_suggestion_ids", maximum=1000
                 ),
                 kinds=kinds,
+                superseded_suggestion_ids=(
+                    _uuid_strings(
+                        item,
+                        "superseded_suggestion_ids",
+                        maximum=1,
+                    )
+                    if "superseded_suggestion_ids" in item
+                    else ()
+                ),
             )
         )
     ids = [item.patch_id for item in patches]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate_patches")
     return tuple(patches)
+
+
+def _change_summary(body: dict[str, Any]) -> dict[str, Any]:
+    value = body.get("change_summary")
+    if not isinstance(value, dict):
+        raise ValueError("invalid_change_summary")
+    raw_edits = value.get("edits")
+    omitted = value.get("omitted_edit_count")
+    if (
+        not isinstance(raw_edits, list)
+        or len(raw_edits) > 3
+        or not isinstance(omitted, int)
+        or isinstance(omitted, bool)
+        or omitted < 0
+    ):
+        raise ValueError("invalid_change_summary")
+    edits: list[dict[str, Any]] = []
+    allowed_kinds = _SUGGESTION_KINDS | {"direct"}
+    for item in raw_edits:
+        if not isinstance(item, dict):
+            raise ValueError("invalid_change_summary")
+        before = item.get("before")
+        after = item.get("after")
+        position = item.get("position")
+        kind = item.get("kind")
+        if (
+            not isinstance(before, str)
+            or len(before) > 160
+            or not isinstance(after, str)
+            or len(after) > 160
+            or not isinstance(position, int)
+            or isinstance(position, bool)
+            or position < 0
+            or not isinstance(kind, str)
+            or kind not in allowed_kinds
+            or "<" in before
+            or ">" in before
+            or "<" in after
+            or ">" in after
+        ):
+            raise ValueError("invalid_change_summary")
+        edits.append(
+            {
+                "before": before,
+                "after": after,
+                "kind": kind,
+                "position": position,
+            }
+        )
+    return {"edits": edits, "omitted_edit_count": omitted}
 
 
 def _sha256(body: dict[str, Any], field: str) -> str:

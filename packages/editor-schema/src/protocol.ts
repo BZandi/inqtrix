@@ -1,5 +1,5 @@
 export type CollaborationAccess = 'edit' | 'suggest' | 'view'
-export type CollaborationActorKind = 'assistant' | 'agent' | 'human' | 'system'
+export type CollaborationActorKind = 'assistant' | 'agent' | 'guest' | 'human' | 'system'
 export type CollaborationChangeKind = 'decision' | 'direct' | 'suggestion' | 'system'
 
 export type CollaborationDurableAck = {

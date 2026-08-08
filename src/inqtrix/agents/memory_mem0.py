@@ -210,16 +210,18 @@ class Mem0AgentMemoryProvider:
         try:
             response = await self._http.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
-            log.warning("Agent memory provider unavailable: %s", exc)
+            log.warning(
+                "Agent memory provider unavailable (error_type=%s)",
+                type(exc).__name__,
+            )
             raise AgentMemoryUnavailable("Memory provider unavailable") from exc
         if response.status_code == 404:
             raise AgentMemoryNotFound(path)
         if response.status_code >= 500:
             log.warning(
-                "Agent memory provider returned %s for %s %s",
+                "Agent memory provider returned status=%s for method=%s",
                 response.status_code,
                 method,
-                path,
             )
             raise AgentMemoryUnavailable("Memory provider unavailable")
         if response.status_code >= 400:

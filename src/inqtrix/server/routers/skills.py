@@ -1,4 +1,4 @@
-"""Skill CRUD (``/v1/skills*``, plan M3 `3.1`).
+"""Skill CRUD for ``/v1/skills*``.
 
 The server half of the skill library: list returns the caller's
 visible set (owned plus accepted shared-in; ownerless only in unscoped

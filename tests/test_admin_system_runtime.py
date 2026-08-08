@@ -125,12 +125,57 @@ def test_runtime_payload_reports_configured_backends_without_secrets():
     assert payload["knowledge"]["sparse_multilingual"] is False
     assert payload["knowledge"]["cross_lingual_recommendation"] == "reranker"
     assert payload["api"]["openapi"] is False
+    # Tracing block: mode off ⇒ inactive, no retention, no deep link;
+    # never any endpoint or credential. content_capture follows the
+    # ambient OBSERVABILITY_PROFILE (env-driven in this fixture), so it
+    # is asserted for presence and type rather than a fixed value.
+    block = dict(payload["observability"])
+    assert isinstance(block.pop("content_capture"), bool)
+    assert block == {
+        "tracing": "off",
+        "tracing_active": False,
+        "sample_rate": 1.0,
+        "spool": False,
+        "retention_days": None,
+        # Whether ANY process runs the prune jobs: they live in the
+        # worker, so a worker-less deployment keeps rows forever no
+        # matter what the retention days say.
+        "retention_enforced": True,
+        "ui_link_configured": False,
+    }
 
     serialized = json.dumps(payload, sort_keys=True)
     assert "secret" not in serialized
     assert "postgresql" not in serialized
     assert "s3.secret.example" not in serialized
     assert "private-bucket" not in serialized
+
+
+def test_runtime_payload_observability_reports_configured_vs_effective():
+    from inqtrix.settings import ObservabilitySettings
+
+    container = _configured_runtime_container()
+    container.settings.observability = ObservabilitySettings(
+        tracing="otlp",
+        trace_retention_days=14,
+        trace_ui_url="http://localhost:3300",
+    )
+    payload = system_runtime_payload(container)
+    block = payload["observability"]
+    assert block["tracing"] == "otlp"
+    # No provider is installed in this test process: configured and
+    # effective must diverge visibly.
+    assert block["tracing_active"] is False
+    assert block["retention_days"] == 14
+    assert block["ui_link_configured"] is True
+
+    # retention_days=0 documents "job off" — the status must not
+    # advertise a cleanup job with 0-day retention.
+    container.settings.observability = ObservabilitySettings(
+        tracing="otlp", trace_retention_days=0
+    )
+    block = system_runtime_payload(container)["observability"]
+    assert block["retention_days"] is None
 
 
 def test_runtime_payload_checked_reports_unreachable_backends(monkeypatch):

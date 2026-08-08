@@ -14,19 +14,28 @@ import asyncio
 import json
 import logging
 import threading
+import uuid
 from typing import Any
 
 import pytest
 
+from inqtrix.auth.principal import Principal
 from inqtrix.core.context import RunContext, RuntimeContext
 from inqtrix.core.results import RunRequest
+from inqtrix.execution_failures import RunExecutionFailure
 from inqtrix.knowledge.algorithm import KnowledgeAlgorithm
 from inqtrix.knowledge.profiles import EVIDENCE_K_MAX
+from inqtrix.knowledge.retrieval_warnings import (
+    project_retrieval_exclusion_warnings,
+)
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import (
     DocumentChunk,
     KnowledgeProviderContext,
     RetrievalCandidate,
+    RetrievalCandidateBatch,
+    RetrievalDegradation,
+    RetrievalExclusion,
 )
 from inqtrix.providers.base import LLMResponse, ProviderContext
 from inqtrix.providers.rerankers import RerankResult
@@ -96,6 +105,23 @@ class ContextualizingLLM(ScriptedLLM):
         return super().complete_with_metadata(prompt, **kwargs)
 
 
+class DecomposingLLM(ScriptedLLM):
+    """Return two real sub-queries before continuing with gate/answer calls."""
+
+    def complete_with_metadata(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        if "eigenstaendige Teilfragen" in prompt:
+            return LLMResponse(
+                content=json.dumps(
+                    ["Wie ist die Haftung begrenzt?", "Was ist der Auftragswert?"]
+                ),
+                prompt_tokens=7,
+                completion_tokens=5,
+                model="stub-decompose",
+                finish_reason="stop",
+            )
+        return super().complete_with_metadata(prompt, **kwargs)
+
+
 class RecordingStore(MemoryKnowledgeStore):
     """Memory store recording the top_k of every search call.
 
@@ -127,6 +153,10 @@ class RecordingStore(MemoryKnowledgeStore):
                         chunk_index=0,
                         text=f"Zusatzbeleg {self._calls}",
                         source_text=f"Zusatzbeleg {self._calls}",
+                        source_start=0,
+                        source_end=len(f"Zusatzbeleg {self._calls}"),
+                        document_content_hash=f"sha256:grow-{self._calls}",
+                        source_verified=True,
                     ),
                     score=0.05,
                     document_title=f"Zusatz {self._calls}",
@@ -474,6 +504,84 @@ class TestConversationalContext:
 
 
 class TestProfileEvent:
+    def test_empty_pinned_scope_skips_models_embeddings_and_store_search(self):
+        events: list[tuple[str, dict[str, Any]]] = []
+        llm = ContextualizingLLM("Das darf nicht aufgerufen werden")
+        algorithm, store, context, runtime = make_algorithm(llm)
+        scoped_context = RunContext(
+            providers=context.providers,
+            strategies=context.strategies,
+            agent_settings=context.agent_settings,
+            principal=Principal(
+                user_id=uuid.UUID("11111111-1111-4111-8111-111111111111"),
+                kind="oidc_session",
+                role="member",
+            ),
+            event_sink=lambda event, payload: events.append((event, payload)),
+        )
+
+        result = algorithm.run(
+            RunRequest(
+                mode="knowledge",
+                question="Und die Haftung?",
+                history="Nutzer: Was steht im Vertrag?",
+                knowledge_filters={
+                    "profile": "gruendlich",
+                    "collection_ids": [],
+                },
+            ),
+            runtime=runtime,
+            context=scoped_context,
+        )
+
+        assert store.search_top_ks == []
+        assert retrieval_queries(store) == []
+        assert llm.context_prompts == []
+        assert llm.gate_prompts == []
+        assert llm.answer_prompts == []
+        assert result.raw["result_state"]["knowledge_collections"] == []
+        assert dict(events)["inqtrix.knowledge.scope.empty"] == {
+            "scope": "empty",
+            "collection_count": 0,
+        }
+        assert dict(events)["inqtrix.knowledge.retrieval.completed"][
+            "collection_document_count"
+        ] == 0
+
+    def test_authenticated_run_without_pinned_scope_fails_before_retrieval(self):
+        events: list[tuple[str, dict[str, Any]]] = []
+        llm = ScriptedLLM()
+        algorithm, store, context, runtime = make_algorithm(llm)
+        scoped_context = RunContext(
+            providers=context.providers,
+            strategies=context.strategies,
+            agent_settings=context.agent_settings,
+            principal=Principal(
+                user_id=uuid.UUID("11111111-1111-4111-8111-111111111111"),
+                kind="oidc_session",
+                role="member",
+            ),
+            event_sink=lambda event, payload: events.append((event, payload)),
+        )
+
+        with pytest.raises(RunExecutionFailure) as raised:
+            algorithm.run(
+                RunRequest(
+                    mode="knowledge",
+                    question="Wie ist die Haftung geregelt?",
+                    knowledge_filters={"profile": "schnell"},
+                ),
+                runtime=runtime,
+                context=scoped_context,
+            )
+
+        assert raised.value.error_type == "knowledge_scope_missing"
+        assert store.search_top_ks == []
+        assert events[-1] == (
+            "inqtrix.knowledge.scope.unscoped_principal",
+            {"marker": "_knowledge_unscoped_principal", "scope": "blocked"},
+        )
+
     def test_profile_resolved_event_carries_the_plan(self):
         events: list[tuple[str, dict]] = []
         llm = ScriptedLLM()
@@ -518,6 +626,203 @@ class TestEvidenceBreadth:
         # Coverage: the harness seeds 2 documents in the single collection, all
         # eligible for retrieval — surfaced so the UI can confirm the scope.
         assert retrieval["collection_document_count"] == 2
+
+    def test_retrieval_degradation_is_emitted_and_persisted(self):
+        events: list[tuple[str, dict]] = []
+        llm = ScriptedLLM([SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(llm)
+        original = store.search
+
+        async def degraded_search(**kwargs):
+            candidates = await original(**kwargs)
+            return RetrievalCandidateBatch(
+                candidates,
+                degradations=(
+                    RetrievalDegradation(
+                        reason="vector_overfetch_cap",
+                        retrieval_mode="dense",
+                        requested_top_k=kwargs["top_k"],
+                        returned_hits=len(candidates),
+                        candidate_cap=64,
+                    ),
+                ),
+            )
+
+        store.search = degraded_search  # type: ignore[method-assign]
+        result = run_with_profile(
+            algorithm, runtime, context, "standard", events=events
+        )
+
+        degraded = [
+            payload
+            for event, payload in events
+            if event == "inqtrix.knowledge.retrieval.degraded"
+        ]
+        assert degraded == [
+            {
+                "reason": "vector_overfetch_cap",
+                "retrieval_mode": "dense",
+                "stage": "vector_candidate_pool",
+                "requested_candidate_pool": 4,
+                "returned_candidate_pool": 2,
+                "final_top_k": 4,
+                "final_evidence_complete": False,
+                "requested_top_k": 4,
+                "returned_hits": 2,
+                "candidate_cap": 64,
+            }
+        ]
+        assert result.raw["result_state"]["knowledge_retrieval"] == {
+            "degradations": degraded
+        }
+
+    def test_single_query_projects_all_typed_exclusions_to_run_warnings(self):
+        events: list[tuple[str, dict[str, Any]]] = []
+        llm = ScriptedLLM()
+        algorithm, store, context, runtime = make_algorithm(llm)
+        original = store.search
+
+        async def search_with_exclusions(**kwargs):
+            candidates = await original(**kwargs)
+            return RetrievalCandidateBatch(
+                candidates,
+                exclusions=(
+                    RetrievalExclusion(
+                        reason="source_unverified",
+                        stage="canonical_hydration",
+                        count=2,
+                        recommended_action="reindex",
+                    ),
+                    RetrievalExclusion(
+                        reason="canonical_chunk_unavailable",
+                        stage="canonical_hydration",
+                        count=3,
+                        recommended_action="reconcile",
+                    ),
+                ),
+            )
+
+        store.search = search_with_exclusions  # type: ignore[method-assign]
+        result = run_with_profile(
+            algorithm, runtime, context, "schnell", events=events
+        )
+
+        warnings = result.raw["result_state"]["knowledge_retrieval"]["warnings"]
+        assert [(warning["code"], warning["count"]) for warning in warnings] == [
+            ("chunks_require_reindex", 2),
+            ("chunks_pending_reconciliation", 3),
+        ]
+        completed = dict(events)["inqtrix.knowledge.retrieval.completed"]
+        assert completed["warnings"] == warnings
+        assert [
+            payload
+            for event, payload in events
+            if event == "inqtrix.knowledge.retrieval.warning"
+        ] == warnings
+        assert all("text" not in warning for warning in warnings)
+
+    def test_unknown_exclusion_reason_is_not_silently_discarded(self):
+        warnings = project_retrieval_exclusion_warnings(
+            (
+                RetrievalExclusion(
+                    reason="future_integrity_rule",
+                    stage="canonical_hydration",
+                    count=1,
+                ),
+            )
+        )
+
+        assert warnings[0].code == "retrieval_candidates_excluded"
+        assert warnings[0].reason == "future_integrity_rule"
+        assert warnings[0].count == 1
+
+    def test_decomposition_interleave_accumulates_exclusions_without_loss(self):
+        events: list[tuple[str, dict[str, Any]]] = []
+        llm = DecomposingLLM([SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(llm)
+        original = store.search
+        calls = 0
+
+        async def search_with_exclusions(**kwargs):
+            nonlocal calls
+            calls += 1
+            candidates = await original(**kwargs)
+            return RetrievalCandidateBatch(
+                candidates,
+                exclusions=(
+                    RetrievalExclusion(
+                        reason="source_unverified",
+                        stage="canonical_hydration",
+                        count=calls,
+                        recommended_action="reindex",
+                    ),
+                ),
+            )
+
+        store.search = search_with_exclusions  # type: ignore[method-assign]
+        result = run_with_profile(
+            algorithm, runtime, context, "tief", events=events
+        )
+
+        assert calls == 3  # original question + two decomposed sub-queries
+        warning = result.raw["result_state"]["knowledge_retrieval"]["warnings"][0]
+        assert warning == {
+            "code": "chunks_require_reindex",
+            "reason": "source_unverified",
+            "stage": "canonical_hydration",
+            "count": 6,
+            "recommended_action": "reindex",
+        }
+        assert dict(events)["inqtrix.knowledge.retrieval.completed"]["warnings"] == [
+            warning
+        ]
+
+    def test_gate_rewrite_merge_retains_late_exclusions(self):
+        events: list[tuple[str, dict[str, Any]]] = []
+        llm = ScriptedLLM([REWRITE, SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(
+            llm,
+            grow=True,
+            default_top_k=20,
+        )
+        original = store.search
+        calls = 0
+
+        async def search_with_exclusions(**kwargs):
+            nonlocal calls
+            calls += 1
+            candidates = await original(**kwargs)
+            return RetrievalCandidateBatch(
+                candidates,
+                exclusions=(
+                    RetrievalExclusion(
+                        reason="canonical_chunk_unavailable",
+                        stage="canonical_hydration",
+                        count=calls,
+                        recommended_action="reconcile",
+                    ),
+                ),
+            )
+
+        store.search = search_with_exclusions  # type: ignore[method-assign]
+        result = run_with_profile(
+            algorithm, runtime, context, "standard", events=events
+        )
+
+        assert calls == 2
+        assert dict(events)["inqtrix.knowledge.retrieval.completed"]["warnings"][
+            0
+        ]["count"] == 1
+        final_warning = result.raw["result_state"]["knowledge_retrieval"][
+            "warnings"
+        ][0]
+        assert final_warning["code"] == "chunks_pending_reconciliation"
+        assert final_warning["count"] == 3
+        assert [
+            payload
+            for event, payload in events
+            if event == "inqtrix.knowledge.retrieval.warning"
+        ] == [final_warning]
 
     def test_deep_widens_final_k_beyond_top_k(self):
         """Deep (TIEF, factor 2.0) raises the final evidence budget above the

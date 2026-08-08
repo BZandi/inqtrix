@@ -12,7 +12,7 @@
  * project-level useProjectServerImport (which pushes chat AND editor in one
  * flow). This hook only hydrates + autosaves once the project is opted in
  * (syncActive), seeding its synced fingerprint to WHAT THE SERVER HOLDS so a
- * local-newer entity is pushed up rather than stranded (the M6a P1 lesson).
+ * local-newer entity is pushed up rather than stranded.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -55,7 +55,10 @@ import {
   useProjectSyncLifecycle,
   type SyncLifecycleToken,
 } from '@/features/project/useProjectSyncLifecycle'
-import type { ResearchDeskAction } from '@/features/researchDesk/state'
+import type {
+  EditorDocumentRecoveryCapture,
+  ResearchDeskAction,
+} from '@/features/researchDesk/state'
 
 const AUTOSAVE_DEBOUNCE_MS = 1_500
 const PAGE_LIMIT = 200
@@ -184,10 +187,15 @@ export function editorServerDocumentObservation(
 export function editorDocumentsForAutosave(
   documents: Record<string, EditorDocumentRecord>,
   serverDocuments?: ReadonlyMap<string, EditorDocumentRecord>,
+  retiredDocumentIds: ReadonlySet<string> = new Set(),
 ): Record<string, EditorDocumentRecord> {
   return Object.fromEntries(Object.entries(documents).filter(([documentId, document]) => {
     const authoritativeDocument = serverDocuments?.get(documentId) ?? document
-    return authoritativeDocument.access?.mode !== 'shared'
+    return (
+      authoritativeDocument.access?.mode !== 'shared'
+      && document.recovery === undefined
+      && !retiredDocumentIds.has(documentId)
+    )
   }))
 }
 
@@ -204,11 +212,16 @@ export function editorCommentsForAutosave(
   comments: Record<string, EditorCommentThreadRecord>,
   documents: Record<string, EditorDocumentRecord>,
   serverDocuments?: ReadonlyMap<string, EditorDocumentRecord>,
+  retiredDocumentIds: ReadonlySet<string> = new Set(),
 ): Record<string, EditorCommentThreadRecord> {
   return Object.fromEntries(Object.entries(comments).filter(([, comment]) => {
     const authoritativeDocument = serverDocuments?.get(comment.documentId)
       ?? documents[comment.documentId]
-    return canPersistEditorCommentsForDocument(authoritativeDocument)
+    return (
+      !retiredDocumentIds.has(comment.documentId)
+      && authoritativeDocument?.recovery === undefined
+      && canPersistEditorCommentsForDocument(authoritativeDocument)
+    )
   }))
 }
 
@@ -246,6 +259,9 @@ export function planEditorCommentReconciliation(
 
 type UseEditorHistoryApiOptions = {
   apiKey: string | undefined
+  consumeCollaborationRecovery?: (
+    documentId: string,
+  ) => { contentMarkdown: string } | null
   dispatch: Dispatch<ResearchDeskAction>
   editorCommentOutbox?: Record<string, EditorCommentOutboxEntry>
   editorComments: Record<string, EditorCommentThreadRecord>
@@ -285,6 +301,7 @@ export type EditorHistoryApiHandle = {
 
 export function useEditorHistoryApi({
   apiKey,
+  consumeCollaborationRecovery,
   dispatch,
   editorCommentOutbox,
   editorComments,
@@ -309,12 +326,15 @@ export function useEditorHistoryApi({
   commentOutboxRef.current = editorCommentOutbox ?? {}
   const optionsRef = useRef({ apiKey, workspaceId })
   optionsRef.current = { apiKey, workspaceId }
+  const consumeCollaborationRecoveryRef = useRef(consumeCollaborationRecovery)
+  consumeCollaborationRecoveryRef.current = consumeCollaborationRecovery
 
   const syncedDocsRef = useRef(new Map<string, string>())
   const syncedFoldersRef = useRef(new Map<string, string>())
   const syncedCommentsRef = useRef(new Map<string, CommentFingerprint>())
   const metadataRevisionsRef = useRef(new Map<string, number>())
   const serverDocumentsRef = useRef(new Map<string, EditorDocumentRecord>())
+  const retiredServerDocumentIdsRef = useRef(new Set<string>())
   const loadedDocsRef = useRef(new Set<string>())
   const exactDetailProvenanceRef = useRef(new Map<string, string>())
   const loadedCommentsRef = useRef(new Set<string>())
@@ -330,6 +350,7 @@ export function useEditorHistoryApi({
     provenance: EditorServerDocumentProvenance,
   ) => {
     const observation = editorServerDocumentObservation(document, provenance)
+    retiredServerDocumentIdsRef.current.delete(document.id)
     serverDocumentsRef.current.set(document.id, document)
     metadataRevisionsRef.current.set(document.id, observation.metadataRevision)
     if (observation.exactDetailProvenanceKey) {
@@ -350,6 +371,10 @@ export function useEditorHistoryApi({
   const pushDocument = useCallback(async (
     document: EditorDocumentRecord,
   ): Promise<EditorDocumentPushOutcome> => {
+    if (
+      document.recovery !== undefined
+      || retiredServerDocumentIdsRef.current.has(document.id)
+    ) return { kind: 'skipped' }
     const plan = planEditorDocumentAutosave(
       document,
       metadataRevisionsRef.current.get(document.id),
@@ -370,6 +395,7 @@ export function useEditorHistoryApi({
         type: 'adoptEditorDocumentMetadataRevision',
       })
       const savedRecord = documentRecordFromServer(saved)
+      retiredServerDocumentIdsRef.current.delete(document.id)
       serverDocumentsRef.current.set(document.id, savedRecord)
       return { kind: 'saved', metadataRevision, revision: saved.revision }
     }
@@ -431,6 +457,8 @@ export function useEditorHistoryApi({
           type: 'adoptEditorDocumentMetadataRevision',
         })
       }
+      retiredServerDocumentIdsRef.current.delete(record.id)
+      serverDocumentsRef.current.set(record.id, documentRecordFromServer(saved))
       // We hold this document's body now, so re-opening it must not trigger
       // a redundant body fetch.
       loadedDocsRef.current.add(record.id)
@@ -492,6 +520,7 @@ export function useEditorHistoryApi({
         current: editorDocumentsForAutosave(
           documentsRef.current,
           serverDocumentsRef.current,
+          retiredServerDocumentIdsRef.current,
         ),
         synced: syncedDocsRef.current,
         fingerprintOf: (document) => document.updatedAt,
@@ -538,6 +567,10 @@ export function useEditorHistoryApi({
       for (const [commentId, pending] of Object.entries(commentOutboxRef.current)) {
         const authoritativeDocument = serverDocumentsRef.current.get(pending.documentId)
           ?? documentsRef.current[pending.documentId]
+        if (
+          retiredServerDocumentIdsRef.current.has(pending.documentId)
+          || authoritativeDocument?.recovery !== undefined
+        ) continue
         if (!canPersistEditorCommentsForDocument(authoritativeDocument)) continue
         if (pending.operation === 'upsert') {
           const comment = commentsRef.current[commentId]
@@ -633,6 +666,7 @@ export function useEditorHistoryApi({
     syncedCommentsRef.current.clear()
     metadataRevisionsRef.current.clear()
     serverDocumentsRef.current.clear()
+    retiredServerDocumentIdsRef.current.clear()
     loadedDocsRef.current.clear()
     exactDetailProvenanceRef.current.clear()
     loadedCommentsRef.current.clear()
@@ -666,9 +700,78 @@ export function useEditorHistoryApi({
         if (folderRecords.length > 0) {
           dispatch({ folders: folderRecords, type: 'upsertServerEditorFolders' })
         }
-        if (documentRecords.length > 0) {
-          dispatch({ documents: documentRecords, type: 'upsertServerEditorDocuments' })
+        const authoritativeDocumentIds = new Set(
+          documentRecords.map((document) => document.id),
+        )
+        const retiredDocumentIds = new Set<string>()
+        for (const documentId of authoritativeDocumentIds) {
+          retiredServerDocumentIdsRef.current.delete(documentId)
         }
+        for (const [documentId, document] of Object.entries(documentsRef.current)) {
+          if (
+            (document.serverSynced === true || document.access?.mode === 'shared')
+            && !authoritativeDocumentIds.has(documentId)
+          ) {
+            retiredDocumentIds.add(documentId)
+          }
+        }
+        for (const documentId of serverDocumentsRef.current.keys()) {
+          if (!authoritativeDocumentIds.has(documentId)) {
+            retiredDocumentIds.add(documentId)
+          }
+        }
+        const recoveryCaptures: EditorDocumentRecoveryCapture[] = []
+        const capturedAt = new Date().toISOString()
+        for (const documentId of retiredDocumentIds) {
+          const localDocument = documentsRef.current[documentId]
+          if (!localDocument) continue
+          const collaborationRecovery =
+            consumeCollaborationRecoveryRef.current?.(documentId) ?? null
+          const hasChangedLocalDocument = (
+            syncedDocsRef.current.has(documentId)
+            && syncedDocsRef.current.get(documentId) !== localDocument.updatedAt
+          )
+          const hasPendingPrivateComment = Object.values(
+            commentOutboxRef.current,
+          ).some((entry) => (
+            entry.documentId === documentId
+            && entry.operation === 'upsert'
+          ))
+          if (
+            !collaborationRecovery
+            && !hasChangedLocalDocument
+            && !hasPendingPrivateComment
+          ) continue
+          recoveryCaptures.push({
+            capturedAt,
+            contentMarkdown: collaborationRecovery?.contentMarkdown
+              ?? localDocument.contentMarkdown,
+            documentId,
+          })
+        }
+        // Establish the no-resurrection boundary before dispatching. A
+        // debounced flush can run between this continuation and React's next
+        // render; it must already exclude every remotely retired id.
+        for (const documentId of retiredDocumentIds) {
+          retiredServerDocumentIdsRef.current.add(documentId)
+          serverDocumentsRef.current.delete(documentId)
+          syncedDocsRef.current.delete(documentId)
+          metadataRevisionsRef.current.delete(documentId)
+          loadedDocsRef.current.delete(documentId)
+          exactDetailProvenanceRef.current.delete(documentId)
+          loadedCommentsRef.current.delete(documentId)
+          for (const [commentId, fingerprint] of syncedCommentsRef.current) {
+            if (fingerprint.documentId === documentId) {
+              syncedCommentsRef.current.delete(commentId)
+            }
+          }
+        }
+        dispatch({
+          documents: documentRecords,
+          recoveryCaptures,
+          retiredDocumentIds: [...retiredDocumentIds],
+          type: 'reconcileServerEditorDocuments',
+        })
         // Seed each fingerprint to WHAT THE SERVER HOLDS (its updated_at);
         // a local-newer entity then differs and the first autosave pushes it.
         for (const record of documentRecords) {

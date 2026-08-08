@@ -1,7 +1,7 @@
 import type { ResourceAccess } from '@/features/sharing/types'
 
 /**
- * Skill library domain logic (plan M3 `3.4`/`3.6`): the wire types of
+ * Skill library domain logic: the wire types of
  * `/v1/skills` and the pure helpers behind the editor — placeholder
  * extraction (the FE twin of the server's `extract_placeholders`,
  * same regex, so scaffolding and the save validation can never

@@ -23,6 +23,7 @@ from inqtrix.auth.permissions import AuthorizationService
 from inqtrix.knowledge.parsing import DocumentParseError, DocumentParser
 from inqtrix.providers.base import ProviderContext
 from inqtrix.server.container import build_container
+from inqtrix.server.routers import asset_records as asset_records_router
 from inqtrix.server.routers import capabilities as capabilities_router
 from inqtrix.server.routers import files as files_router
 from inqtrix.services.file_service import FileService
@@ -86,6 +87,7 @@ def make_files_client(
     app = FastAPI()
     app.include_router(files_router.build_router(container))
     app.include_router(capabilities_router.build_router(container))
+    app.include_router(asset_records_router.build_router(container))
     return TestClient(app), identity
 
 
@@ -457,6 +459,399 @@ def test_legacy_anonymous_reads_scoped_files_and_tenants_stay_separate(
     # Same sub in another tenant: hidden, byte-identical to absence.
     assert as_other_tenant.status_code == 404
     assert as_other_tenant.json() == missing.json()
+
+
+# ------------------------------------------------------------------ #
+# Upload binding (file + section-bound asset record in one request)
+# ------------------------------------------------------------------ #
+
+
+def test_default_asset_sections_are_idempotent_per_owner_and_workspace(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        headers = {
+            SUB_HEADER: "user-a",
+            "X-Inqtrix-Workspace-Id": "workspace-a",
+        }
+        first = client.put("/v1/assets/default-sections", headers=headers)
+        second = client.put("/v1/assets/default-sections", headers=headers)
+        other_workspace = client.put(
+            "/v1/assets/default-sections",
+            headers={
+                SUB_HEADER: "user-a",
+                "X-Inqtrix-Workspace-Id": "workspace-b",
+            },
+        )
+        other_owner = client.put(
+            "/v1/assets/default-sections",
+            headers={
+                SUB_HEADER: "user-b",
+                "X-Inqtrix-Workspace-Id": "workspace-a",
+            },
+        )
+
+    assert first.status_code == second.status_code == 200
+    assert [row["semantic_role"] for row in first.json()["data"]] == [
+        "temporary",
+        "library",
+        "project_sources",
+    ]
+    assert [row["id"] for row in first.json()["data"]] == [
+        row["id"] for row in second.json()["data"]
+    ]
+    first_ids = {row["id"] for row in first.json()["data"]}
+    assert first_ids.isdisjoint(row["id"] for row in other_workspace.json()["data"])
+    assert first_ids.isdisjoint(row["id"] for row in other_owner.json()["data"])
+
+
+def _create_section(
+    client: TestClient, section_id: str, *, sub: str
+) -> None:
+    response = client.put(
+        f"/v1/assets/sections/{section_id}",
+        json={"kind": "custom", "title": "S", "created_at": 1.0, "updated_at": 1.0},
+        headers={SUB_HEADER: sub},
+    )
+    assert response.status_code == 200, response.text
+
+
+def _upload_bound(
+    client: TestClient,
+    *,
+    sub: str,
+    asset_id: str = "file-up-1",
+    section_id: str = "fsec_up",
+    extra: dict[str, str] | None = None,
+):
+    data = {
+        "asset_id": asset_id,
+        "section_id": section_id,
+        "title": "Vertrag",
+        "label": "vertrag",
+        "origin": "library",
+        "created_at": "5.0",
+        "updated_at": "5.0",
+        **(extra or {}),
+    }
+    return client.post(
+        "/v1/files",
+        files={"file": ("vertrag.pdf", PAYLOAD, "application/pdf")},
+        data=data,
+        headers={SUB_HEADER: sub},
+    )
+
+
+def test_bound_upload_persists_file_and_section_placement(tmp_path):
+    """A 201 with binding means the collection placement is durable: the
+    asset row exists in the target section before the client hears back,
+    so a page reload cannot strand the file outside its collection."""
+    client, _ = make_files_client(tmp_path)
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        response = _upload_bound(client, sub="user-a")
+        assert response.status_code == 201, response.text
+        payload = response.json()
+        listed = client.get(
+            "/v1/assets", headers={SUB_HEADER: "user-a"}
+        ).json()["data"]
+        detail = client.get(
+            "/v1/assets/file-up-1", headers={SUB_HEADER: "user-a"}
+        ).json()
+
+    asset = payload["asset"]
+    assert asset["id"] == "file-up-1"
+    assert asset["section_id"] == "fsec_up"
+    assert asset["server_file_id"] == payload["id"]
+    # Server-measured facts win over client hints.
+    assert asset["size_bytes"] == len(PAYLOAD)
+    assert asset["file_name"] == "vertrag.pdf"
+    assert [a["id"] for a in listed] == ["file-up-1"]
+    assert "prepared_parser_id" in listed[0]
+    assert "prepared_content_hash" in listed[0]
+    assert "prepared_at" in listed[0]
+    # The upload path never writes a body; text follows via asset PUT.
+    assert detail["extracted_text"] == ""
+    assert detail["prepared_text"] == ""
+
+
+def test_bound_upload_returns_202_while_canonical_parse_is_queued(tmp_path):
+    client, _ = make_files_client(
+        tmp_path,
+        document_parser=_StubParser(text="KANONISCHER SERVER-TEXT"),
+    )
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        response = _upload_bound(client, sub="user-a")
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["object"] == "upload_operation"
+    assert payload["asset"]["server_file_id"]
+    assert payload["asset"]["upload_status"] == "parsing"
+    assert payload["upload_operation"]["status"] == "queued"
+    assert payload["upload_operation"]["stage"] == "parsing"
+
+
+def test_explicit_reservation_precedes_bytes_and_finalizes_same_asset(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    reservation_body = {
+        "section_id": "fsec_up",
+        "group_id": None,
+        "title": "vertrag.pdf",
+        "label": "vertrag",
+        "file_name": "vertrag.pdf",
+        "mime_type": "application/pdf",
+        "origin": "library",
+        "page_count": None,
+        "parse_status": "parsed",
+        "parse_warning": None,
+        "text_truncated": False,
+        "size_bytes": len(PAYLOAD),
+        "parser_id": None,
+        "created_at": 1.0,
+        "updated_at": 1.0,
+    }
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        reserved = client.post(
+            "/v1/assets/file-up-1/upload-reservation",
+            json=reservation_body,
+            headers={SUB_HEADER: "user-a"},
+        )
+        before = client.get(
+            "/v1/assets/file-up-1", headers={SUB_HEADER: "user-a"}
+        ).json()
+        uploaded = _upload_bound(client, sub="user-a")
+
+    assert reserved.status_code == 201
+    assert before["upload_status"] == "awaiting_upload"
+    assert before["server_file_id"] is None
+    assert uploaded.status_code == 201
+    assert uploaded.json()["asset"]["id"] == "file-up-1"
+    assert uploaded.json()["asset"]["upload_status"] == "ready"
+
+
+def test_bound_upload_replay_reuses_operation_file_and_quota_identity(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        first = _upload_bound(client, sub="user-a")
+        replay = _upload_bound(
+            client,
+            sub="user-a",
+            extra={"created_at": "999.0", "updated_at": "999.0"},
+        )
+        files = client.get("/v1/files", headers={SUB_HEADER: "user-a"}).json()["data"]
+
+    assert first.status_code == 201
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first.json()["id"]
+    assert (
+        replay.json()["upload_operation"]["operation_id"]
+        == first.json()["upload_operation"]["operation_id"]
+    )
+    assert replay.json()["upload_operation"]["status"] == "ready"
+    assert [item["id"] for item in files] == [first.json()["id"]]
+
+
+def test_upload_operation_endpoints_are_owner_scoped(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        uploaded = _upload_bound(client, sub="user-a").json()
+        operation_id = uploaded["upload_operation"]["operation_id"]
+        detail = client.get(
+            f"/v1/uploads/{operation_id}", headers={SUB_HEADER: "user-a"}
+        )
+        listed = client.get("/v1/uploads", headers={SUB_HEADER: "user-a"})
+        hidden = client.get(
+            f"/v1/uploads/{operation_id}", headers={SUB_HEADER: "user-b"}
+        )
+        invalid_retry = client.post(
+            f"/v1/uploads/{operation_id}/retry",
+            headers={SUB_HEADER: "user-a"},
+        )
+
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "ready"
+    assert [item["operation_id"] for item in listed.json()["data"]] == [operation_id]
+    assert hidden.status_code == 404
+    assert invalid_retry.status_code == 409
+    assert invalid_retry.json()["error"]["type"] == "upload_operation_conflict"
+
+
+def test_bound_original_cannot_bypass_asset_aggregate_delete(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        uploaded = _upload_bound(client, sub="user-a").json()
+        blocked = client.delete(
+            f"/v1/files/{uploaded['id']}", headers={SUB_HEADER: "user-a"}
+        )
+        asset = client.get("/v1/assets/file-up-1", headers={SUB_HEADER: "user-a"})
+        original = client.get(
+            f"/v1/files/{uploaded['id']}", headers={SUB_HEADER: "user-a"}
+        )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["type"] == "asset_aggregate_required"
+    assert asset.status_code == 200
+    assert original.status_code == 200
+
+
+def test_bound_upload_into_foreign_section_leaves_no_file(tmp_path):
+    """Cross-user binding is the indistinct not-found AND fully undone:
+    neither a file row nor an asset row survives the rejection."""
+    client, _ = make_files_client(tmp_path)
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        response = _upload_bound(client, sub="user-b")
+        files_b = client.get("/v1/files", headers={SUB_HEADER: "user-b"}).json()
+        assets_b = client.get("/v1/assets", headers={SUB_HEADER: "user-b"}).json()
+
+    assert response.status_code == 404
+    assert response.json()["error"]["type"] == "not_found"
+    assert files_b["data"] == []
+    assert assets_b["data"] == []
+
+
+def test_bound_upload_unknown_section_leaves_no_file(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        response = _upload_bound(client, sub="user-a", section_id="fsec_missing")
+        files_a = client.get("/v1/files", headers={SUB_HEADER: "user-a"}).json()
+
+    assert response.status_code == 404
+    assert files_a["data"] == []
+
+
+def test_bound_upload_invalid_origin_is_rejected_and_undone(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        response = _upload_bound(client, sub="user-a", extra={"origin": "bogus"})
+        files_a = client.get("/v1/files", headers={SUB_HEADER: "user-a"}).json()
+
+    assert response.status_code == 400
+    assert files_a["data"] == []
+
+
+def test_binding_requires_both_asset_and_section_id(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        response = client.post(
+            "/v1/files",
+            files={"file": ("a.pdf", PAYLOAD, "application/pdf")},
+            data={"asset_id": "file-up-1"},
+            headers={SUB_HEADER: "user-a"},
+        )
+        files_a = client.get("/v1/files", headers={SUB_HEADER: "user-a"}).json()
+
+    assert response.status_code == 400
+    # Rejected before any bytes were stored.
+    assert files_a["data"] == []
+
+
+def test_overlong_binding_field_is_rejected_before_storage(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        response = _upload_bound(
+            client, sub="user-a", extra={"label": "x" * 2000}
+        )
+        files_a = client.get("/v1/files", headers={SUB_HEADER: "user-a"}).json()
+
+    assert response.status_code == 400
+    assert "label" in response.json()["error"]["message"]
+    assert files_a["data"] == []
+
+
+def test_non_finite_binding_timestamps_are_rejected_before_storage(tmp_path):
+    """NaN/Infinity would persist into Float columns and then poison every
+    JSON render of the record (json.dumps refuses non-finite floats),
+    bricking the caller's asset listing — reject at the door instead."""
+    client, _ = make_files_client(tmp_path)
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        for bad in ("nan", "inf"):
+            response = _upload_bound(
+                client, sub="user-a", extra={"created_at": bad}
+            )
+            assert response.status_code == 400, response.text
+        files_a = client.get("/v1/files", headers={SUB_HEADER: "user-a"}).json()
+
+    assert files_a["data"] == []
+
+
+def test_nul_byte_in_binding_field_is_rejected_before_storage(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        response = _upload_bound(client, sub="user-a", extra={"title": "abc\x00def"})
+        files_a = client.get("/v1/files", headers={SUB_HEADER: "user-a"}).json()
+
+    assert response.status_code == 400
+    assert files_a["data"] == []
+
+
+def test_out_of_range_page_count_is_rejected_before_storage(tmp_path):
+    client, _ = make_files_client(tmp_path)
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        too_big = _upload_bound(
+            client, sub="user-a", extra={"page_count": "3000000000"}
+        )
+        negative = _upload_bound(client, sub="user-a", extra={"page_count": "-1"})
+        files_a = client.get("/v1/files", headers={SUB_HEADER: "user-a"}).json()
+
+    assert too_big.status_code == 400
+    assert negative.status_code == 400
+    assert files_a["data"] == []
+
+
+def test_unexpected_binding_failure_is_visible_and_recoverable(tmp_path, monkeypatch):
+    """A transient bind failure keeps one inspectable operation and file.
+
+    Deleting the bytes would make a server restart unable to continue, while
+    hiding them would create untracked storage.  The durable operation instead
+    exposes its retry state and exact registered file as one aggregate.
+    """
+    from inqtrix.services.asset_records_service import AssetRecordsService
+
+    async def explode(self, **kwargs):
+        raise RuntimeError("unexpected persistence failure")
+
+    monkeypatch.setattr(AssetRecordsService, "bind_uploaded_file", explode)
+    client, _ = make_files_client(tmp_path)
+    with client:
+        _create_section(client, "fsec_up", sub="user-a")
+        response = _upload_bound(client, sub="user-a")
+        files_a = client.get("/v1/files", headers={SUB_HEADER: "user-a"}).json()
+        asset_a = client.get(
+            "/v1/assets/file-up-1", headers={SUB_HEADER: "user-a"}
+        ).json()
+        operation = client.get(
+            f"/v1/uploads/{response.json()['upload_operation']['operation_id']}",
+            headers={SUB_HEADER: "user-a"},
+        ).json()
+
+    assert response.status_code == 202
+    assert len(files_a["data"]) == 1
+    assert asset_a["upload_status"] == "retrying"
+    assert asset_a["server_file_id"] is None
+    assert operation["status"] == "queued"
+    assert operation["error"]["type"] == "dependency_error"
+
+
+def test_upload_without_binding_stores_no_asset_record(tmp_path):
+    """The plain upload contract is untouched: no binding fields, no
+    asset row — exactly the pre-binding wire behavior."""
+    client, _ = make_files_client(tmp_path)
+    with client:
+        payload = upload(client, sub="user-a")
+        assets_a = client.get("/v1/assets", headers={SUB_HEADER: "user-a"}).json()
+
+    assert "asset" not in payload
+    assert assets_a["data"] == []
 
 
 def test_s3_backend_without_credentials_fails_loudly():

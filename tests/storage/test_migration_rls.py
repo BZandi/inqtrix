@@ -21,8 +21,10 @@ from inqtrix.storage.migrate import (
     MigrationOwnedObject,
     MigrationRoleReport,
     MigrationTenantTable,
+    _assert_database_sessions_drained,
     _assert_migration_postconditions,
     _assert_migration_role,
+    _assert_schema_transition_quiesced,
     _invoke_alembic,
     _log_auto_rls_strategy,
     _maintain_owner_rls_tables,
@@ -126,7 +128,7 @@ def test_owner_maintenance_tracks_new_and_recreated_tables_by_oid() -> None:
 
     assert tracked == {"runs": 101}
     assert any(
-        "LOCK TABLE alembic_version, runs IN ACCESS EXCLUSIVE MODE NOWAIT"
+        "LOCK TABLE alembic_version, runs IN ACCESS EXCLUSIVE MODE"
         in statement
         for statement in connection.statements
     )
@@ -250,6 +252,43 @@ def test_owner_mode_requires_quiescence_only_for_an_installed_schema() -> None:
         )
         == "owner"
     )
+
+
+def test_installed_schema_transition_requires_quiescence_independent_of_rls() -> None:
+    with pytest.raises(RuntimeError, match="applies to auto, owner, and bypass"):
+        _assert_schema_transition_quiesced(
+            _role_report(),
+            expected_revisions=("0068_release_integrity",),
+            services_quiesced=False,
+        )
+
+    assert _assert_schema_transition_quiesced(
+        _role_report(),
+        expected_revisions=("0068_release_integrity",),
+        services_quiesced=True,
+    )
+
+
+def test_installed_schema_noop_does_not_require_maintenance_window() -> None:
+    report = _role_report(schema_revision=("0068_release_integrity",))
+    assert not _assert_schema_transition_quiesced(
+        report,
+        expected_revisions=("0068_release_integrity",),
+        services_quiesced=False,
+    )
+
+
+def test_migration_refuses_other_database_client_sessions() -> None:
+    class Result:
+        def scalar_one(self) -> int:
+            return 2
+
+    class Connection:
+        async def execute(self, _statement: object) -> Result:
+            return Result()
+
+    with pytest.raises(RuntimeError, match="2 other database client session"):
+        asyncio.run(_assert_database_sessions_drained(Connection()))
 
 
 def test_fresh_install_validates_cluster_role_provisioning() -> None:

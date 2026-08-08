@@ -20,6 +20,10 @@ from inqtrix.capabilities.contracts import (
     Effect,
 )
 from inqtrix.knowledge.stores.ports import CollectionNotFound, DocumentNotFound
+from inqtrix.knowledge.evidence import KnowledgeEvidenceProjector
+from inqtrix.knowledge.retrieval_warnings import (
+    project_retrieval_exclusion_warnings,
+)
 from inqtrix.services.knowledge_service import KnowledgeValidationError
 
 if TYPE_CHECKING:
@@ -27,10 +31,8 @@ if TYPE_CHECKING:
 
 _TOP_K_MAX = 50
 
-# No standalone knowledge.chunk.read capability in wave 1: a search hit
-# already carries chunk_id + text + source_text + page_number inline, so
-# a per-chunk read would be redundant. A neighbour-context chunk endpoint
-# lands with the canvas citation UI (M6), against get_chunks (M1).
+# No standalone knowledge.chunk.read capability: a search hit already carries
+# its verified excerpt, stable citation coordinates, and page provenance.
 
 
 class CollectionsListInput(BaseModel):
@@ -63,15 +65,36 @@ class KnowledgeHit(BaseModel):
     chunk_index: int
     chunk_id: str
     rank: int
-    text: str
-    source_text: str
+    excerpt: str
     page_number: int | None
     score: float
+    source_span: dict[str, object] | None = None
+    revision_id: str | None = None
+    generation_id: str | None = None
+    provenance_status: str
+
+
+class KnowledgeSearchWarning(BaseModel):
+    code: str
+    message: str
+    retrieval_mode: str = ""
+    stage: str = ""
+    requested_candidate_pool: int = Field(0, ge=0)
+    returned_candidate_pool: int = Field(0, ge=0)
+    final_top_k: int = Field(0, ge=0)
+    final_evidence_complete: bool = False
+    # Compatibility projection for clients predating the explicit candidate
+    # pool fields. These counters now always describe the final evidence set.
+    requested_top_k: int = Field(0, ge=0)
+    returned_hits: int = Field(0, ge=0)
+    candidate_cap: int | None = Field(None, ge=0)
+    count: int = Field(0, ge=0)
 
 
 class KnowledgeSearchOutput(BaseModel):
     query: str
     hits: list[KnowledgeHit]
+    warnings: list[KnowledgeSearchWarning] = Field(default_factory=list)
 
 
 class DocumentReadInput(BaseModel):
@@ -149,7 +172,7 @@ def build_knowledge_capabilities(
                     http_status=404,
                 ) from exc
         try:
-            candidates = await service.search(
+            outcome = await service.search_reported(
                 query=payload.query,
                 collection_ids=collection_ids or None,
                 top_k=payload.top_k,
@@ -163,23 +186,84 @@ def build_knowledge_capabilities(
                 "Sammlung nicht gefunden.",
                 http_status=404,
             ) from exc
+        if outcome.filtered_collection_ids:
+            # Visibility may change between the admission check and retrieval.
+            # The strict agent contract must still fail closed instead of
+            # silently answering from the surviving subset.
+            raise CapabilityError(
+                "knowledge.collection_not_found",
+                "Mindestens eine angefragte Sammlung ist nicht sichtbar.",
+                http_status=404,
+            )
+        candidates = outcome.candidates
+        warnings = [
+            KnowledgeSearchWarning(
+                code=degradation.reason,
+                message=(
+                    "Der Vektor-Kandidatenpool blieb unter der für das "
+                    "Reranking angeforderten Tiefe; die finale Belegzahl "
+                    "wurde dennoch vollständig erreicht."
+                    if degradation.final_evidence_complete
+                    else "Die Vektorsuche erreichte ihre technische "
+                    "Kandidatengrenze, bevor die finale angeforderte "
+                    "Belegzahl erreicht war."
+                ),
+                retrieval_mode=degradation.retrieval_mode,
+                stage=degradation.stage,
+                requested_candidate_pool=(
+                    degradation.requested_candidate_pool or 0
+                ),
+                returned_candidate_pool=(
+                    degradation.returned_candidate_pool or 0
+                ),
+                final_top_k=degradation.final_top_k or 0,
+                final_evidence_complete=(
+                    degradation.final_evidence_complete
+                ),
+                requested_top_k=degradation.requested_top_k,
+                returned_hits=degradation.returned_hits,
+                candidate_cap=degradation.candidate_cap,
+            )
+            for degradation in outcome.retrieval_degradations
+        ]
+        for warning in project_retrieval_exclusion_warnings(
+            outcome.retrieval_exclusions
+        ):
+            warnings.append(
+                KnowledgeSearchWarning(
+                    code=warning.code,
+                    message=warning.message,
+                    requested_top_k=payload.top_k,
+                    returned_hits=len(candidates),
+                    count=warning.count,
+                )
+            )
         return KnowledgeSearchOutput(
             query=payload.query,
             hits=[
                 KnowledgeHit(
-                    document_id=candidate.chunk.document_id,
-                    collection_id=candidate.chunk.collection_id,
-                    document_title=candidate.document_title,
-                    chunk_index=candidate.chunk.chunk_index,
-                    chunk_id=candidate.chunk.id,
+                    document_id=evidence.document_id,
+                    collection_id=evidence.collection_id,
+                    document_title=evidence.title,
+                    chunk_index=evidence.chunk_index,
+                    chunk_id=evidence.chunk_id,
                     rank=rank,
-                    text=candidate.chunk.text,
-                    source_text=candidate.chunk.source_text or candidate.chunk.text,
-                    page_number=candidate.chunk.page_number,
-                    score=round(candidate.score, 6),
+                    excerpt=evidence.excerpt,
+                    page_number=evidence.page_number,
+                    score=round(evidence.score, 6),
+                    source_span=evidence.as_dict()["source_span"],
+                    revision_id=evidence.revision_id,
+                    generation_id=evidence.generation_id,
+                    provenance_status=evidence.provenance_status,
                 )
                 for rank, candidate in enumerate(candidates, start=1)
+                for evidence in (
+                    KnowledgeEvidenceProjector.project(
+                        candidate, reference_id=f"K{rank}"
+                    ),
+                )
             ],
+            warnings=warnings,
         )
 
     async def _read(

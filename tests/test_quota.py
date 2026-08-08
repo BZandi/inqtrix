@@ -18,6 +18,7 @@ from inqtrix.quota.models import (
     DEFAULT_USER_ID,
     STOCK_PERIOD,
     DimensionUsage,
+    QuotaAdjustmentConflict,
     QuotaDimension,
     QuotaExceeded,
     current_period_start,
@@ -42,9 +43,9 @@ USER_LIMIT = uuid.UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
 
 def test_period_start_is_month_first_utc():
     start = current_period_start(JUNE)
-    assert dt.datetime.fromtimestamp(
-        start, tz=dt.timezone.utc
-    ) == dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc)
+    assert dt.datetime.fromtimestamp(start, tz=dt.timezone.utc) == dt.datetime(
+        2026, 6, 1, tzinfo=dt.timezone.utc
+    )
 
 
 def test_period_end_rolls_into_next_month_and_year():
@@ -68,38 +69,60 @@ def test_stock_period_has_no_end():
 
 
 def test_override_wins_over_default_wins_over_env():
-    assert effective_limit(
-        override=300, tenant_default=200, env_default=100, env_ceiling=0
-    ) == 300
-    assert effective_limit(
-        override=None, tenant_default=200, env_default=100, env_ceiling=0
-    ) == 200
-    assert effective_limit(
-        override=None, tenant_default=None, env_default=100, env_ceiling=0
-    ) == 100
+    assert (
+        effective_limit(
+            override=300, tenant_default=200, env_default=100, env_ceiling=0
+        )
+        == 300
+    )
+    assert (
+        effective_limit(
+            override=None, tenant_default=200, env_default=100, env_ceiling=0
+        )
+        == 200
+    )
+    assert (
+        effective_limit(
+            override=None, tenant_default=None, env_default=100, env_ceiling=0
+        )
+        == 100
+    )
 
 
 def test_zero_is_explicit_unlimited_not_fall_through():
     # An admin who sets a user to 0 means unlimited (capped only by the
     # ceiling), NOT "fall through to the tenant default".
-    assert effective_limit(
-        override=0, tenant_default=200, env_default=100, env_ceiling=0
-    ) is None
-    assert effective_limit(
-        override=0, tenant_default=200, env_default=100, env_ceiling=500
-    ) == 500
+    assert (
+        effective_limit(override=0, tenant_default=200, env_default=100, env_ceiling=0)
+        is None
+    )
+    assert (
+        effective_limit(
+            override=0, tenant_default=200, env_default=100, env_ceiling=500
+        )
+        == 500
+    )
 
 
 def test_ceiling_caps_every_layer():
-    assert effective_limit(
-        override=900, tenant_default=None, env_default=0, env_ceiling=500
-    ) == 500
-    assert effective_limit(
-        override=None, tenant_default=None, env_default=0, env_ceiling=500
-    ) == 500  # env_default unlimited, ceiling still binds
-    assert effective_limit(
-        override=None, tenant_default=None, env_default=0, env_ceiling=0
-    ) is None  # nothing set anywhere -> unlimited
+    assert (
+        effective_limit(
+            override=900, tenant_default=None, env_default=0, env_ceiling=500
+        )
+        == 500
+    )
+    assert (
+        effective_limit(
+            override=None, tenant_default=None, env_default=0, env_ceiling=500
+        )
+        == 500
+    )  # env_default unlimited, ceiling still binds
+    assert (
+        effective_limit(
+            override=None, tenant_default=None, env_default=0, env_ceiling=0
+        )
+        is None
+    )  # nothing set anywhere -> unlimited
 
 
 # ---------------------------------------------------------------------------
@@ -174,20 +197,79 @@ def test_increment_accumulates_within_a_window(store):
     assert usage[USER_1][QuotaDimension.RUNS] == 2
 
 
+def test_adjustment_receipt_is_idempotent_across_month_rollover(store):
+    june = current_period_start(JUNE)
+    july = current_period_start(JULY)
+    adjustment = {
+        "adjustment_id": "embedding-work:stable",
+        "tenant_id": "default",
+        "subject_user_id": USER_1,
+        "dimension": QuotaDimension.EMBEDDING_TOKENS,
+        "amount": 17,
+    }
+    assert asyncio.run(store.add_usage_once(**adjustment, period_start=june)) == 17
+    assert asyncio.run(store.add_usage_once(**adjustment, period_start=june)) == 17
+    assert asyncio.run(store.add_usage_once(**adjustment, period_start=july)) == 0
+    assert (
+        _read(store, [USER_1], [QuotaDimension.EMBEDDING_TOKENS], JUNE)[USER_1][
+            QuotaDimension.EMBEDDING_TOKENS
+        ]
+        == 17
+    )
+    assert (
+        _read(store, [USER_1], [QuotaDimension.EMBEDDING_TOKENS], JULY)[USER_1][
+            QuotaDimension.EMBEDDING_TOKENS
+        ]
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        {"amount": 18},
+        {"subject_user_id": USER_2},
+        {"dimension": QuotaDimension.LLM_TOKENS},
+        {"tenant_id": "another-tenant"},
+    ],
+)
+def test_adjustment_receipt_rejects_contradictory_replay(store, contradiction):
+    june = current_period_start(JUNE)
+    original = {
+        "adjustment_id": "embedding-work:conflict",
+        "tenant_id": "default",
+        "subject_user_id": USER_1,
+        "dimension": QuotaDimension.EMBEDDING_TOKENS,
+        "period_start": june,
+        "amount": 17,
+    }
+    asyncio.run(store.add_usage_once(**original))
+    with pytest.raises(QuotaAdjustmentConflict):
+        asyncio.run(store.add_usage_once(**{**original, **contradiction}))
+    assert (
+        _read(store, [USER_1], [QuotaDimension.EMBEDDING_TOKENS], JUNE)[USER_1][
+            QuotaDimension.EMBEDDING_TOKENS
+        ]
+        == 17
+    )
+
+
 def test_lazy_rollover_starts_next_month_at_zero(store):
     june = current_period_start(JUNE)
     july = current_period_start(JULY)
     _add(store, USER_1, QuotaDimension.RUNS, june, 5)
     # July reads as 0 (the June counter belongs to a past window) without
     # being rewritten.
-    assert _read(store, [USER_1], [QuotaDimension.RUNS], JULY)[USER_1][
-        QuotaDimension.RUNS
-    ] == 0
+    assert (
+        _read(store, [USER_1], [QuotaDimension.RUNS], JULY)[USER_1][QuotaDimension.RUNS]
+        == 0
+    )
     assert _add(store, USER_1, QuotaDimension.RUNS, july, 1) == 1
     # June's history is untouched.
-    assert _read(store, [USER_1], [QuotaDimension.RUNS], JUNE)[USER_1][
-        QuotaDimension.RUNS
-    ] == 5
+    assert (
+        _read(store, [USER_1], [QuotaDimension.RUNS], JUNE)[USER_1][QuotaDimension.RUNS]
+        == 5
+    )
 
 
 def test_stock_release_clamps_at_zero_and_never_rolls(store):
@@ -196,9 +278,12 @@ def test_stock_release_clamps_at_zero_and_never_rolls(store):
     # Over-release clamps at 0, not negative.
     assert _add(store, USER_1, QuotaDimension.STORED_BYTES, STOCK_PERIOD, -5000) == 0
     # Stock ignores the calendar month entirely.
-    assert _read(store, [USER_1], [QuotaDimension.STORED_BYTES], JULY)[USER_1][
-        QuotaDimension.STORED_BYTES
-    ] == 0
+    assert (
+        _read(store, [USER_1], [QuotaDimension.STORED_BYTES], JULY)[USER_1][
+            QuotaDimension.STORED_BYTES
+        ]
+        == 0
+    )
 
 
 def test_reset_zeroes_current_window(store):
@@ -212,9 +297,10 @@ def test_reset_zeroes_current_window(store):
             now=JUNE,
         )
     )
-    assert _read(store, [USER_1], [QuotaDimension.RUNS], JUNE)[USER_1][
-        QuotaDimension.RUNS
-    ] == 0
+    assert (
+        _read(store, [USER_1], [QuotaDimension.RUNS], JUNE)[USER_1][QuotaDimension.RUNS]
+        == 0
+    )
 
 
 def test_reset_rejects_stock_dimension(store):

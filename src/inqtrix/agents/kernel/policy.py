@@ -1,4 +1,4 @@
-"""Kernel tool-gating policy per autonomy mode (plan M2 `2.4`).
+"""Kernel tool-gating policy per autonomy mode.
 
 THE one mapping from the run's autonomy to the deepagents
 ``interrupt_on`` configuration — the algorithm compiles one graph
@@ -47,10 +47,18 @@ deliberately NOT here: it stays free in Standard/Auto and is gated only
 by the explicit ``strict`` table."""
 
 
-def _gate(when: Any = None) -> dict[str, Any]:
+def _gate(when: Any = None, *, user_conditional: bool = False) -> dict[str, Any]:
     config: dict[str, Any] = {"allowed_decisions": list(GATE_DECISIONS)}
     if when is not None:
         config["when"] = when
+    if user_conditional:
+        # Published-contract classification only (HITL ignores unknown
+        # keys): TRUE means the predicate leaves a user-triggerable path
+        # UNGATED (scoped knowledge search). The child-tool predicate is
+        # NOT user-conditional — it merely skips a doomed multi-child
+        # batch the guard voids, so every real delegation still gates and
+        # the tool stays in ``kernel_gated_tools``.
+        config["user_conditional"] = True
     return config
 
 
@@ -63,6 +71,37 @@ def _unscoped_knowledge_search(request: Any) -> bool:
     """
     args = getattr(request, "tool_call", {}).get("args", {}) or {}
     return not args.get("collection_ids")
+
+
+def _single_child_dispatch(request: Any) -> bool:
+    """Gate predicate on every child tool: gate only a SINGLE dispatch.
+
+    Two or more child-tool calls in one model turn are voided pre-
+    dispatch by ``KernelChildBatchGuardMiddleware`` (corrective
+    ToolMessages, nothing submits). Gating them anyway would park an
+    approval whose actions can never execute — an approve becomes a
+    lie (the guard refuses right after), and a reject double-answers
+    the calls (HITL keeps the call on the AIMessage and answers it;
+    the guard, running after HITL, would answer again — duplicate
+    ToolMessages per call id that providers reject). Skipping the gate
+    keeps exactly one authority per call: the guard for the doomed
+    batch, HITL for the single dispatch.
+    """
+    from inqtrix.agents.kernel.middleware import (
+        last_turn_child_calls,
+        turn_has_interrupting_call,
+    )
+
+    state = getattr(request, "state", None) or {}
+    last_ai, child_calls = last_turn_child_calls(
+        state.get("messages") or []
+    )
+    if turn_has_interrupting_call(last_ai):
+        # ask_user + child turns are voided by the batch guard —
+        # gating the doomed child would double-answer it (see the
+        # guard's docstring for the single-authority rule).
+        return False
+    return len(child_calls) <= 1
 
 
 def interrupt_config_for(autonomy: str) -> dict[str, Any] | None:
@@ -83,10 +122,11 @@ def interrupt_config_for(autonomy: str) -> dict[str, Any] | None:
         gated = {
             "web_instant": _gate(),
             "search_project_knowledge": _gate(
-                when=_unscoped_knowledge_search
+                when=_unscoped_knowledge_search, user_conditional=True
             ),
-            "run_web_research": _gate(),
-            "run_deep_mission": _gate(),
+            "run_web_research": _gate(when=_single_child_dispatch),
+            "run_deep_mission": _gate(when=_single_child_dispatch),
+            "delegate_batch": _gate(when=_single_child_dispatch),
             "load_skill": _gate(),
         }
     elif autonomy == "strict":
@@ -96,8 +136,9 @@ def interrupt_config_for(autonomy: str) -> dict[str, Any] | None:
             "read_project_document": _gate(),
             "read_canvas": _gate(),
             "write_canvas": _gate(),
-            "run_web_research": _gate(),
-            "run_deep_mission": _gate(),
+            "run_web_research": _gate(when=_single_child_dispatch),
+            "run_deep_mission": _gate(when=_single_child_dispatch),
+            "delegate_batch": _gate(when=_single_child_dispatch),
             "load_skill": _gate(),
         }
     else:

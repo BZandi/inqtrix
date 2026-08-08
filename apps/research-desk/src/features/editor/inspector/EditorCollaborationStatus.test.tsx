@@ -36,6 +36,10 @@ describe('EditorCollaborationStatus', () => {
     const markup = statusMarkup()
 
     expect(markup).toContain('role="status"')
+    expect(markup).toMatch(
+      /<div(?=[^>]*role="status")(?=[^>]*data-editor-status-kind="saved")[^>]*>/,
+    )
+    expect(markup).not.toMatch(/<span[^>]*data-editor-status-kind=/)
     expect(markup).toContain('Bestätigter Stand')
     expect(markup).toContain('4 Teilnehmende: Ada Lovelace, Lin Chen, Max Weber, Zoe Smith')
     expect(markup).toContain('data-participant-count="4"')
@@ -64,6 +68,7 @@ describe('EditorCollaborationStatus', () => {
           </LocaleProvider>
         )}
         leading={<span className="min-w-0 truncate">{longTitle}</span>}
+        primary={<span>Mode and status</span>}
         toolbar={<span>Toolbar</span>}
       />,
     )
@@ -71,10 +76,38 @@ describe('EditorCollaborationStatus', () => {
     expect(markup).toContain('data-editor-topbar="true"')
     expect(markup).toContain('data-editor-topbar-leading="true"')
     expect(markup).toContain('data-editor-topbar-toolbar="true"')
+    expect(markup).toContain('data-editor-topbar-primary="true"')
     expect(markup).toContain('data-editor-topbar-actions="true"')
     expect(markup).toContain('overflow-hidden')
-    expect(markup).toContain('overflow-x-auto')
+    expect(markup).not.toContain('overflow-x-auto')
+    expect(markup).toContain('Mode and status')
     expect(markup).toContain(`>${longTitle}</span>`)
     expect(markup).toContain('data-participant-count="4"')
+  })
+
+  it('does not duplicate punctuation between a notice and projection metadata', () => {
+    const markup = renderToStaticMarkup(
+      <LocaleProvider>
+        <EditorCollaborationStatus
+          model={buildEditorCollaborationStatusModel({
+            access: 'view',
+            active: true,
+            canEdit: false,
+            connectionStatus: 'access_revoked',
+            durabilityStatus: 'saved',
+            notice: 'Der Zugriff wurde entzogen.',
+            participants: [],
+            projectionUpdatedAt: '2026-07-15T10:02:00.000Z',
+            synced: false,
+          })}
+          variant="topbar"
+        />
+      </LocaleProvider>,
+    )
+
+    expect(markup).toContain(
+      'Zugriff entzogen. Der Zugriff wurde entzogen. Bestätigter Stand',
+    )
+    expect(markup).not.toContain('entzogen..')
   })
 })

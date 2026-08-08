@@ -338,7 +338,7 @@ class DeepReviewFinding(BaseModel):
 
 
 class DeepReviewVerdict(BaseModel):
-    """Rubric verdict of the Deep verification pass (plan M4 `4.1.4`).
+    """Rubric verdict of the Deep verification pass.
 
     Checkable criteria only — completeness, groundedness, named
     contradictions. ``findings`` empty = the answer passes; non-empty

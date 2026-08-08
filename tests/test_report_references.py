@@ -95,3 +95,35 @@ def test_internal_reference_without_url_keeps_identity_and_support_fields() -> N
     assert out[0].document_id == "doc1"
     assert out[0].chunk_index == 4
     assert out[0].source_text == "Exact internal passage"
+
+
+def test_web_search_lineage_survives_report_reference_projection() -> None:
+    out = _report_references_from_state(
+        [
+            {
+                "label": "W1",
+                "url": "https://prices.example.test/api",
+                "reference_id": "ref_price",
+                "source_id": "source_price",
+                "query_id": "query_price",
+                "query_ids": ["query_price", "query_price_followup"],
+                "citation_id": "citation_price",
+                "citation_ids": ["citation_price"],
+                "source_run_id": "run_price",
+                "source_run_ids": ["run_price"],
+                "provider_snippet": "Azure provider snippet",
+            }
+        ],
+        tier_by_url={},
+        tiering=_Tiering(),
+    )
+
+    assert len(out) == 1
+    payload = out[0].model_dump(mode="json")
+    assert payload["reference_id"] == "ref_price"
+    assert payload["source_id"] == "source_price"
+    assert payload["query_id"] == "query_price"
+    assert payload["query_ids"] == ["query_price", "query_price_followup"]
+    assert payload["citation_id"] == "citation_price"
+    assert payload["source_run_id"] == "run_price"
+    assert payload["provider_snippet"] == "Azure provider snippet"

@@ -15,6 +15,7 @@ function item(
       ? {
         answerMarkdown: 'Fertig.',
         degradedStages: [],
+        retrievalDegradations: [],
         quotes: [],
         references: [],
         refusal: false,

@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from inqtrix.auth.principal import Principal
+from inqtrix.observability.context import bound_thread_call
 from inqtrix.quota.models import QuotaDimension
 from inqtrix.server.routers import (
     quota_admission,
@@ -97,12 +98,20 @@ def build_router(container: "AppContainer") -> APIRouter:
                 raw_response = await asyncio.wait_for(
                     loop.run_in_executor(
                         None,
-                        partial(
-                            resolved.providers.llm.complete,
-                            prompt,
-                            max_output_tokens=2500,
-                            timeout=resolved.agent_settings.claim_extract_timeout,
-                            state=usage_state,
+                        bound_thread_call(
+                            partial(
+                                resolved.providers.llm.complete,
+                                prompt,
+                                max_output_tokens=2500,
+                                timeout=resolved.agent_settings.claim_extract_timeout,
+                                state=usage_state,
+                            ),
+                            feature="editor",
+                            usage_subject=(
+                                principal.tenant_id,
+                                principal.user_id,
+                                None,
+                            ),
                         ),
                     ),
                     timeout=text_wait_seconds(resolved.agent_settings),
@@ -119,10 +128,17 @@ def build_router(container: "AppContainer") -> APIRouter:
                     "timeout_error",
                 )
             except TextImprovementError as exc:
-                log.warning("Textverbesserung konnte nicht geparst werden: %s", exc)
+                log.warning(
+                    "Textverbesserung konnte nicht geparst werden "
+                    "(error_type=%s)",
+                    type(exc).__name__,
+                )
                 return error_response(502, str(exc), "server_error")
             except Exception as exc:  # noqa: BLE001 — provider failures map to 502
-                log.error("Textverbesserung Fehler: %s", exc)
+                log.error(
+                    "Textverbesserung Fehler (error_type=%s)",
+                    type(exc).__name__,
+                )
                 return error_response(
                     502,
                     f"Textverbesserung Fehler: {sanitize_error(exc)}",

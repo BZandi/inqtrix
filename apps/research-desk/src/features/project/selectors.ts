@@ -10,6 +10,7 @@ import type {
   EditorCommentThreadRecord,
   EditorDocumentRecord,
   EditorFolderRecord,
+  FileAssetBodyLoadState,
   FileAssetRecord,
   FileGroupRecord,
   FileLibrarySectionRecord,
@@ -239,6 +240,12 @@ export function projectEditorDocuments(state: ProjectState): EditorDocumentRecor
     .filter((document): document is EditorDocumentRecord => Boolean(document))
 }
 
+/** Recovery copies remain visible in the editor tree but are not server
+ * resources and therefore cannot be selected as workspace-agent targets. */
+export function projectAgentTargetEditorDocuments(state: ProjectState): EditorDocumentRecord[] {
+  return projectEditorDocuments(state).filter((document) => document.recovery === undefined)
+}
+
 export function openEditorDocuments(state: ProjectState): EditorDocumentRecord[] {
   return state.editorUi.openDocumentIds
     .map((documentId) => state.editorDocuments[documentId])
@@ -405,6 +412,228 @@ export function assetIdsFromChatRefs(
   return [...ids]
 }
 
+export type AttachmentContextReadinessStatus = 'failed' | 'pending' | 'ready'
+
+export type AttachmentContextReadinessReason =
+  | 'content_empty'
+  | 'group_empty'
+  | 'missing'
+  | 'parse_failed'
+  | 'server_preparation_missing'
+  | 'source_deleting'
+  | 'upload_failed'
+  | 'upload_not_bound'
+  | 'upload_pending'
+
+export type AttachmentContextReadiness = {
+  /** Optional provider/server detail. It is safe to display, but never used as
+   * the sole explanation because it may be absent after a reload. */
+  error: string | null
+  /** Assets whose durable upload can be explicitly retried. */
+  retryAssetIds: string[]
+  reason: AttachmentContextReadinessReason | null
+  status: AttachmentContextReadinessStatus
+}
+
+type AttachmentContextReadinessOptions = {
+  /** Incognito is the only supported local-file exception. Normal Chat and
+   * Editor calls deliberately leave this false, so a client parse cannot
+   * silently stand in for a missing server source. */
+  allowLocalFiles?: boolean
+  /** Fresh load-on-use bodies. In connected mode these are canonical
+   * server-prepared bodies; only explicit incognito uses local extraction. */
+  assetBodyOverride?: ReadonlyMap<string, string>
+  /** Load-on-use state for metadata-only server assets. Without an observed
+   * successful load, an empty local body is pending rather than falsely ready. */
+  bodyLoadStates?: Readonly<Record<string, FileAssetBodyLoadState>>
+  /** The metadata phase permits a ready server asset whose body is lazy.
+   * Immediately before a model call, requireContent must be true. */
+  requireContent?: boolean
+}
+
+const UPLOAD_TERMINAL_FAILURES = new Set(['cancelled', 'failed'])
+const UPLOAD_PENDING_STATES = new Set([
+  'awaiting_upload',
+  'uploading',
+  'retrying',
+  'parsing',
+  'finalizing',
+])
+
+function failedAttachmentReadiness(
+  reason: AttachmentContextReadinessReason,
+  error: string | null = null,
+  retryAssetIds: string[] = [],
+): AttachmentContextReadiness {
+  return { error, reason, retryAssetIds, status: 'failed' }
+}
+
+function assetAttachmentReadiness(
+  asset: FileAssetRecord,
+  options: AttachmentContextReadinessOptions,
+): AttachmentContextReadiness {
+  if ((asset.lifecycleStatus ?? 'active') !== 'active') {
+    return failedAttachmentReadiness(
+      'source_deleting',
+      asset.deletionError ?? null,
+    )
+  }
+  if (UPLOAD_TERMINAL_FAILURES.has(asset.uploadStatus ?? '')) {
+    return failedAttachmentReadiness(
+      'upload_failed',
+      asset.uploadError ?? null,
+      [asset.id],
+    )
+  }
+  if (asset.uploadPending || UPLOAD_PENDING_STATES.has(asset.uploadStatus ?? '')) {
+    return {
+      error: asset.uploadError ?? null,
+      reason: 'upload_pending',
+      retryAssetIds: [],
+      status: 'pending',
+    }
+  }
+
+  if (!options.allowLocalFiles) {
+    if (asset.uploadStatus !== 'ready' || !asset.serverFileId) {
+      return failedAttachmentReadiness(
+        'upload_not_bound',
+        asset.uploadError ?? null,
+        asset.uploadStatus === 'failed' || asset.uploadStatus === 'cancelled'
+          ? [asset.id]
+          : [],
+      )
+    }
+    if (
+      !asset.preparedParserId
+      || !asset.preparedContentHash
+      || !asset.preparedAt
+    ) {
+      return failedAttachmentReadiness(
+        'server_preparation_missing',
+        'Die serverseitig vorbereitete Dokumentquelle ist nicht verfügbar.',
+      )
+    }
+  }
+
+  if (asset.parsePending) {
+    return {
+      error: null,
+      reason: 'upload_pending',
+      retryAssetIds: [],
+      status: 'pending',
+    }
+  }
+  if (asset.parseStatus === 'error' || asset.parseStatus === 'unsupported') {
+    return failedAttachmentReadiness('parse_failed', asset.parseWarning)
+  }
+  if (
+    !options.allowLocalFiles
+    && !options.requireContent
+    && !asset.preparedText?.trim()
+  ) {
+    const bodyState = options.bodyLoadStates?.[asset.id]
+    if (bodyState?.status === 'failed') {
+      return failedAttachmentReadiness('content_empty', bodyState.error)
+    }
+    if (bodyState?.status !== 'ready') {
+      return {
+        error: null,
+        reason: 'upload_pending',
+        retryAssetIds: [],
+        status: 'pending',
+      }
+    }
+  }
+  if (options.requireContent) {
+    const body = options.assetBodyOverride?.get(asset.id)
+      ?? (options.allowLocalFiles ? asset.extractedText : asset.preparedText ?? '')
+    if (!body.trim()) return failedAttachmentReadiness('content_empty')
+  }
+  return { error: null, reason: null, retryAssetIds: [], status: 'ready' }
+}
+
+function mergeAttachmentReadiness(
+  results: readonly AttachmentContextReadiness[],
+): AttachmentContextReadiness {
+  const failed = results.find((result) => result.status === 'failed')
+  if (failed) {
+    return {
+      ...failed,
+      retryAssetIds: [...new Set(results.flatMap((result) => result.retryAssetIds))],
+    }
+  }
+  const pending = results.find((result) => result.status === 'pending')
+  if (pending) return pending
+  return { error: null, reason: null, retryAssetIds: [], status: 'ready' }
+}
+
+/**
+ * Single attachment admission contract for Chat, Editor and their shared
+ * chips. It is intentionally evaluated twice: metadata readiness controls the
+ * UI, then content readiness runs after load-on-use and immediately before a
+ * model request. A group is atomic — one pending/failed child blocks the whole
+ * group instead of silently sending the remaining subset.
+ */
+export function attachmentContextReadiness(
+  state: ProjectState,
+  refs: readonly ChatContextReferenceRecord[],
+  options: AttachmentContextReadinessOptions = {},
+): AttachmentContextReadiness {
+  const results: AttachmentContextReadiness[] = []
+  const visit = (ref: ChatContextReferenceRecord) => {
+    if (ref.kind === 'file-asset') {
+      const asset = state.fileAssets[ref.fileId]
+      results.push(
+        asset
+          ? assetAttachmentReadiness(asset, options)
+          : failedAttachmentReadiness('missing'),
+      )
+      return
+    }
+    if (ref.kind === 'file-group') {
+      const group = state.fileGroups[ref.groupId]
+      if (!group) {
+        results.push(failedAttachmentReadiness('missing'))
+        return
+      }
+      if ((group.lifecycleStatus ?? 'active') !== 'active') {
+        results.push(
+          failedAttachmentReadiness(
+            'source_deleting',
+            group.deletionError ?? null,
+          ),
+        )
+        return
+      }
+      const assets = fileAssetsForGroup(state, ref.groupId)
+      if (assets.length === 0) {
+        results.push(failedAttachmentReadiness('group_empty'))
+        return
+      }
+      results.push(...assets.map((asset) => assetAttachmentReadiness(asset, options)))
+      return
+    }
+    if (ref.kind === 'research-report') {
+      if (!state.researchRuns[ref.runId]) results.push(failedAttachmentReadiness('missing'))
+      return
+    }
+    const rule = state.chatRules[ref.ruleId]
+    if (!rule) {
+      results.push(failedAttachmentReadiness('missing'))
+      return
+    }
+    const normalized = normalizeChatRule(rule)
+    if (normalized.category !== 'context') return
+    for (const linked of normalizeLinkedContextRefs(normalized.linkedContextRefs ?? [])) {
+      visit(linked)
+    }
+  }
+
+  for (const ref of refs) visit(ref)
+  return mergeAttachmentReadiness(results)
+}
+
 export function projectVectorIndexes(state: ProjectState): VectorIndexRecord[] {
   return state.vectorIndexOrder
     .map((indexId) => state.vectorIndexes[indexId])
@@ -452,6 +681,47 @@ export function fileAssetReferenceCount(state: ProjectState, fileId: string): nu
     if (referenced) threadCount += 1
   }
   return indexCount + threadCount
+}
+
+/** One-pass variant of {@link fileAssetReferenceCount} for whole-list
+ * rendering (the library renders a count per row; the per-id scan would be
+ * O(rows x (indexes + threads x messages))). Returns the same number per
+ * existing asset id; ids referenced by stale members/attachments may appear
+ * as extra keys and are simply not looked up. */
+export function fileAssetReferenceCounts(state: ProjectState): Map<string, number> {
+  const counts = new Map<string, number>()
+  const bump = (fileId: string) => counts.set(fileId, (counts.get(fileId) ?? 0) + 1)
+  // Each vector index contributes once per distinct member file.
+  for (const index of Object.values(state.vectorIndexes)) {
+    const seen = new Set<string>()
+    for (const member of index.members) {
+      if (seen.has(member.fileId)) continue
+      seen.add(member.fileId)
+      bump(member.fileId)
+    }
+  }
+  const groupMembers = new Map<string, string[]>()
+  for (const asset of Object.values(state.fileAssets)) {
+    if (asset.groupId == null) continue
+    const list = groupMembers.get(asset.groupId)
+    if (list) list.push(asset.id)
+    else groupMembers.set(asset.groupId, [asset.id])
+  }
+  // Each thread counts once per asset, whether attached directly, via its
+  // group, or both.
+  for (const thread of Object.values(state.chatThreads)) {
+    const referenced = new Set<string>()
+    for (const message of thread.messages) {
+      for (const attachment of message.attachments ?? []) {
+        if (attachment.kind === 'file-asset') referenced.add(attachment.fileId)
+        else if (attachment.kind === 'file-group') {
+          for (const id of groupMembers.get(attachment.groupId) ?? []) referenced.add(id)
+        }
+      }
+    }
+    for (const id of referenced) bump(id)
+  }
+  return counts
 }
 
 export function projectStorageTotalBytes(state: ProjectState): number {
@@ -623,8 +893,8 @@ export function dedupeChatContextRefs(
 export function referenceDocsFromRefs(
   state: ProjectState,
   refs: readonly ChatContextReferenceRecord[],
-  /** Freshly fetched asset bodies (id -> extractedText) loaded on demand
-   * before an editor AI run (M6c), overriding the stale state snapshot. */
+  /** Freshly fetched canonical prepared bodies, or explicit incognito-local
+   * bodies, loaded before an editor AI run and overriding stale state. */
   assetBodyOverride?: ReadonlyMap<string, string>,
 ): ReferenceDoc[] {
   return chatAttachmentsFromRefs(state, refs, assetBodyOverride)
@@ -641,10 +911,14 @@ export function referenceDocsFromRefs(
 }
 
 export type ChatAttachmentChipModel = {
+  error: string | null
   fileCount: number | null
   kind: ChatContextReferenceRecord['kind']
   label: string
+  readiness: AttachmentContextReadinessStatus
+  readinessReason: AttachmentContextReadinessReason | null
   ref: ChatContextReferenceRecord
+  retryAssetIds: string[]
   title: string
 }
 
@@ -657,6 +931,10 @@ export type ChatAttachmentChipModel = {
 export function chatAttachmentChipsFromRefs(
   state: ProjectState,
   refs: readonly ChatContextReferenceRecord[],
+  options: Pick<
+    AttachmentContextReadinessOptions,
+    'allowLocalFiles' | 'bodyLoadStates'
+  > = {},
 ): ChatAttachmentChipModel[] {
   const reports = completedReportOptions(state)
   const rules = projectChatRules(state)
@@ -671,25 +949,32 @@ export function chatAttachmentChipsFromRefs(
       case 'research-report': {
         const report = reports.find((option) => option.runId === ref.runId)
         if (!report) return []
-        return [{ fileCount: null, kind: ref.kind, label: `@research:${report.label}`, ref, title: report.title }]
+        const readiness = attachmentContextReadiness(state, [ref], options)
+        return [{ ...readiness, fileCount: null, kind: ref.kind, label: `@research:${report.label}`, readiness: readiness.status, readinessReason: readiness.reason, ref, title: report.title }]
       }
       case 'chat-rule': {
         const rule = rules.find((item) => item.id === ref.ruleId)
         if (!rule) return []
-        return [{ fileCount: null, kind: ref.kind, label: `@rules:${rule.label}`, ref, title: rule.title }]
+        const readiness = attachmentContextReadiness(state, [ref], options)
+        return [{ ...readiness, fileCount: null, kind: ref.kind, label: `@rules:${rule.label}`, readiness: readiness.status, readinessReason: readiness.reason, ref, title: rule.title }]
       }
       case 'file-asset': {
         const asset = state.fileAssets[ref.fileId]
         if (!asset) return []
-        return [{ fileCount: null, kind: ref.kind, label: `@files:${asset.label}`, ref, title: asset.title }]
+        const readiness = attachmentContextReadiness(state, [ref], options)
+        return [{ ...readiness, fileCount: null, kind: ref.kind, label: `@files:${asset.label}`, readiness: readiness.status, readinessReason: readiness.reason, ref, title: asset.title }]
       }
       case 'file-group': {
         const group = state.fileGroups[ref.groupId]
         if (!group) return []
+        const readiness = attachmentContextReadiness(state, [ref], options)
         return [{
+          ...readiness,
           fileCount: fileAssetsForGroup(state, ref.groupId).length,
           kind: ref.kind,
           label: `@filegroups:${slugLabel(group.title, group.id, 'group')}`,
+          readiness: readiness.status,
+          readinessReason: readiness.reason,
           ref,
           title: group.title,
         }]
@@ -722,13 +1007,13 @@ export function chatAttachmentChipsFromAttachments(
 
     switch (attachment.kind) {
       case 'research-report':
-        return [{ fileCount: null, kind: attachment.kind, label: `@research:${attachment.label ?? attachment.title}`, ref, title: attachment.title }]
+        return [{ error: null, fileCount: null, kind: attachment.kind, label: `@research:${attachment.label ?? attachment.title}`, readiness: 'ready', readinessReason: null, ref, retryAssetIds: [], title: attachment.title }]
       case 'chat-rule':
-        return [{ fileCount: null, kind: attachment.kind, label: `@rules:${attachment.label}`, ref, title: attachment.title }]
+        return [{ error: null, fileCount: null, kind: attachment.kind, label: `@rules:${attachment.label}`, readiness: 'ready', readinessReason: null, ref, retryAssetIds: [], title: attachment.title }]
       case 'file-asset':
-        return [{ fileCount: null, kind: attachment.kind, label: `@files:${attachment.label}`, ref, title: attachment.title }]
+        return [{ error: null, fileCount: null, kind: attachment.kind, label: `@files:${attachment.label}`, readiness: 'ready', readinessReason: null, ref, retryAssetIds: [], title: attachment.title }]
       case 'file-group':
-        return [{ fileCount: groupCounts.get(attachment.groupId) ?? 1, kind: attachment.kind, label: `@filegroups:${attachment.groupLabel}`, ref, title: attachment.groupLabel }]
+        return [{ error: null, fileCount: groupCounts.get(attachment.groupId) ?? 1, kind: attachment.kind, label: `@filegroups:${attachment.groupLabel}`, readiness: 'ready', readinessReason: null, ref, retryAssetIds: [], title: attachment.groupLabel }]
     }
   })
 }

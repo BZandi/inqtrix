@@ -37,7 +37,7 @@ curl -X POST http://localhost:5100/v1/knowledge/collections \
 Returns HTTP 201 with `id`, `name`, `embedding_model`, `embedding_dim`, `document_count`, `created_at`. An optional `embedding_model` field picks a model from the deployment's selectable set; omitted, the configured default applies. Use the returned `id` (here `kc_...`) below.
 
 ```bash
-curl -X POST http://localhost:5100/v1/knowledge/collections/kc_.../documents \
+curl -X POST http://localhost:5100/v1/knowledge/collections/kc_.../document-revisions \
     -H "Content-Type: application/json" \
     -d '{
         "title": "Urlaubsregelung",
@@ -45,7 +45,33 @@ curl -X POST http://localhost:5100/v1/knowledge/collections/kc_.../documents \
     }'
 ```
 
-Ingestion is synchronous: the document is chunked, embedded, and stored before the HTTP 201 response (`chunk_count` tells you how many chunks were indexed). `title` and `text` are required. To ingest an uploaded file instead, upload it via `POST /v1/files` first and pass `"file_id"` in place of `"text"` — exactly one of the two, never both; the configured parser (`INQTRIX_DOCUMENT_PARSER`, default `markitdown`) converts PDF/DOCX/PPTX/XLSX/HTML to Markdown.
+The durable endpoint answers HTTP 202 with stable `document_id`, immutable
+`revision_id`, `job_id`, `events_url`, and the initial job state. Chunking,
+optional contextualization, embedding, validation, and publication happen in
+the server-owned indexing job; closing the browser does not cancel it. Observe
+the job through its `events_url` or current summary:
+
+```bash
+curl -N http://localhost:5100/v1/knowledge/indexing-jobs/ix_.../events
+curl http://localhost:5100/v1/knowledge/indexing-jobs/ix_...
+```
+
+`title` and `text` are required for this direct-text example. Normal Library,
+Chat, and Editor file flows first create a bound asset through `/v1/files`.
+After its server-side parser has produced the canonical extract, pass the
+asset's stable id as `"asset_id"` instead of `"text"`; the asynchronous route
+does not accept a raw `file_id`. This prevents the browser and the worker from
+creating competing parse results. The compatibility endpoint
+`POST /v1/knowledge/collections/{id}/documents` still accepts `text` or
+`file_id`, submits the same revision job, waits for its terminal state, and
+returns the historical HTTP 201 document shape.
+
+A dependency timeout or invalid contextualization response pauses the new
+revision as `paused_dependency` or `paused_validation`; the currently active
+revision remains searchable. `POST .../resume` continues from the first
+unfinished checkpoint. `POST .../resume-raw` is an explicit user decision to
+build this revision without generated retrieval context. Neither case is
+reported as a hidden partial success.
 
 Optionally verify retrieval before involving an LLM — `POST /v1/knowledge/search` is the synchronous debugging surface:
 
@@ -89,7 +115,7 @@ curl -N http://localhost:5100/v1/runs/run_.../events
 | `inqtrix.knowledge.profile.resolved` | Which profile actually runs, with `degraded_stages`. |
 | `inqtrix.knowledge.retrieval.completed` | Retrieval pass finished, candidate counts. |
 | `inqtrix.knowledge.gate.evaluated` | Sufficiency-gate verdict per round. |
-| `inqtrix.knowledge.grounding.checked` | Quote verification result (`quotes_verified` of `quotes_total`). |
+| `inqtrix.knowledge.grounding.checked` | Typed quote-verification verdict, bounded repair flag, and verified/total counts; it never carries quote or source text. |
 | `inqtrix.run.completed` / `failed` / `cancelled` | Terminal; `completed` carries the `result_url`. |
 
 Then fetch the result:
@@ -98,7 +124,7 @@ Then fetch the result:
 curl http://localhost:5100/v1/runs/run_.../result
 ```
 
-The payload carries `answer` (Markdown with `[K1]`-style citation labels), `usage`, and `result_state` — including `report_references` (label, title, URL per cited chunk), `knowledge_gate`, `knowledge_grounding`, and `knowledge_profile`. Reference URLs use the internal `inqtrix://documents/<id>#chunk-<n>` scheme by default; set `INQTRIX_PUBLIC_BASE_URL` to turn them into clickable `/v1/sources/...` links. On the in-memory backend, terminal runs stay fetchable only for `RUN_COMPLETED_TTL_SECONDS` (default 300); the Postgres backend persists them.
+For a completed run, the payload carries `answer` (Markdown with `[K1]`-style citation labels), `usage`, and `result_state` — including `report_references` (label, title, URL per cited chunk), `knowledge_gate`, `knowledge_grounding`, and `knowledge_profile`. Reference URLs use the internal `inqtrix://documents/<id>#chunk-<n>` scheme by default; set `INQTRIX_PUBLIC_BASE_URL` to turn them into clickable `/v1/sources/...` links. If grounding cannot parse the required sections or verify every labelled quote, the run is `failed` with a stable grounding error type and safe message; no result endpoint publishes the rejected completion. On the in-memory backend, terminal runs stay fetchable only for `RUN_COMPLETED_TTL_SECONDS` (default 300); the Postgres backend persists them.
 
 ## The same flow in the UI
 

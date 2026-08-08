@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useReducedMotion } from 'motion/react'
-import { AlertTriangle, ChevronDown, Clock3, Info, Layers, Link, RotateCcw, Sparkles, XCircle } from '@/components/icons'
+import { AlertTriangle, ChevronDown, Clock3, Info, Layers, Link, RotateCcw, Sparkles, Users, XCircle } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
@@ -28,6 +28,8 @@ const STATUS_STYLES: Record<VectorIndexStatus, { badge: string; dot: string; pul
   indexing: { badge: 'border-brand/25 bg-brand-subtle text-brand', dot: 'bg-brand', pulse: true },
   stale: { badge: 'border-warning/25 bg-warning-subtle text-warning', dot: 'bg-warning', pulse: false },
   error: { badge: 'border-destructive/25 bg-destructive-subtle text-destructive', dot: 'bg-destructive', pulse: false },
+  deleting: { badge: 'border-warning/25 bg-warning-subtle text-warning', dot: 'bg-warning', pulse: true },
+  delete_failed: { badge: 'border-destructive/25 bg-destructive-subtle text-destructive', dot: 'bg-destructive', pulse: false },
 }
 
 const HISTORY_RESULT_DOT: Record<VectorIndexRunResult, string> = {
@@ -44,6 +46,7 @@ function formatUpdated(iso: string, locale: Locale): string {
 
 export function IndexBar({
   embedModels,
+  deleting = false,
   embeddingQuota = null,
   index,
   live = null,
@@ -52,10 +55,21 @@ export function IndexBar({
   onDelete,
   onModel,
   onReindex,
+  onRetryDelete,
+  onResume,
+  onResumeRaw,
+  onShare,
+  onOpenServerCollection,
+  actionError = null,
+  recoveryPending = null,
   serverBacked,
+  contextualRetrievalEnabled = null,
   serverFeatureLabels = null,
 }: {
   embedModels: readonly EmbedModelDescriptor[]
+  /** The aggregate server deletion is running; the index remains visible
+   * until both its backing collection and durable index record are gone. */
+  deleting?: boolean
   /** The caller's embedding-token usage; ``null`` when quotas don't apply. */
   embeddingQuota?: EmbeddingQuota | null
   index: VectorIndexRecord
@@ -66,13 +80,35 @@ export function IndexBar({
   onDelete: (indexId: string) => void
   onModel: (indexId: string, model: EmbedModelId) => void
   onReindex: (indexId: string) => void
+  onRetryDelete?: () => void
+  onResume: (indexId: string) => void
+  onResumeRaw: (indexId: string) => void
+  /** Share the index's backing knowledge collection. Absent when the index has
+   * no server collection yet or the caller does not own it. */
+  onShare?: () => void
+  /** Open the index's backing collection on the server. The collection is the
+   * index's storage and is not listed separately, so this is the only way to
+   * reach documents that live in it without a local member. */
+  onOpenServerCollection?: () => void
+  /** Why the last index action failed, e.g. the server refused to delete the
+   * backing collection. Rendered so a refusal is never silent. */
+  actionError?: string | null
+  /** A resume mutation is awaiting server acknowledgement. Keeping the exact
+   * mode visible prevents double-submit and an ambiguous quality downgrade. */
+  recoveryPending?: 'raw' | 'resume' | null
   serverBacked: boolean
+  /** Capability truth from the server. ``null`` means discovery has not
+   * completed, so the UI must not claim either enrichment mode. */
+  contextualRetrievalEnabled?: boolean | null
   serverFeatureLabels?: string[] | null
 }) {
   const { locale, t } = useLocale()
   const reduceMotion = useReducedMotion() ?? false
   const [historyOpen, setHistoryOpen] = useState(false)
   const indexing = index.status === 'indexing'
+  const paused = live?.status === 'paused_dependency' || live?.status === 'paused_validation'
+  const recovering = recoveryPending !== null
+  const busy = indexing || deleting || index.status === 'deleting'
   // Not-yet-indexed members: when present, the top action indexes just those new
   // documents (incremental, per-file progress); with none it refreshes the whole
   // collection. So the label/icon adapts to what the click will actually do.
@@ -81,21 +117,35 @@ export function IndexBar({
   // it on the server path (the local simulation never gates).
   const quotaBlocked = serverBacked && (embeddingQuota?.exhausted ?? false)
   const stale = index.status === 'stale'
-  const style = STATUS_STYLES[index.status]
+  const style = paused
+    ? { badge: 'border-warning/25 bg-warning-subtle text-warning', dot: 'bg-warning', pulse: false }
+    : STATUS_STYLES[index.status]
   const history = index.history ?? []
   const statusLabel =
-    index.status === 'ready'
+    paused
+      ? live?.status === 'paused_validation'
+        ? t.vectorIndex.statusPausedValidation
+        : t.vectorIndex.statusPausedDependency
+      : index.status === 'ready'
       ? t.vectorIndex.statusReady
       : index.status === 'indexing'
         ? t.vectorIndex.statusIndexing
         : index.status === 'error'
           ? t.vectorIndex.statusError
+          : index.status === 'deleting'
+            ? t.vectorIndex.statusDeleting
+            : index.status === 'delete_failed'
+              ? t.vectorIndex.statusDeleteFailed
           : t.vectorIndex.statusStale
-  const stats: [string, string][] = [
-    [t.vectorIndex.dimensions, index.dims.toLocaleString(locale)],
-    [t.vectorIndex.vectors, indexVectorCount(members).toLocaleString(locale)],
-    [t.vectorIndex.documents, members.length.toLocaleString(locale)],
-    [t.vectorIndex.updated, formatUpdated(index.updatedAt, locale)],
+  const stats: { hint?: string; label: string; value: string }[] = [
+    { label: t.vectorIndex.dimensions, value: index.dims.toLocaleString(locale) },
+    {
+      hint: t.vectorIndex.vectorsEstimateHint,
+      label: t.vectorIndex.vectors,
+      value: indexVectorCount(members).toLocaleString(locale),
+    },
+    { label: t.vectorIndex.documents, value: members.length.toLocaleString(locale) },
+    { label: t.vectorIndex.updated, value: formatUpdated(index.updatedAt, locale) },
   ]
   const currentModel: EmbedModelDescriptor =
     embedModels.find((model) => model.id === index.model)
@@ -171,8 +221,8 @@ export function IndexBar({
               banner below (keyboard/SR reachable) — no disabled-button tooltip. */}
           <Button
             className="gap-1.5"
-            disabled={indexing || quotaBlocked}
-            onClick={() => onReindex(index.id)}
+            disabled={recovering || (busy && !paused) || (quotaBlocked && !paused)}
+            onClick={() => paused ? onResume(index.id) : onReindex(index.id)}
             size="sm"
             type="button"
             variant="outline"
@@ -180,9 +230,18 @@ export function IndexBar({
             {!indexing && pendingCount > 0 ? (
               <Sparkles className="size-4" />
             ) : (
-              <RotateCcw className={cn('size-4', indexing && 'motion-safe:animate-spin')} />
+              <RotateCcw className={cn(
+                'size-4',
+                (indexing && !paused) || recoveryPending === 'resume'
+                  ? 'motion-safe:animate-spin'
+                  : null,
+              )} />
             )}
-            {indexing
+            {recoveryPending === 'resume'
+              ? t.vectorIndex.resumeRequesting
+              : paused
+              ? t.vectorIndex.resumeIndexing
+              : indexing
               ? t.vectorIndex.reindexing
               : pendingCount > 0
                 ? t.vectorIndex.reindexPending.replace('{count}', String(pendingCount))
@@ -194,6 +253,7 @@ export function IndexBar({
                 <Button
                   aria-label={t.vectorIndex.cancelIndexing}
                   className="size-8 px-0 text-muted-foreground hover:text-destructive"
+                  disabled={recovering}
                   onClick={() => onCancel(index.id)}
                   size="sm"
                   type="button"
@@ -205,13 +265,56 @@ export function IndexBar({
               <TooltipContent side="top">{t.vectorIndex.cancelIndexing}</TooltipContent>
             </Tooltip>
           ) : null}
-          <ConfirmDelete ariaLabel={t.vectorIndex.remove} hint={t.vectorIndex.removeHint} label={t.vectorIndex.remove} onConfirm={() => onDelete(index.id)} />
+          {onOpenServerCollection && !busy ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={t.vectorIndex.openServerCollection}
+                  className="size-8 px-0 text-muted-foreground hover:text-foreground"
+                  onClick={onOpenServerCollection}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  <Layers className="size-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top">{t.vectorIndex.openServerCollection}</TooltipContent>
+            </Tooltip>
+          ) : null}
+          {onShare && !busy ? (
+            <Button className="gap-1.5" onClick={onShare} size="sm" type="button" variant="outline">
+              <Users className="size-4" />
+              {t.sharing.share}
+            </Button>
+          ) : null}
+          {deleting ? (
+            <span
+              aria-live="polite"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-surface px-3 text-sm font-medium text-muted-foreground"
+              role="status"
+            >
+              <Clock3 className={cn('size-4', !reduceMotion && 'animate-pulse')} />
+              {t.vectorIndex.deleting}
+            </span>
+          ) : (
+            <ConfirmDelete
+              ariaLabel={t.vectorIndex.remove}
+              disabled={busy}
+              hint={t.vectorIndex.removeHint}
+              label={t.vectorIndex.remove}
+              onConfirm={() => onDelete(index.id)}
+            />
+          )}
         </div>
       </div>
 
       {/* One stats row — the running progress lives on the RIGHT of it (no
           separate row), matching the rest of the design language. */}
-      <div className="mt-3 flex flex-wrap items-end gap-x-6 gap-y-2 border-t border-border/70 pt-3">
+      <div className={cn(
+        'mt-3 flex flex-wrap items-end gap-x-6 gap-y-2 border-t border-border/70 pt-3',
+        indexing && 'md:flex-nowrap',
+      )}>
         <div className="min-w-0">
           <span className="block t-caption font-semibold text-muted-foreground/80">{t.vectorIndex.embeddingModel}</span>
           <DropdownMenu>
@@ -219,7 +322,7 @@ export function IndexBar({
               <Button
                 aria-label={t.vectorIndex.embeddingModel}
                 className="mt-1 h-7 gap-1.5 px-2 font-mono text-xs font-semibold"
-                disabled={indexing || Boolean(index.serverCollectionId)}
+                disabled={busy || Boolean(index.serverCollectionId)}
                 size="sm"
                 type="button"
                 variant="outline"
@@ -245,9 +348,25 @@ export function IndexBar({
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-        {stats.map(([label, value]) => (
+        {stats.map(({ hint, label, value }) => (
           <div className="min-w-0" key={label}>
-            <p className="t-caption font-semibold text-muted-foreground/80">{label}</p>
+            {hint ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span
+                    aria-label={hint}
+                    className="inline-flex cursor-help items-center gap-1 t-caption font-semibold text-muted-foreground/80 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    tabIndex={0}
+                  >
+                    {label}
+                    <Info aria-hidden className="size-3" />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[280px]" side="top">{hint}</TooltipContent>
+              </Tooltip>
+            ) : (
+              <p className="t-caption font-semibold text-muted-foreground/80">{label}</p>
+            )}
             <p className="mt-0.5 truncate t-list font-semibold tabular-nums text-foreground">{value}</p>
           </div>
         ))}
@@ -265,11 +384,78 @@ export function IndexBar({
           </button>
         ) : null}
         {indexing ? (
-          <div className="ml-auto min-w-[10rem]">
+          <div className="ml-auto w-full min-w-0 md:w-48 md:shrink-0">
             <RunningIndexProgress live={live} reduceMotion={reduceMotion} t={t} />
           </div>
         ) : null}
       </div>
+
+      {actionError ? (
+        <div className="mt-2.5 flex items-center justify-between gap-2 rounded-md border border-destructive/25 bg-destructive-subtle px-2.5 py-1.5">
+          <span className="inline-flex min-w-0 items-center gap-1.5 t-meta-sm font-medium text-destructive">
+            <AlertTriangle className="size-3.5 shrink-0" />
+            <span className="min-w-0 [overflow-wrap:anywhere]">{actionError}</span>
+          </span>
+          {onRetryDelete ? (
+            <Button onClick={onRetryDelete} size="sm" type="button" variant="outline">
+              {t.vectorIndex.errorRetry}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {paused && live ? (
+        <div
+          className="mt-2.5 rounded-md border border-warning/30 bg-warning-subtle px-3 py-2 text-warning"
+          role="status"
+        >
+          <p className="t-meta font-semibold">
+            {live.status === 'paused_validation'
+              ? t.vectorIndex.pausedValidationTitle
+              : t.vectorIndex.pausedDependencyTitle}
+          </p>
+          <p className="mt-0.5 t-meta-sm [overflow-wrap:anywhere]">
+            {live.pauseMessage ?? t.vectorIndex.pausedFallback}
+          </p>
+          <p className="mt-1 t-hint text-warning/90">
+            {t.vectorIndex.pausedCheckpoint
+              .replace('{phase}', live.phase ?? '—')
+              .replace('{batch}', String(live.currentBatch ?? 0))
+              .replace('{total}', String(live.totalBatches ?? 0))}
+            {' · '}{t.vectorIndex.activeGenerationUnchanged}
+          </p>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-warning/20 pt-2">
+            <p className="max-w-3xl t-hint text-warning/90">
+              {t.vectorIndex.resumeWithoutContextHint}
+            </p>
+            <Button
+              className="shrink-0 border-warning/35 text-warning hover:bg-warning/10 hover:text-warning"
+              disabled={recovering}
+              onClick={() => onResumeRaw(index.id)}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              {recoveryPending === 'raw'
+                ? t.vectorIndex.resumeWithoutContextRequesting
+                : t.vectorIndex.resumeWithoutContext}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {indexing && live?.source === 'build' ? (
+        // Honest expectation-setting: the client-driven build embeds document
+        // by document on the server, so minutes without a visible jump are
+        // normal — say so instead of letting it read as a hang.
+        <p className="mt-2.5 t-meta-sm text-muted-foreground">
+          {contextualRetrievalEnabled === true
+            ? t.vectorIndex.buildDurationHintContextual
+            : contextualRetrievalEnabled === false
+              ? t.vectorIndex.buildDurationHintRaw
+              : t.vectorIndex.buildDurationHint}
+        </p>
+      ) : null}
 
       {quotaBlocked ? (
         <div className="mt-2.5 flex items-center gap-2 rounded-md border border-destructive/25 bg-destructive-subtle px-2.5 py-1.5">
@@ -364,10 +550,18 @@ function RunningIndexProgress({
     )
   }
   const percent = Math.min(100, Math.max(0, live.percent))
+  const paused = live.status === 'paused_dependency' || live.status === 'paused_validation'
   return (
     <div className="w-full" aria-atomic="true" aria-live="polite">
-      <div className="flex items-center justify-end gap-1.5 t-meta-sm font-semibold text-brand">
-        <span className={cn('size-1.5 rounded-full bg-brand', !reduceMotion && 'inqtrix-running-dot')} aria-hidden />
+      <div className={cn(
+        'flex items-center justify-end gap-1.5 t-meta-sm font-semibold',
+        paused ? 'text-warning' : 'text-brand',
+      )}>
+        <span className={cn(
+          'size-1.5 rounded-full',
+          paused ? 'bg-warning' : 'bg-brand',
+          !paused && !reduceMotion && 'inqtrix-running-dot',
+        )} aria-hidden />
         <span
           className={cn('tabular-nums', !reduceMotion && 'inqtrix-metric-flash')}
           key={`${percent}-${live.completedDocuments}`}
@@ -381,6 +575,14 @@ function RunningIndexProgress({
           style={{ width: `${Math.max(3, percent)}%` }}
         />
       </span>
+      {/* Each document embeds synchronously on the server, so the percentage
+          can stand still for minutes. Naming the document being worked on is
+          the difference between "running" and "looks dead". */}
+      {live.currentDocumentTitle ? (
+        <span className="mt-1 block truncate text-right t-meta-sm text-muted-foreground" title={live.currentDocumentTitle}>
+          {live.currentDocumentTitle}
+        </span>
+      ) : null}
     </div>
   )
 }

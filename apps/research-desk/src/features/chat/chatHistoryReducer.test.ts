@@ -129,6 +129,59 @@ describe('server chat hydration (M6a)', () => {
     expect(next.dirty).toBe(false)
   })
 
+  it('restores user-before-assistant order when persisted turn timestamps tie', () => {
+    const local = thread('ct_1')
+    const tiedAt = '2026-01-01T00:01:00.000Z'
+    const next = researchDeskReducer(withThread(local), {
+      messages: [
+        message('cm_assistant', tiedAt, {
+          contentMarkdown: 'Already answered',
+          role: 'assistant',
+        }),
+        message('cm_user', tiedAt, { contentMarkdown: 'Question' }),
+      ],
+      threadId: 'ct_1',
+      type: 'upsertServerChatMessages',
+    })
+
+    expect(next.chatThreads.ct_1.messages.map((item) => item.role)).toEqual([
+      'user',
+      'assistant',
+    ])
+    expect(next.dirty).toBe(false)
+  })
+
+  it('restores a tied turn split across server pages without duplicates', () => {
+    const tiedAt = '2026-01-01T00:01:00.000Z'
+    const assistantPage = researchDeskReducer(withThread(thread('ct_1')), {
+      messages: [
+        message('cm_assistant', tiedAt, {
+          contentMarkdown: 'Already answered',
+          role: 'assistant',
+        }),
+      ],
+      threadId: 'ct_1',
+      type: 'upsertServerChatMessages',
+    })
+    const merged = researchDeskReducer(assistantPage, {
+      messages: [
+        message('cm_user', tiedAt, { contentMarkdown: 'Question' }),
+        message('cm_assistant', tiedAt, {
+          contentMarkdown: 'Already answered',
+          role: 'assistant',
+        }),
+      ],
+      threadId: 'ct_1',
+      type: 'upsertServerChatMessages',
+    })
+
+    expect(merged.chatThreads.ct_1.messages.map((item) => item.id)).toEqual([
+      'cm_user',
+      'cm_assistant',
+    ])
+    expect(merged.dirty).toBe(false)
+  })
+
   it('merges server groups WITHOUT dirtying', () => {
     const next = researchDeskReducer(createEmptyProjectState(), {
       groups: [{ createdAt: '2026-01-01T00:00:00.000Z', id: 'ctg_1', title: 'G', updatedAt: '2026-01-01T00:00:00.000Z' }],

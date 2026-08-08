@@ -22,6 +22,10 @@ from typing import TYPE_CHECKING, Callable
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from inqtrix.auth.log_redaction import (
+    pseudonymous_log_reference,
+    stable_pseudonym,
+)
 from inqtrix.auth.lifecycle import LoginCommand, UserDisabledError
 from inqtrix.auth.oidc import OidcExchangeError, make_pkce_pair
 from inqtrix.auth.sessions import (
@@ -34,9 +38,45 @@ from inqtrix.services.request_parsing import error_response
 
 if TYPE_CHECKING:
     from inqtrix.auth.oidc import OidcAuthProvider
+    from inqtrix.auth.permissions import AuditSink
     from inqtrix.auth.principal import Principal
+    from inqtrix.services.audit_service import AuditService
 
 log = logging.getLogger("inqtrix")
+
+
+def _login_audit(audit: "AuditSink | None"):
+    """Fail-safe audit writer for the AuthN catalog rows, or ``None``.
+
+    Login failures/lockouts are lifecycle telemetry: they must never
+    turn a 401 into a 500, so they go through the warning-loud
+    AuditService instead of the fail-loud direct sink path.
+    """
+    if audit is None:
+        return None
+    from inqtrix.services.audit_service import AuditService
+
+    return AuditService(audit)
+
+
+async def _destroy_session_with_audit(
+    provider: "OidcAuthProvider",
+    auditor: "AuditService | None",
+    principal: "Principal",
+) -> None:
+    """Delete one cookie session without retaining its bearer credential."""
+    session_id = principal.session_id
+    if not session_id:
+        return
+    await provider.sessions.delete(session_id)
+    if auditor is not None and principal.user_id is not None:
+        await auditor.record_event(
+            tenant_id=principal.tenant_id or "default",
+            action="auth.logout",
+            resource_type="session",
+            resource_id=stable_pseudonym("ses", session_id),
+            actor_user_id=principal.user_id,
+        )
 
 _FLOW_COOKIE_SECURE = "__Host-inqtrix_oidc"
 _FLOW_COOKIE_DEV = "inqtrix_oidc"
@@ -45,13 +85,14 @@ _FLOW_COOKIE_DEV = "inqtrix_oidc"
 def build_auth_router(
     provider: "OidcAuthProvider",
     principal_dependency: Callable[..., "Principal"] | None = None,
+    audit: "AuditSink | None" = None,
 ) -> APIRouter:
     """Bind the BFF routes against one cookie-session provider instance.
 
     OIDC mounts the IdP redirect flow; local (and, later, ldap) mount the
     first-run setup + password login routes. The session / logout / PAT
     routes are identical across modes (local/ldap sessions are the same
-    cookie-session ``kind`` as OIDC, ADR-AUTH-3), so password modes route
+    cookie-session ``kind`` as OIDC), so password modes route
     through :func:`_build_password_auth_router`. Workspaces are no longer
     bootstrapped on login: workspace management is an explicit instance-admin
     action (``/v1/admin/workspaces``), so the owner setup mints only the
@@ -66,7 +107,9 @@ def build_auth_router(
             provider.build_principal_dependency()
         )
     if provider.mode in {"local", "ldap"}:
-        return _build_password_auth_router(provider, principal_dependency)
+        return _build_password_auth_router(
+            provider, principal_dependency, audit=audit
+        )
 
     async def no_store(response: Response) -> None:
         # The auth surface emits identity facts and the CSRF token —
@@ -76,6 +119,7 @@ def build_auth_router(
 
     router = APIRouter(dependencies=[Depends(no_store)])
     users = provider.users
+    auditor = _login_audit(audit)
     flow_cookie = (
         _FLOW_COOKIE_SECURE if provider.secure_cookies else _FLOW_COOKIE_DEV
     )
@@ -137,7 +181,7 @@ def build_auth_router(
         """Exchange the code, validate identity, establish the session."""
         error = request.query_params.get("error")
         if error:
-            log.warning("OIDC-Callback meldet Fehler: %s", error)
+            log.warning("OIDC-Callback meldet einen Provider-Fehler")
             return error_response(
                 400,
                 f"Anmeldung beim Identity-Provider fehlgeschlagen ({error})",
@@ -177,7 +221,10 @@ def build_auth_router(
                 provider.resolve_identity(claims)
             )
         except OidcExchangeError as exc:
-            log.warning("OIDC-Login abgelehnt: %s", exc)
+            log.warning(
+                "OIDC-Login abgelehnt (error_type=%s)",
+                type(exc).__name__,
+            )
             return error_response(403, str(exc), "oidc_error")
 
         issuer = str(claims.get("iss", ""))
@@ -251,9 +298,8 @@ def build_auth_router(
             )
             return error_response(403, "Konto ist deaktiviert.", "registration_denied")
         log.info(
-            "OIDC-Login erfolgreich: user_id=%s kind=oidc_session session=%s",
-            admitted_user.user_id,
-            session.id[:8],
+            "OIDC-Login erfolgreich: actor_ref=%s kind=oidc_session",
+            pseudonymous_log_reference("usr", admitted_user.user_id),
         )
         response = RedirectResponse(flow.next_path, status_code=303)
         _set_cookie(
@@ -273,16 +319,32 @@ def build_auth_router(
         return response
 
     @router.get("/api/auth/session")
-    async def session_info(request: Request):
-        """SPA bootstrap: identity facts plus the CSRF token."""
-        return await provider.session_payload(request)
+    async def session_info(request: Request, response: Response):
+        """SPA bootstrap and repair the readable double-submit cookie.
+
+        The opaque session remains valid across a deliberate
+        ``session_secret`` rotation, while a token minted with the previous
+        secret does not.  Returning the freshly derived value only in JSON
+        leaves the SPA's cookie/header pair stale, so every subsequent
+        mutation (including logout) keeps failing.  A successful bootstrap
+        therefore refreshes the cookie from the same value it returns.
+        """
+        payload = await provider.session_payload(request)
+        csrf_token = payload.get("csrf_token")
+        if payload.get("authenticated") is True and isinstance(csrf_token, str):
+            _set_cookie(
+                response,
+                provider.csrf_cookie,
+                csrf_token,
+                http_only=False,
+            )
+        return payload
 
     @router.post("/api/auth/logout")
     async def logout(request: Request):
         """Destroy the server-side session (CSRF-protected)."""
         principal = await principal_dependency(request)
-        if principal.session_id:
-            await provider.sessions.delete(principal.session_id)
+        await _destroy_session_with_audit(provider, auditor, principal)
         response = JSONResponse({"logged_out": True})
         _clear_cookie(response, provider.session_cookie)
         _clear_cookie(response, provider.csrf_cookie)
@@ -338,6 +400,7 @@ async def _read_json_object(request: Request):
 def _build_password_auth_router(
     provider,
     principal_dependency: Callable[..., "Principal"],
+    audit: "AuditSink | None" = None,
 ) -> APIRouter:
     """Routes for password-based cookie-session modes (local; ldap later).
 
@@ -356,6 +419,37 @@ def _build_password_auth_router(
 
     router = APIRouter(dependencies=[Depends(no_store)])
     users = provider.users
+    auditor = _login_audit(audit)
+
+    async def _audit_login_failure(
+        *, mode: str, identifier: str, reason: str, locked_now: bool
+    ) -> None:
+        """auth.login_failed (+ auth.lockout on the transition).
+
+        The attempted identifier is the attacked resource — standard
+        AuthN-audit practice (BSI A3); the trail is admin-only with its
+        own retention. Steady-state 429s during an active lockout are
+        deliberately NOT re-audited (volume without information)."""
+        if auditor is None:
+            return
+        await auditor.record_event(
+            tenant_id="default",
+            action="auth.login_failed",
+            resource_type="account",
+            resource_id=identifier.strip().lower(),
+            outcome="failure",
+            detail={"reason": reason},
+            origin={"auth_method": mode},
+        )
+        if locked_now:
+            await auditor.record_event(
+                tenant_id="default",
+                action="auth.lockout",
+                resource_type="account",
+                resource_id=identifier.strip().lower(),
+                outcome="denied",
+                origin={"auth_method": mode},
+            )
 
     def _set_cookie(
         response: Response, name: str, value: str, *, http_only: bool
@@ -490,8 +584,8 @@ def _build_password_auth_router(
                     409, "Owner ist bereits eingerichtet", "setup_locked"
                 )
             log.info(
-                "Lokaler Owner angelegt: user_id=%s kind=oidc_session",
-                user.user_id,
+                "Lokaler Owner angelegt: actor_ref=%s kind=oidc_session",
+                pseudonymous_log_reference("usr", user.user_id),
             )
             return _session_response(session, status_code=201)
 
@@ -522,8 +616,16 @@ def _build_password_auth_router(
                     email, password
                 )
             except CredentialError:
+                locked_now = False
                 if limiter is not None:
                     limiter.record_failure(throttle_key)
+                    locked_now = limiter.locked(throttle_key)
+                await _audit_login_failure(
+                    mode="local",
+                    identifier=email,
+                    reason="invalid_credentials",
+                    locked_now=locked_now,
+                )
                 return error_response(
                     401, "Ungueltige Anmeldedaten", "unauthorized"
                 )
@@ -553,6 +655,12 @@ def _build_password_auth_router(
                     )
                 )
             except UserDisabledError:
+                await _audit_login_failure(
+                    mode="local",
+                    identifier=email,
+                    reason="account_disabled",
+                    locked_now=False,
+                )
                 return error_response(
                     401, "Ungueltige Anmeldedaten", "unauthorized"
                 )
@@ -638,8 +746,16 @@ def _build_password_auth_router(
                     provider.ldap_client.authenticate, username, password
                 )
             except LdapError:
+                locked_now = False
                 if limiter is not None:
                     limiter.record_failure(throttle_key)
+                    locked_now = limiter.locked(throttle_key)
+                await _audit_login_failure(
+                    mode="ldap",
+                    identifier=username,
+                    reason="invalid_credentials",
+                    locked_now=locked_now,
+                )
                 return error_response(
                     401, "Ungueltige Anmeldedaten", "unauthorized"
                 )
@@ -659,6 +775,12 @@ def _build_password_auth_router(
                     subject=identity.subject,
                 )
                 if existing is not None and existing.disabled_at is not None:
+                    await _audit_login_failure(
+                        mode="ldap",
+                        identifier=username,
+                        reason="account_disabled",
+                        locked_now=False,
+                    )
                     return error_response(
                         401, "Ungueltige Anmeldedaten", "unauthorized"
                     )
@@ -694,16 +816,24 @@ def _build_password_auth_router(
             return _session_response(session)
 
     @router.get("/api/auth/session")
-    async def session_info(request: Request):
-        """SPA bootstrap: identity facts plus the CSRF token."""
-        return await provider.session_payload(request)
+    async def session_info(request: Request, response: Response):
+        """SPA bootstrap and repair the readable double-submit cookie."""
+        payload = await provider.session_payload(request)
+        csrf_token = payload.get("csrf_token")
+        if payload.get("authenticated") is True and isinstance(csrf_token, str):
+            _set_cookie(
+                response,
+                provider.csrf_cookie,
+                csrf_token,
+                http_only=False,
+            )
+        return payload
 
     @router.post("/api/auth/logout")
     async def logout(request: Request):
         """Destroy the server-side session (CSRF-protected)."""
         principal = await principal_dependency(request)
-        if principal.session_id:
-            await provider.sessions.delete(principal.session_id)
+        await _destroy_session_with_audit(provider, auditor, principal)
         response = JSONResponse({"logged_out": True})
         _clear_cookie(response, provider.session_cookie)
         _clear_cookie(response, provider.csrf_cookie)

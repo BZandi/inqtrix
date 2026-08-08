@@ -36,7 +36,11 @@ No infrastructure variables are needed: `INQTRIX_STORAGE_BACKEND` and `INQTRIX_Q
 ## Path A: HTTP server
 
 ```bash
+# uv
 uv run python -m inqtrix
+
+# or, after `python -m pip install -e .`
+python -m inqtrix
 ```
 
 The server listens on port 5100. In a second shell:
@@ -71,15 +75,19 @@ print(f"Sources: {result.metrics.total_citations}")
 print(f"Rounds: {result.metrics.rounds}")
 ```
 
-Run with `uv run python main.py` (a script you author yourself). The same `.env` feeds the auto-created providers. See [Library mode](../deployment/library-mode.md) for the explicit-providers variant and streaming.
+Run the script with `uv run python main.py`, or with `python main.py` after a
+normal pip installation. The same `.env` feeds the auto-created providers. See
+[Library mode](../deployment/library-mode.md) for the explicit-providers
+variant and streaming.
 
 ## Path C: Research Desk UI
 
-With the server from Path A running, start the React frontend (Node 22.12+ and pnpm via Corepack, see [Installation](installation.md)):
+With the server from Path A running, start the React frontend (Node 22.12+ and
+npm 10.9+, see [Installation](installation.md)):
 
 ```bash
 # from the repository root
-pnpm run ui:dev
+npm run ui:dev
 # -> http://127.0.0.1:5173
 ```
 
@@ -100,7 +108,7 @@ If you see confidence stuck at 6–8 with several uncovered aspects, that is the
 
 ## What to do when the answer looks wrong
 
-- Turn on logging: `INQTRIX_LOG_ENABLED=true`, `INQTRIX_LOG_LEVEL=INFO`. Use `OBSERVABILITY_PROFILE=forensic` plus `INQTRIX_LOG_LEVEL=DEBUG` when you need source/citation/claim/answer lineage. See [Logging](../observability/logging.md).
+- Turn on logging: `INQTRIX_LOG_ENABLED=true`, `INQTRIX_LOG_LEVEL=INFO`. Use `OBSERVABILITY_PROFILE=forensic` for protected source/citation/claim/answer audit lineage; `INQTRIX_LOG_LEVEL=DEBUG` mirrors only its content-minimized IDs, states and metrics into the ordinary log. See [Logging](../observability/logging.md).
 - Read the iteration log for the run (testing mode) — the markers explain every decision. See [Iteration log](../observability/iteration-log.md).
 - Look for provider errors in the log (`AnthropicAPIError`, `AzureOpenAIAPIError`, `PerplexityAPIError`). See [Debugging runs](../observability/debugging-runs.md).
 - Re-run with a different stack (for example `examples/webserver_stacks/bedrock_perplexity.py`) to isolate whether the problem is provider-specific.

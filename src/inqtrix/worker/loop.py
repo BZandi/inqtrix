@@ -39,29 +39,35 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
+from inqtrix.auth.log_redaction import stable_pseudonym
 from inqtrix.auth.principal import Principal
 from inqtrix.core.results import RunRequest
 from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.execution_failures import terminate_native_run
+from inqtrix.observability.context import (
+    bind_log_context,
+    reset_log_context,
+)
+from inqtrix.observability.otel import run_execute_span
 from inqtrix.quota.models import QuotaSubject
 from inqtrix.server.runs import RunHandle
 from inqtrix.services.run_service import execute_run_request
-from inqtrix.sync_bridge import run_coro_sync
 
 if TYPE_CHECKING:
     from inqtrix.core.algorithms import AlgorithmRegistry
     from inqtrix.core.context import RuntimeContext
     from inqtrix.runs.postgres_store import ClaimedRun, PostgresRunStore
     from inqtrix.runs.valkey_queue import QueuedJob, ValkeyRunQueue
+    from inqtrix.services.agent_answer_publisher import AgentAnswerPublisher
     from inqtrix.services.agent_context import AgentContextResolver
-    from inqtrix.services.quota_service import QuotaService
     from inqtrix.services.execution_dependency_authority import (
         ExecutionDependencyAuthorizer,
     )
-    from inqtrix.auth.directory import UserDirectory
+    from inqtrix.services.quota_service import QuotaService
 
 log = logging.getLogger("inqtrix")
 
@@ -78,6 +84,19 @@ TClaimed = TypeVar("TClaimed")
 
 class WorkerClaimGuardError(RuntimeError):
     """Raised when the deployment contract forbids further queue claims."""
+
+
+class WorkerClaimUnavailableError(RuntimeError):
+    """Pause claims while a transient contract probe cannot reach Postgres."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float,
+    ) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = max(0.0, float(retry_after_seconds))
 
 
 @dataclass
@@ -111,8 +130,15 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         heartbeat_seconds: Idle-reset interval for in-flight entries.
         claim_idle_seconds: Reclaim threshold for entries whose owner
             stopped heartbeating.
+        answer_publisher: The same durable Agent Desk answer publisher used by
+            in-process RunService execution.
         thread_prefix: Executor thread name prefix (for log clarity).
     """
+
+    # inqtrix_run_queue_wait_seconds is a RUN metric; only the runs loop
+    # opts in (indexing/deletion/upload dispatch waits would otherwise
+    # pollute the unlabeled histogram).
+    _observes_queue_wait = False
 
     def __init__(
         self,
@@ -179,6 +205,10 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         del job
         return False
 
+    def _periodic_maintenance(self) -> None:
+        """Run subsystem maintenance on the existing reconcile cadence."""
+
+
     # -- lifecycle -------------------------------------------------------- #
 
     def request_stop(self) -> None:
@@ -220,13 +250,20 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
     def run_forever(self) -> None:
         """Main loop; returns after :meth:`request_stop`."""
         self._queue.ensure_group()
-        self._verify_claim_contract(immediate=True)
+        if not self._wait_for_claim_contract(immediate=True):
+            return
         # Own-PEL drain only finds entries when the consumer name is
         # stable across restarts (container hostname without the pid);
         # with the default boot-unique name, crash recovery runs via
         # the idle-based reclaim instead — this call is then a no-op.
         for job in self._queue.claim_pending():
-            self._start(job, takeover=True)
+            while not self._stop.is_set():
+                try:
+                    self._start(job, takeover=True)
+                except WorkerClaimUnavailableError as exc:
+                    self._stop.wait(exc.retry_after_seconds)
+                    continue
+                break
 
         heartbeat = threading.Thread(
             target=self._heartbeat_loop, name="inqtrix-heartbeat", daemon=True
@@ -240,6 +277,8 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
         while not self._stop.is_set():
             try:
                 self._tick()
+            except WorkerClaimUnavailableError as exc:
+                self._stop.wait(exc.retry_after_seconds)
             except WorkerClaimGuardError:
                 raise
             except Exception:  # noqa: BLE001 — survive transient outages
@@ -251,6 +290,17 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                     exc_info=True,
                 )
                 self._stop.wait(_ERROR_BACKOFF_SECONDS)
+
+    def _wait_for_claim_contract(self, *, immediate: bool) -> bool:
+        """Wait in-process for transient availability; reject fatal drift."""
+        while not self._stop.is_set():
+            try:
+                self._verify_claim_contract(immediate=immediate)
+            except WorkerClaimUnavailableError as exc:
+                self._stop.wait(exc.retry_after_seconds)
+                continue
+            return True
+        return False
 
     def _tick(self) -> None:
         """One claim-loop iteration (reclaim, reconcile, claim new)."""
@@ -340,6 +390,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 for entity_id, sent in self._reenqueued.items()
                 if sent >= cutoff
             }
+        self._periodic_maintenance()
 
     def _start(self, job: TJob, *, takeover: bool) -> None:
         if self._stop.is_set():
@@ -469,6 +520,11 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             )
             self._queue.ack(job.message_id)
             return
+        # Only first deliveries of run dispatches: a reclaimed message
+        # keeps its ORIGINAL XADD timestamp, so redeliveries would fold
+        # the previous attempt's runtime into "queue wait".
+        if self._observes_queue_wait and job.delivery_count <= 1:
+            _observe_queue_wait(job.message_id)
         # Register BEFORE submitting: a fast job's finally-pop must
         # find the entry, or it would linger in the active set forever.
         cancel_event = threading.Event()
@@ -684,16 +740,23 @@ class FencedRunHandle(RunHandle):
         """Whether this attempt's terminal write actually landed —
         ``False`` means a superseding attempt fenced it out and the
         dispatch message must NOT be acked by this attempt."""
+        self.terminal_outcome: str | None = None
+        """Which terminal actually landed (completed|failed|cancelled) —
+        the honest outcome label for the run_duration segment metric."""
 
     def emit(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
         """Emit one event, fenced to this claim attempt."""
-        self.check_execution_authority()
         self._store.emit(
             self.run_id,
             event_type,
             payload or {},
             fence_attempt=self._fence_attempt,
         )
+
+    @property
+    def publication_fence_attempt(self) -> int:
+        """Claim attempt that must own both answer-artifact writes."""
+        return self._fence_attempt
 
     def complete(
         self,
@@ -707,6 +770,8 @@ class FencedRunHandle(RunHandle):
             snapshot=snapshot,
             fence_attempt=self._fence_attempt,
         )
+        if self.terminal_landed:
+            self.terminal_outcome = "completed"
 
     def fail(self, message: str, *, error_type: str = "server_error") -> None:
         """Mark the run failed, fenced to this claim attempt."""
@@ -716,12 +781,16 @@ class FencedRunHandle(RunHandle):
             error_type=error_type,
             fence_attempt=self._fence_attempt,
         )
+        if self.terminal_landed:
+            self.terminal_outcome = "failed"
 
     def cancel(self, reason: str = "cancelled") -> None:
         """Mark the run cancelled, fenced to this claim attempt."""
         self.terminal_landed = self._store.mark_cancelled(
             self.run_id, reason=reason, fence_attempt=self._fence_attempt
         )
+        if self.terminal_landed:
+            self.terminal_outcome = "cancelled"
 
     def wait(self, status: Any) -> None:
         """Park the run, fenced to this claim attempt (M5 segments).
@@ -756,6 +825,8 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
             stopped heartbeating.
     """
 
+    _observes_queue_wait = True
+
     def __init__(
         self,
         *,
@@ -769,8 +840,8 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
         heartbeat_seconds: float,
         claim_idle_seconds: float,
         quota_service: "QuotaService | None" = None,
-        user_lookup: "UserDirectory | None" = None,
         dependency_authorizer: "ExecutionDependencyAuthorizer | None" = None,
+        answer_publisher: "AgentAnswerPublisher | None" = None,
         claim_guard: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(
@@ -790,8 +861,8 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
         # has no live principal, so token recording uses the canonical user
         # UUID reconstructed from the claimed run row (see _execute).
         self._quota_service = quota_service
-        self._user_lookup = user_lookup
         self._dependency_authorizer = dependency_authorizer
+        self._answer_publisher = answer_publisher
 
     def _entity_id(self, job: "QueuedJob") -> str:
         return job.run_id
@@ -823,8 +894,35 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
         handle = FencedRunHandle(
             self._store, job.run_id, cancel_event, claimed.attempt
         )
+        # Correlation for the WHOLE segment: every log line in this
+        # thread carries run_id/tenant (JSON mode), and the execution
+        # span parents itself in the submitter's trace via the
+        # traceparent persisted in request_payload. Worker threads are
+        # reused — both bindings are undone in the outer finally. The
+        # setup lives INSIDE the try so a telemetry failure can never
+        # skip _finish_active (which would leak the worker slot / stream
+        # message and silently wedge the dispatcher).
+        telemetry_stack = ExitStack()
+        log_tokens: dict = {}
         old_message_acked = False
         try:
+            telemetry_stack.enter_context(
+                run_execute_span(
+                    run_id=job.run_id,
+                    tenant_id=job.tenant_id,
+                    attempt=claimed.attempt,
+                    payload=claimed.request_payload,
+                )
+            )
+            log_tokens = bind_log_context(
+                run_id=job.run_id, tenant=job.tenant_id
+            )
+            # Before the try: an exception during resolution still
+            # reaches the segment observation below, which needs a
+            # defined start time and run_request binding (setup time
+            # then counts toward the failed segment — honest enough).
+            segment_started = time.monotonic()
+            run_request = None
             try:
                 payload = claimed.request_payload
                 if not payload:
@@ -889,6 +987,14 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                     raise AuthorizationRevoked(
                         "run segment has no explicit effective actor"
                     )
+                if actor_user_id is not None:
+                    # Same stable pseudonym as in API logs/audit — the
+                    # subject stays greppable across both processes.
+                    log_tokens.update(
+                        bind_log_context(
+                            user=stable_pseudonym("usr", actor_user_id)
+                        )
+                    )
                 quota_subject = None
                 if (
                     self._quota_service is not None
@@ -915,33 +1021,30 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                     )
 
                 def _check_authority() -> None:
-                    if principal is not None:
-                        if self._user_lookup is None:
-                            raise AuthorizationRevoked(
-                                "worker has no live user lookup"
-                            )
-                        user = run_coro_sync(
-                            self._user_lookup.find_by_user_id(
-                                tenant_id=principal.tenant_id,
-                                user_id=principal.user_id,
-                            )
-                        )
-                        if user is None or user.disabled_at is not None:
-                            raise AuthorizationRevoked(
-                                "effective actor is missing or disabled"
-                            )
                     check_run = getattr(
                         self._store, "check_execution_authority", None
                     )
                     if callable(check_run):
                         check_run(job.run_id)
-                    if self._dependency_authorizer is not None:
+                    if self._dependency_authorizer is None:
+                        # The actor and pinned-dependency probes live in
+                        # the authorizer; a scoped segment must not run
+                        # unchecked. Unscoped segments keep the historical
+                        # behaviour (no authorizer, no dependency check).
+                        if principal is not None:
+                            raise AuthorizationRevoked(
+                                "worker has no dependency authorizer"
+                            )
+                    else:
                         self._dependency_authorizer.check(
                             run_request,
                             principal,
                         )
 
-                handle.bind_authority_check(_check_authority)
+                # Admission for this segment: a resumed segment carries a
+                # NEW effective actor who was never checked in this
+                # process, and the job may have been queued long ago. Fail
+                # closed before burning provider tokens.
                 _check_authority()
                 requested_token_budget = int(
                     body.get("token_budget", 0) or 0
@@ -976,6 +1079,7 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                         },
                     )
                     requested_token_budget = None
+                segment_started = time.monotonic()  # narrow to pure execution
                 execute_run_request(
                     handle,
                     algorithm=algorithm,
@@ -988,18 +1092,41 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                     token_budget=requested_token_budget,
                     workspace_id=claimed.workspace_id,
                     authority_check=(
-                        _check_authority if principal is not None else None
+                        _check_authority
+                        if principal is not None
+                        else None
                     ),
+                    answer_publisher=self._answer_publisher,
                 )
             except Exception as exc:  # noqa: BLE001 — terminal-write then ack
                 log.exception("Worker-Run %s fehlgeschlagen", job.run_id)
                 terminate_native_run(handle, exc)
+            # Segment metric AFTER terminal resolution (including the
+            # exception path's terminate_native_run): the landed
+            # terminal (completed|failed|cancelled) or the park is the
+            # honest outcome. No landed terminal and no park = this
+            # attempt was fenced out on EITHER path — skip; the winning
+            # attempt records the segment.
+            if getattr(handle, "parked", False):
+                segment_outcome: str | None = "parked"
+            else:
+                segment_outcome = getattr(handle, "terminal_outcome", None)
+            if segment_outcome is not None:
+                _observe_run_segment(
+                    mode=str(getattr(run_request, "mode", "") or ""),
+                    outcome=segment_outcome,
+                    seconds=time.monotonic() - segment_started,
+                )
             if handle.terminal_landed or handle.parked:
                 # Terminal state is committed (or the run is PARKED in a
                 # waiting status — its resume re-enqueues a fresh
                 # message); only now may the stream forget the job.
                 self._queue.ack(job.message_id)
                 old_message_acked = True
+                _count_worker_job(
+                    "runs",
+                    "parked" if handle.parked else "terminal",
+                )
             else:
                 # Fenced out: a superseding attempt owns the run AND
                 # this very message id — acking here would strip the
@@ -1012,6 +1139,7 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                     self._store.worker_id,
                     job.run_id,
                 )
+                _count_worker_job("runs", "fenced")
         except Exception:  # noqa: BLE001 — Futures here are unobserved
             # A failing terminal write or ack must surface in the log,
             # not vanish inside a never-awaited Future; the message
@@ -1022,7 +1150,68 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                 self._store.worker_id,
                 job.run_id,
             )
+            _count_worker_job("runs", "finalization_failed")
         finally:
+            reset_log_context(log_tokens)
+            _clear_feature_after_segment()
+            telemetry_stack.close()
             self._finish_active(
                 job, allow_successor=old_message_acked
             )
+
+
+def _clear_feature_after_segment() -> None:
+    """Reused threads must not leak feature label or ledger subject."""
+    from inqtrix.observability.context import (
+        clear_feature,
+        clear_usage_subject,
+    )
+
+    clear_feature()
+    clear_usage_subject()
+
+
+def _observe_queue_wait(message_id: str) -> None:
+    """Queue-wait histogram from the Valkey stream id.
+
+    Stream ids are server-assigned ``<ms-epoch>-<seq>`` at XADD time, so
+    claim-time minus the id's timestamp IS the queue wait — no schema
+    change needed. Malformed ids (tests, other queue impls) are skipped.
+    """
+    from inqtrix.observability.metrics_defs import active_metrics
+
+    metrics = active_metrics()
+    if metrics is None:
+        return
+    try:
+        enqueued_ms = int(str(message_id).split("-", 1)[0])
+    except (TypeError, ValueError):
+        return
+    if enqueued_ms <= 0:
+        return
+    metrics.observe_queue_wait(
+        seconds=max(0.0, time.time() - enqueued_ms / 1000.0)
+    )
+
+
+def _count_worker_job(loop_name: str, outcome: str) -> None:
+    """worker_jobs_total feed — bounded outcome vocabulary."""
+    from inqtrix.observability.metrics_defs import active_metrics
+
+    metrics = active_metrics()
+    if metrics is not None:
+        metrics.count_worker_job(loop=loop_name, outcome=outcome)
+
+
+def _observe_run_segment(*, mode: str, outcome: str, seconds: float) -> None:
+    """run_duration histogram feed (per execution SEGMENT — parked runs
+    resume as fresh dispatches, so segments are the honest unit)."""
+    from inqtrix.observability.metrics_defs import active_metrics
+
+    metrics = active_metrics()
+    if metrics is not None:
+        metrics.observe_run(
+            mode=mode or "standard",
+            outcome=outcome,
+            duration_seconds=seconds,
+        )

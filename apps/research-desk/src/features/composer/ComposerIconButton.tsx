@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils'
  * instead of the dark `text-foreground` a bare ghost button inherits.
  */
 export const composerIconButtonClassName =
-  'h-7 w-7 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none [&_svg]:size-3.5 hover:bg-accent hover:text-foreground focus-visible:ring-1 data-[state=open]:bg-accent data-[state=open]:text-foreground'
+  'h-7 w-7 shrink-0 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none [&_svg]:size-3.5 hover:bg-accent hover:text-foreground focus-visible:ring-1 data-[state=open]:bg-accent data-[state=open]:text-foreground'
 
 type ComposerIconButtonProps = {
   active?: boolean

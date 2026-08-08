@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import uuid
 from contextlib import AbstractAsyncContextManager
-from typing import Sequence
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Sequence
 
 from sqlalchemy import and_, delete, func, insert, select, text, union, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -34,7 +35,6 @@ from inqtrix.storage.editor_orm import editor_documents
 from inqtrix.storage.identity_orm import (
     audit_log,
     resource_shares,
-    users,
     workspace_members,
     workspaces,
 )
@@ -42,6 +42,7 @@ from inqtrix.storage.knowledge_orm import knowledge_collections
 from inqtrix.storage.prompt_template_orm import prompt_templates
 from inqtrix.storage.runs_orm import runs
 from inqtrix.storage.resource_access import (
+    append_audit_row,
     lock_active_users,
     lock_workspace_memberships,
 )
@@ -50,6 +51,9 @@ from inqtrix.storage.user_events_postgres import (
     append_instance_admin_invalidations,
     append_user_invalidation,
 )
+
+if TYPE_CHECKING:
+    from inqtrix.auth.shares import ShareRecord
 
 
 _SHAREABLE_RESOURCE_OWNER_SOURCES = {
@@ -143,16 +147,24 @@ class PostgresIdentityBackend:
         action: str,
         detail: dict[str, str] | None = None,
     ) -> None:
-        """Write share audit plus owner/recipient invalidations atomically."""
-        await session.execute(
-            insert(audit_log).values(
-                tenant_id=row.tenant_id,
-                actor_user_id=actor_user_id,
-                action=action,
-                resource_type=row.resource_type,
-                resource_id=row.resource_id,
-                detail=detail or {},
-            )
+        """Write share audit plus owner/recipient invalidations atomically.
+
+        The audit row goes through ``append_audit_row`` so every share event
+        carries the actor pseudonym the admin panel reads and the logs use.
+        The invalidation stays targeted rather than reusing
+        ``append_resource_effects``: on a revocation the removed recipient is
+        no longer among the resource's current shares, so the set-based form
+        would leave exactly the person whose access just changed with a stale
+        cache.
+        """
+        await append_audit_row(
+            session,
+            tenant_id=row.tenant_id,
+            actor_user_id=actor_user_id,
+            action=action,
+            resource_type=row.resource_type,
+            resource_id=row.resource_id,
+            detail=detail,
         )
         targets = {row.recipient_user_id}
         if owner_user_id is not None:
@@ -736,12 +748,25 @@ class PostgresIdentityBackend:
                 )
             ).first()
             if row is not None:
+                # Same three cases the memory twin derives, from the same
+                # facts: who ended the share, and whether it was ever
+                # accepted. A single "removed" action cannot answer the
+                # question a rights audit asks.
+                action = (
+                    "share.declined"
+                    if revoked_by_user_id == pointer.recipient_user_id
+                    and pointer.accepted_at is None
+                    else "share.left"
+                    if revoked_by_user_id == pointer.recipient_user_id
+                    else "share.revoked"
+                )
                 await self._append_share_effects(
                     session,
                     row=row,
                     owner_user_id=owner_user_id,
                     actor_user_id=revoked_by_user_id,
-                    action="share.removed",
+                    action=action,
+                    detail={"recipient_user_id": str(row.recipient_user_id)},
                 )
         return self._share_record(row) if row is not None else None
 
@@ -1548,6 +1573,117 @@ class PostgresIdentityBackend:
     # AuditSink
     # ------------------------------------------------------------- #
 
+    async def list_audit_entries(
+        self,
+        *,
+        tenant_id: str,
+        action_prefix: str = "",
+        actor_pseudonym: str = "",
+        outcome: str = "",
+        resource_type: str = "",
+        resource_id: str = "",
+        occurred_from: float | None = None,
+        occurred_to: float | None = None,
+        before_id: int | None = None,
+        limit: int = 50,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Newest-first audit page for the admin panel (id-keyset).
+
+        Returns ``(rows, next_before_id)`` — ``next_before_id`` is the
+        cursor for the following page or ``None`` at the end. Rows are
+        JSON-ready dicts; ``occurred_at`` is epoch seconds.
+        """
+        conditions = [audit_log.c.tenant_id == tenant_id]
+        if action_prefix:
+            escaped = (
+                action_prefix.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            conditions.append(audit_log.c.action.like(f"{escaped}%"))
+        if actor_pseudonym:
+            conditions.append(
+                audit_log.c.actor_pseudonym == actor_pseudonym
+            )
+        if outcome:
+            conditions.append(audit_log.c.outcome == outcome)
+        if resource_type:
+            conditions.append(audit_log.c.resource_type == resource_type)
+        if resource_id:
+            conditions.append(audit_log.c.resource_id == resource_id)
+        if occurred_from is not None:
+            conditions.append(
+                audit_log.c.occurred_at
+                >= datetime.fromtimestamp(occurred_from, tz=timezone.utc)
+            )
+        if occurred_to is not None:
+            conditions.append(
+                audit_log.c.occurred_at
+                <= datetime.fromtimestamp(occurred_to, tz=timezone.utc)
+            )
+        if before_id is not None:
+            conditions.append(audit_log.c.id < before_id)
+        page_size = max(1, min(int(limit), 200))
+        async with self._session(tenant_id) as session:
+            rows = (
+                await session.execute(
+                    select(audit_log)
+                    .where(*conditions)
+                    .order_by(audit_log.c.id.desc())
+                    .limit(page_size + 1)
+                )
+            ).mappings().all()
+        items = [
+            {
+                "id": int(row["id"]),
+                "occurred_at": row["occurred_at"].timestamp(),
+                "action": row["action"],
+                "resource_type": row["resource_type"],
+                "resource_id": row["resource_id"],
+                "actor_pseudonym": row["actor_pseudonym"],
+                "actor_type": row["actor_type"],
+                "outcome": row["outcome"],
+                "workspace_id": (
+                    str(row["workspace_id"]) if row["workspace_id"] else None
+                ),
+                "detail": dict(row["detail"] or {}),
+                "origin": dict(row["origin"] or {}),
+                "correlation": dict(row["correlation"] or {}),
+            }
+            for row in rows[:page_size]
+        ]
+        next_before = (
+            items[-1]["id"] if len(rows) > page_size and items else None
+        )
+        return items, next_before
+
+    async def prune_audit_log(self, *, days: int) -> int:
+        """Delete audit rows older than ``days`` via the DEFINER door.
+
+        The app role deliberately holds INSERT/SELECT only on
+        ``audit_log``; ``audit_prune`` (migration 0072, SECURITY
+        DEFINER) is the one sanctioned deletion path — retention is an
+        instance-level policy, and only a row count comes back.
+
+        Tenant scope depends on the FUNCTION OWNER (empirically
+        verified): with an RLS-exempt owner (bundled superuser,
+        BYPASSRLS migration role) the prune is cross-tenant; under
+        ``INQTRIX_MIGRATION_RLS_MODE=owner`` FORCE RLS binds even the
+        owner, so the prune only covers the calling session's tenant —
+        the ``default`` tenant here, which equals every tenant in the
+        current single-tenant deployments. A future multi-tenant rollout
+        must revisit this before relying on 365-day retention.
+        """
+        async with self._session("default") as session:
+            result = await session.execute(
+                text(
+                    "SELECT audit_prune(now() - make_interval(days => "
+                    ":days))"
+                ),
+                {"days": int(days)},
+            )
+            return int(result.scalar() or 0)
+
     async def record(self, entry: AuditEntry) -> None:
         """Append one audit fact (INSERT-only grants on the table)."""
         async with self._session(entry.tenant_id) as session:
@@ -1560,5 +1696,10 @@ class PostgresIdentityBackend:
                     resource_type=entry.resource_type,
                     resource_id=entry.resource_id,
                     detail=dict(entry.detail),
+                    outcome=entry.outcome,
+                    origin=dict(entry.origin),
+                    correlation=dict(entry.correlation),
+                    actor_pseudonym=entry.actor_pseudonym,
+                    workspace_id=entry.workspace_id,
                 )
             )

@@ -10,6 +10,8 @@ import {
 
 const fallback: ProjectPreferences = {
   agentMemoryEnabled: false,
+  agentModelTier: '',
+  chatModelTier: '',
   contrastMode: 'standard',
   locale: 'en',
   theme: 'system',
@@ -23,11 +25,15 @@ describe('accountPreferencesSync', () => {
       contrast_mode: 'high', locale: 'de', theme: 'dark', theme_preset: 'sage',
       user_bubble_tone: 'mint',
       enable_agent_memory: true,
+      chat_model_tier: 'mid',
+      agent_model_tier: 'fast',
       updated_at: 1_700_000_000,
     }
     const prefs = preferencesFromServer(server, fallback)
     expect(prefs).toEqual({
       agentMemoryEnabled: true,
+      agentModelTier: 'fast',
+      chatModelTier: 'mid',
       contrastMode: 'high',
       locale: 'de',
       theme: 'dark',
@@ -43,6 +49,8 @@ describe('accountPreferencesSync', () => {
       theme_preset: 'sage',
       user_bubble_tone: 'mint',
       enable_agent_memory: true,
+      chat_model_tier: 'mid',
+      agent_model_tier: 'fast',
       updated_at: 42,
     })
   })
@@ -86,5 +94,69 @@ describe('accountPreferencesSync', () => {
     expect(preferencesFingerprint({ ...fallback, theme: 'dark' })).not.toBe(a)
     expect(preferencesFingerprint({ ...fallback, userBubbleTone: 'orange' })).not.toBe(a)
     expect(preferencesFingerprint({ ...fallback, agentMemoryEnabled: true })).not.toBe(a)
+  })
+
+  it('a changed model tier is visible to the autosave diff', () => {
+    // The fingerprint is the ONLY thing that decides whether a change is
+    // pushed. A field missing from it syncs silently never: the user picks a
+    // tier, no request goes out, nothing fails, and the value is gone after a
+    // reload.
+    const a = preferencesFingerprint(fallback)
+    expect(preferencesFingerprint({ ...fallback, chatModelTier: 'high' })).not.toBe(a)
+    expect(preferencesFingerprint({ ...fallback, agentModelTier: 'high' })).not.toBe(a)
+    // ...and the two surfaces are distinguishable from each other, so setting
+    // one does not read as having set the other.
+    expect(preferencesFingerprint({ ...fallback, chatModelTier: 'high' })).not.toBe(
+      preferencesFingerprint({ ...fallback, agentModelTier: 'high' }),
+    )
+  })
+
+  it('a chat tier from the server never lands on the agent', () => {
+    // An agent run fans out over several thinking nodes while a chat answer is
+    // a single call. If the mapping merged the two, a chat pick would raise
+    // agent spend the moment it synced.
+    const prefs = preferencesFromServer(
+      {
+        contrast_mode: 'standard', locale: 'en', theme: 'system',
+        theme_preset: 'standard', chat_model_tier: 'high', updated_at: 1,
+      },
+      fallback,
+    )
+    expect(prefs.chatModelTier).toBe('high')
+    expect(prefs.agentModelTier).toBe('')
+  })
+
+  it('keeps the local tiers when an old server row omits them', () => {
+    const prefs = preferencesFromServer(
+      {
+        contrast_mode: 'high', locale: 'de', theme: 'dark',
+        theme_preset: 'sage', updated_at: 1,
+      },
+      { ...fallback, chatModelTier: 'mid', agentModelTier: 'fast' },
+    )
+    expect(prefs.chatModelTier).toBe('mid')
+    expect(prefs.agentModelTier).toBe('fast')
+  })
+
+  it('rejects an out-of-domain tier but accepts the empty no-preference value', () => {
+    const corrupt = preferencesFromServer(
+      {
+        contrast_mode: 'standard', locale: 'en', theme: 'system',
+        theme_preset: 'standard', chat_model_tier: 'turbo', updated_at: 1,
+      },
+      { ...fallback, chatModelTier: 'mid' },
+    )
+    expect(corrupt.chatModelTier).toBe('mid')
+
+    // '' is a legitimate stored value, not a corrupt one: it means the user
+    // cleared their preference, which must survive the round trip.
+    const cleared = preferencesFromServer(
+      {
+        contrast_mode: 'standard', locale: 'en', theme: 'system',
+        theme_preset: 'standard', chat_model_tier: '', updated_at: 1,
+      },
+      { ...fallback, chatModelTier: 'mid' },
+    )
+    expect(cleared.chatModelTier).toBe('')
   })
 })

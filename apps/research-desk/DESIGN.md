@@ -24,24 +24,58 @@ not decorative.*
 
 ### Principles
 
-- **P1 — Density with calm.** Compact ≠ cramped. A 4px spacing grid, clear grouping, lots of quiet
+- **Density with calm.** Compact ≠ cramped. A 4px spacing grid, clear grouping, lots of quiet
   structure. Every element earns its place; no filler, no decorative numbers. Prefer one more line of
   content over one line of air.
-- **P2 — Colour is function.** Neutral by default. The brand accent only for selection, the primary
+- **Colour is function.** Neutral by default. The brand accent only for selection, the primary
   action, and identity; the semantic set (success / warning / destructive / file) only for real
   status. Same colour ⇒ same meaning. No gradients, no colourful tiles, no emojis. (§5)
-- **P3 — Separation by line & space.** Hairline 1px borders, whitespace, and gentle surface shifts
+- **Separation by line & space.** Hairline 1px borders, whitespace, and gentle surface shifts
   (`surface`/`card`) instead of heavy colour blocks. Shadows soft and sparse, never hard. (§6)
-- **P4 — Hierarchy via size *and* weight.** A real size step (`display 24 > page title 16 > section/card 14 > body 14 >
+- **Hierarchy via size *and* weight.** A real size step (`display 24 > page title 16 > section/card 14 > body 14 >
   list 13 > label/meta 12 > 11 > 10`, §2) **plus** weight; secondary text is `muted-foreground`;
   numbers/IDs are mono + `tabular-nums`. Few sizes, each owned by a role.
-- **P5 — Motion explains, it doesn't entertain.** Animation shows origin (entry), state (loading,
+- **Motion explains, it doesn't entertain.** Animation shows origin (entry), state (loading,
   active) and change (height, counts). Short, soft, directed. Nothing blinks, bounces or spins forever
   on real content — loops are reserved for "working" signals.
-- **P6 — Consistency beats creativity.** One popover layout, one active-accent, one hover-card style,
+- **Consistency beats creativity.** One popover layout, one active-accent, one hover-card style,
   one empty-state schema everywhere. Recognisability = trust.
-- **P7 — Accessible by default.** Visible focus ring, full keyboard paths, sufficient contrast,
+- **Accessible by default.** Visible focus ring, full keyboard paths, sufficient contrast,
   hit-targets ≥ icon-button size, `prefers-reduced-motion` respected, dark/light equal.
+
+### Reuse before abstraction
+
+Search for an existing semantic token, motion contract, icon role, text role,
+or UI primitive before adding a local value or component. Shared abstractions
+represent a shared responsibility, not merely a similar appearance.
+
+A genuinely unique feature composition may remain local while using the
+existing visual language wherever its roles apply. When the same semantic role
+or interaction contract appears independently in more than one feature,
+extend an existing primitive or extract one shared implementation instead of
+copying it. Do not introduce a global token or primitive for speculative
+future reuse.
+
+The ownership flow is:
+
+```text
+Design tokens and motion contracts
+        ↓
+Shared UI primitives
+        ↓
+Feature-owned compositions
+```
+
+Central primitives expose deliberate variants. Feature code must not fork a
+primitive solely to change a size, colour, easing, or state treatment that
+belongs to the same semantic role. A new shared token or variant names its
+purpose, documents its intended consumers here, and is verified against all
+existing consumers. If two consumers require different contracts, keep them
+separate instead of accumulating unrelated conditionals.
+
+This rule does not ban local values categorically. Feature-specific spatial
+flows, one-off diagrams, and domain-specific animation may stay local when
+they do not establish a reusable role.
 
 ### Motion (as implemented)
 
@@ -66,6 +100,25 @@ Easing is `cubic-bezier(0.22, 1, 0.36, 1)` (soft settle); UI transitions ≤ ~0.
 
 **Rules:** no endless animation on real content (loops only for "working" signals); everything is
 `prefers-reduced-motion`-safe (decorative motion off; the visible end-state is the base); off in print/PDF.
+
+### Spatial continuity and disclosure
+
+Motion preserves object identity when the same conceptual object changes
+state. Use a shared-bound or container transition only when source and
+destination represent that same object. Otherwise use a short fade-through or
+directed transition. Keep persistent chrome stable, animate transform and
+opacity where possible, and never delay interaction until an animation
+completes.
+
+Productive motion is the default. Reserve expressive motion for infrequent,
+meaningful moments such as a completed run, a major mode change, or an
+explicitly invoked AI operation. Morphing communicates continuity; it is not
+decoration. Reduced motion replaces spatial movement, scaling, blur, and
+repeated animation with an immediate state change or brief opacity transition.
+
+Primary actions, critical status, errors, and required inputs remain visible.
+Secondary actions may appear on hover, keyboard focus, selection, or explicit
+disclosure.
 
 ### Interaction patterns (reuse these — they are the reference look)
 
@@ -175,7 +228,7 @@ numbers · ad-hoc `text-[..px]` (the guard warns) · a `.t-*` role on a `<Button
    new ad-hoc `text-[..px]`/`leading-[..]` under `src/features/**`, so a size can only enter the app as
    a role defined here. Treat `DESIGN.md` as part of the public contract (see
    `docs/development/docs-maintenance.md`).
-5. **The Markdown renderer is off-limits** — see §9.
+5. **The Markdown renderer has its own reading-system contract** — see §9.
 6. **Compact by default.** The app favours dense, compact layouts; pick the tighter role when in doubt.
 7. **Roles lose to utilities — never put a `.t-*` role on a `<Button>` (or any element that also
    carries a `text-*` utility).** The roles live in `@layer components`, which Tailwind ranks *below*
@@ -335,6 +388,13 @@ Colours are OKLCH tokens in `globals.css` (4 presets + dark + high-contrast). Us
 | Incognito chat header | `.inqtrix-chat-header--incognito` (token scope, `globals.css`) | Applied to the chat header bar only when incognito is active. Re-maps the subtree's neutral/brand tokens to the **inverted** surface (dark bar in light mode, light bar in dark mode) by deriving everything from `--primary` / `--primary-foreground`, so it stays correct across presets and high-contrast. Signals the "nothing is saved" state; title, icons and badge follow automatically. Not a `.t-*` role — a surface scope; keep in sync with `globals.css`. |
 | Muted / disabled | `text-muted-foreground`, disabled `text-muted-foreground/45` | Secondary text and disabled controls |
 
+Semantic foreground tokens (`brand`, `success`, `warning`, `file`, and
+`muted-foreground`) are the readable text variants as well as the icon colours.
+Normal informative text must use the token at full opacity so it remains WCAG
+AA on both the base and matching subtle surface. Opacity modifiers are reserved
+for decorative glyphs or genuinely disabled content; they must not be used to
+make counts, timestamps, labels, identifiers, statuses, or metadata quieter.
+
 ---
 
 ## 6. Surface — radius & shadow tiers
@@ -390,12 +450,12 @@ category eyebrow (dot + label + count), do **not** repeat that category as a fil
 
 ---
 
-## 9. The Markdown renderer is off-limits
+## 9. Markdown reading-system contract
 
 The Markdown rendering used in the **chat messages, editor document and report panel** is intentionally
-**not** governed by these roles. Leave the following untouched — they are a deliberate, well-tuned
-reading system with their own scale (e.g. report body line-height 1.75 vs. chat 1.45 is a wanted
-difference):
+**not** governed by these roles. The following form a deliberate reading system
+with their own scale (e.g. report body line-height 1.75 vs. chat 1.45 is a
+wanted difference):
 
 - [`src/components/markdown/MarkdownRenderer.tsx`](src/components/markdown/MarkdownRenderer.tsx)
 - the CSS classes `.editor-prose`, `.report-markdown`, `.chat-markdown` in `globals.css`
@@ -407,13 +467,16 @@ surface**, not a `.t-*` role — no §2/§3 row; keep it in sync with `globals.c
 
 The `.t-*` roles apply to **non-Markdown UI text only**.
 
-Performance changes may adjust how this renderer warms up, caches syntax highlighting, or shows an
-intermediate structural fallback. Those changes must preserve the final Markdown typography and
-component styling above; they are not permission to introduce a second Markdown look.
+Security, accessibility, correctness, and performance work may change the
+renderer. Such changes require focused regression coverage and a synchronized
+update to this contract when they alter the final typography, component
+styling, or interaction model. Performance changes may adjust warm-up, syntax
+highlighting caches, or the intermediate structural fallback without
+introducing a second Markdown look.
 All variants use the same synchronous Markdown parse; asynchronous work is limited to Shiki tokens
 and Mermaid SVGs inside their frame-one structural shells.
 
-**Mermaid figures** (plan M1 S6): a ```` ```mermaid ```` fence renders as a diagram via
+**Mermaid figures:** a ```` ```mermaid ```` fence renders as a diagram via
 [`src/components/markdown/MermaidFigure.tsx`](src/components/markdown/MermaidFigure.tsx) — the ONE
 integration point is the fence dispatch inside `MarkdownCodePre`, so every renderer consumer (chat,
 knowledge, reports, agent canvas, inline answers) gets it. A successful diagram is **unboxed** and
@@ -460,6 +523,7 @@ requests or a second image policy in individual consumers.
 3. Migrate existing usages to the role; never leave the same function on two values.
 4. Control labels (chips, tabs, kbd) belong in a `components/ui` primitive (§4), not a `.t-*` role —
    extend or add a primitive there so feature code stays free of raw `text-[..px]`.
-5. Verify visually (light + dark) and run `pnpm --filter @inqtrix/research-desk typecheck lint test`.
+5. Verify visually (light + dark) and run the npm workspace typecheck, lint,
+   and test commands from the repository root.
    The design-lint guard (`eslint.config.js`) warns on any new arbitrary `text-[..px]`/`leading-[..]`
    in `src/features/**` — keep it at zero.

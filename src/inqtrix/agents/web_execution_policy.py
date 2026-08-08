@@ -1,4 +1,4 @@
-"""Server-owned policy for multi-step web research in agent modes."""
+"""Server-owned depth and tier policy for shared multi-step web research."""
 
 from __future__ import annotations
 
@@ -38,7 +38,9 @@ def derive_web_research_policy(
     Args:
         depth: Centrally normalized agent depth.
         admitted_directive: Whether the request admission layer accepted the
-            ``web_research`` tool directive.
+            ``web_research`` tool directive. The flag remains compatible with
+            callers that use an explicit route, but normal adaptive runs no
+            longer require it.
         edited_plan: Whether the user explicitly selected research by editing
             the plan.
         tier: Selected Agent-Desk tier. Empty/``None`` reproduces the
@@ -47,8 +49,9 @@ def derive_web_research_policy(
             .TIER_POLICIES` (default child profile + per-task ceiling).
 
     Returns:
-        Permission plus the server-selected child profile. Normal runs without
-        explicit consent receive no research profile and must use instant web.
+        Permission plus the server-selected child profile. Normal adaptive
+        runs use the compact Research-Desk profile. A speed tier may disable
+        research and constrain the run to instant web.
 
     Raises:
         ValueError: If a caller bypasses the central depth normalization.
@@ -76,6 +79,8 @@ def derive_web_research_policy(
         )
     if depth == "deep":
         return WebResearchPolicy(allowed=True, profile="deep")
-    if admitted_directive or edited_plan:
-        return WebResearchPolicy(allowed=True, profile="compact")
-    return WebResearchPolicy(allowed=False, profile=None)
+    # The Kernel and Missions-Maschine both orchestrate the existing Research
+    # Desk rather than implementing their own search loop. In balanced/strict
+    # autonomy the child dispatch still goes through the normal approval
+    # policy; autonomous mode is itself the user's persisted consent.
+    return WebResearchPolicy(allowed=True, profile="compact")

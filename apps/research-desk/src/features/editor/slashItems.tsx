@@ -35,6 +35,7 @@ export type SlashLabels = {
   codeBlock: string
   table: string
   divider: string
+  suggestUnavailable: string
 }
 
 export type SlashItem = {
@@ -45,6 +46,8 @@ export type SlashItem = {
   /** Lowercased search terms (localized label + stable synonyms), so `/h1`,
    * `/todo`, `/table` match regardless of the UI language. */
   keywords: string
+  disabled?: boolean
+  description?: string
 }
 
 /** Full item list in display order, with icons + localized labels. */

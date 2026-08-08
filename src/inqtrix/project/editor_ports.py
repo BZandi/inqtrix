@@ -84,6 +84,18 @@ class FolderNotFound(KeyError):
     """Raised when a folder id is unknown to the store (maps to HTTP 404)."""
 
 
+class SuggestionDraftNotFound(KeyError):
+    """Raised when a private suggestion draft is absent for the caller."""
+
+
+class SuggestionDraftRevisionConflict(RuntimeError):
+    """Raised when a private-draft write loses its revision guard."""
+
+    def __init__(self, *, current_revision: int) -> None:
+        super().__init__(f"suggestion draft moved to revision {current_revision}")
+        self.current_revision = current_revision
+
+
 @dataclass(frozen=True)
 class EditorFolder:
     """One grouping of a user's editor documents (a tree folder).
@@ -144,7 +156,122 @@ class EditorDocument:
     persisted_sequence: int = 0
     projection_sequence: int = 0
     projection_updated_at: float | None = None
+    collaboration_comment_revision: int = 0
     deleted_at: float | None = None
+
+
+@dataclass(frozen=True)
+class EditorSuggestionDraftRevision:
+    """One prior private-draft value retained for user-visible undo context."""
+
+    proposed_text: str
+    source: str
+    created_at: float
+    instruction: str | None = None
+    change_summary: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EditorSuggestionDraft:
+    """Creator-private AI proposal attached to one private editor comment.
+
+    The UUID patch and command identifiers are allocated once when the draft
+    is created. They make publication replayable without creating a second
+    shared Yjs patch after a lost acknowledgement. The draft itself remains
+    private and is cleared in the same PostgreSQL transaction that persists
+    the shared suggestion.
+    """
+
+    suggestion_id: str
+    group_id: str
+    patch_id: str
+    publication_command_id: str
+    proposed_text: str = field(repr=False)
+    anchor_version: int = 1
+    revision: int = 1
+    change_summary: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    evidence: dict[str, Any] | None = None
+    revision_history: tuple[EditorSuggestionDraftRevision, ...] = ()
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+
+def suggestion_draft_payload(draft: EditorSuggestionDraft) -> dict[str, Any]:
+    """Return the canonical JSON-compatible private-draft representation."""
+    return {
+        "anchor_version": draft.anchor_version,
+        "change_summary": list(draft.change_summary),
+        "created_at": draft.created_at,
+        "evidence": dict(draft.evidence) if draft.evidence is not None else None,
+        "group_id": draft.group_id,
+        "patch_id": draft.patch_id,
+        "proposed_text": draft.proposed_text,
+        "publication_command_id": draft.publication_command_id,
+        "revision": draft.revision,
+        "revision_history": [
+            {
+                "change_summary": list(item.change_summary),
+                "created_at": item.created_at,
+                "instruction": item.instruction,
+                "proposed_text": item.proposed_text,
+                "source": item.source,
+                "warnings": list(item.warnings),
+            }
+            for item in draft.revision_history
+        ],
+        "suggestion_id": draft.suggestion_id,
+        "updated_at": draft.updated_at,
+        "warnings": list(draft.warnings),
+    }
+
+
+def suggestion_draft_from_payload(value: Any) -> EditorSuggestionDraft | None:
+    """Decode a store-owned draft; ``None`` remains the absent state."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("stored suggestion draft must be an object")
+    history = value.get("revision_history", [])
+    if not isinstance(history, list):
+        raise ValueError("stored suggestion draft history must be a list")
+    return EditorSuggestionDraft(
+        suggestion_id=str(value["suggestion_id"]),
+        group_id=str(value["group_id"]),
+        patch_id=str(value["patch_id"]),
+        publication_command_id=str(value["publication_command_id"]),
+        proposed_text=str(value["proposed_text"]),
+        anchor_version=int(value["anchor_version"]),
+        revision=int(value["revision"]),
+        change_summary=tuple(str(item) for item in value.get("change_summary", [])),
+        warnings=tuple(str(item) for item in value.get("warnings", [])),
+        evidence=(
+            dict(value["evidence"])
+            if isinstance(value.get("evidence"), dict)
+            else None
+        ),
+        revision_history=tuple(
+            EditorSuggestionDraftRevision(
+                proposed_text=str(item["proposed_text"]),
+                source=str(item["source"]),
+                created_at=float(item["created_at"]),
+                instruction=(
+                    str(item["instruction"])
+                    if item.get("instruction") is not None
+                    else None
+                ),
+                change_summary=tuple(
+                    str(entry) for entry in item.get("change_summary", [])
+                ),
+                warnings=tuple(str(entry) for entry in item.get("warnings", [])),
+            )
+            for item in history
+            if isinstance(item, dict)
+        ),
+        created_at=float(value["created_at"]),
+        updated_at=float(value["updated_at"]),
+    )
 
 
 @dataclass(frozen=True)
@@ -175,6 +302,7 @@ class EditorComment:
     updated_at: float = 0.0
     tenant_id: str = "default"
     created_by_user_id: uuid.UUID | None = None
+    suggestion_draft: EditorSuggestionDraft | None = None
 
 
 def comment_write_permission(content_mode: str) -> SharePermission:
@@ -342,6 +470,16 @@ class EditorStore(Protocol):
         """One keyset page of a document's comments (newest first)."""
         ...
 
+    async def get_comment(
+        self,
+        document_id: str,
+        comment_id: str,
+        *,
+        created_by_user_id: uuid.UUID | None = None,
+    ) -> EditorComment:
+        """Return one comment in its creator scope or raise not-found."""
+        ...
+
     async def delete_comment(
         self,
         *,
@@ -354,6 +492,36 @@ class EditorStore(Protocol):
         actor_user_id: uuid.UUID | None,
     ) -> None:
         """Delete one comment after transactional parent authorization."""
+        ...
+
+    async def save_comment_suggestion_draft(
+        self,
+        *,
+        document_id: str,
+        comment_id: str,
+        draft: EditorSuggestionDraft,
+        expected_revision: int,
+        expected_document_owner_user_id: uuid.UUID | None,
+        expected_document_workspace_id: str | None,
+        expected_document_content_mode: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> EditorSuggestionDraft:
+        """CAS-create or replace one creator-private suggestion draft."""
+        ...
+
+    async def delete_comment_suggestion_draft(
+        self,
+        *,
+        document_id: str,
+        comment_id: str,
+        expected_revision: int,
+        patch_id: str,
+        expected_document_owner_user_id: uuid.UUID | None,
+        expected_document_workspace_id: str | None,
+        expected_document_content_mode: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> None:
+        """CAS-delete one creator-private suggestion draft."""
         ...
 
     async def aclose(self) -> None:

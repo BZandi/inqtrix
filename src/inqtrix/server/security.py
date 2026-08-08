@@ -1,4 +1,4 @@
-"""Opt-in security helpers for the Inqtrix HTTP server (ADR-WS-7).
+"""Opt-in security helpers for the Inqtrix HTTP server.
 
 Three independent layers, all off-by-default and gated by env-driven
 ``ServerSettings`` fields:

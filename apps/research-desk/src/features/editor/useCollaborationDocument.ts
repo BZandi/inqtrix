@@ -5,15 +5,20 @@ import {
 import {
   EDITOR_COLLABORATION_PROTOCOL_VERSION,
   EDITOR_SCHEMA_VERSION,
+  INQTRIX_STRUCTURE_SUGGESTION_ATTR,
+  SUGGESTION_MARK_NAMES,
   isCollaborationDurableAck,
+  isStructureSuggestionData,
 } from '@inqtrix/editor-schema'
 import { useEffect, useMemo, useState } from 'react'
 import * as Y from 'yjs'
 
 import {
   createEditorCollaborationSession,
+  createGuestEditorCollaborationSession,
   type EditorCollaborationSession,
   type EditorCollaborationUser,
+  type EditorGuestAccessSession,
   type InqtrixRequestError,
 } from '@/api/inqtrixClient'
 import type {
@@ -22,9 +27,20 @@ import type {
   EditorDocumentRecord,
 } from '@/features/project/types'
 import type { CollaborationLiveAuthority } from './collaborationAuthority'
+import {
+  collaborationCommandId,
+  collaborationSha256Hex,
+} from './collaborationCrypto'
 
 export const COLLABORATION_UPDATE_BATCH_MS = 50
-const RECONNECT_DELAY_MS = 5_000
+export const COLLABORATION_RECONNECT_DELAYS_MS = [
+  1_000,
+  2_000,
+  4_000,
+  8_000,
+  15_000,
+  30_000,
+] as const
 const RELEASE_DURABILITY_TIMEOUT_MS = 60_000
 const RELEASE_FAILURE_TTL_MS = 5 * 60_000
 const MAX_RELEASE_FAILURES = 20
@@ -61,17 +77,20 @@ export type CollaborationProviderFactoryOptions = {
 }
 
 export type CollaborationDocumentHandle = {
-  access: 'edit' | 'suggest' | 'view' | null
+  access: 'comment' | 'edit' | 'suggest' | 'view' | null
   activityRevision: number
   authorityRevision: number
   canEdit: boolean
   blockingFailure: string | null
+  commentEventVersion: number
+  commentMentionEventVersion: number
   connectionStatus: EditorCollaborationConnectionStatus
   document: Y.Doc | null
   documentId: string | null
   durabilityStatus: EditorCollaborationDurabilityStatus
   error: string | null
   generation: number | null
+  hasUnconfirmedLocalChanges: boolean
   lastPersistedSequence: number
   lastLocalDurableSequence: number
   lifecycleStatus: 'connecting' | 'error' | 'inactive' | 'read_only' | 'reconnecting' | 'saved' | 'syncing'
@@ -79,6 +98,10 @@ export type CollaborationDocumentHandle = {
   pendingHashes: readonly string[]
   provider: HocuspocusProvider | null
   readAuthority: () => CollaborationLiveAuthority
+  reconnectAttempt: number
+  recoverability: 'login' | 'none' | 'reload' | 'retry'
+  retryConnection: () => Promise<void>
+  nextReconnectAt: number | null
   synced: boolean
   flushAndAwaitDurable: () => Promise<number>
   flushAndAwaitDurability: () => Promise<void>
@@ -108,6 +131,7 @@ export type CollaborationDocumentControllerDependencies = {
   ) => CollaborationProviderAdapter
   hashUpdate: (update: Uint8Array) => Promise<string>
   now: () => number
+  random: () => number
   scheduleTimer: (callback: () => void, delayMs: number) => number
 }
 
@@ -162,12 +186,12 @@ export class CollaborationDocumentController {
   private destroyed = false
   private durabilityFailed = false
   private editorInputAttached = true
-  private handlingClose = false
   private hashesInFlight = 0
   private ignoreNextClose = false
   private leaseToken: string | null = null
   private providerAdapter: CollaborationProviderAdapter | null = null
   private localUpdateTimer: number | null = null
+  private localUpdateBatchHasSuggestionBoundary = false
   private onReleaseFailed: ((error: string) => void) | null = null
   private onReleasedSettled: (() => void) | null = null
   private providerFlushMs = COLLABORATION_UPDATE_BATCH_MS
@@ -180,6 +204,7 @@ export class CollaborationDocumentController {
   private refreshTimer: number | null = null
   private room: string | null = null
   private rotationCommandId: string | null = null
+  private retryInFlight: Promise<void> | null = null
   private started = false
   private synced = false
   private state: CollaborationDocumentHandle
@@ -198,6 +223,8 @@ export class CollaborationDocumentController {
       authorityRevision: 0,
       blockingFailure: null,
       canEdit: false,
+      commentEventVersion: 0,
+      commentMentionEventVersion: 0,
       connectionStatus: 'inactive',
       document: this.document,
       documentId: options.documentId,
@@ -208,11 +235,16 @@ export class CollaborationDocumentController {
       lastPersistedSequence: options.initialPersistedSequence,
       lastLocalDurableSequence: 0,
       generation: options.generation,
+      hasUnconfirmedLocalChanges: false,
       lifecycleStatus: 'inactive',
       lifecycleKey: `${options.documentId}:g${options.generation}:${this.document.clientID}`,
       pendingHashes: [],
       provider: null,
       readAuthority: this.readAuthority,
+      reconnectAttempt: 0,
+      recoverability: 'none',
+      retryConnection: this.retryConnection,
+      nextReconnectAt: null,
       setAuthoritativeSequence: this.updateAuthoritativeSequence,
       synced: false,
       updateAuthoritativeSequence: this.updateAuthoritativeSequence,
@@ -277,6 +309,20 @@ export class CollaborationDocumentController {
     return this.state.lastLocalDurableSequence
   }
 
+  readonly retryConnection = async (): Promise<void> => {
+    if (this.retryInFlight) return this.retryInFlight
+    if (
+      this.destroyed
+      || this.state.recoverability !== 'retry'
+      || this.durabilityFailed
+    ) return
+    const retry = this.performManualRetry().finally(() => {
+      if (this.retryInFlight === retry) this.retryInFlight = null
+    })
+    this.retryInFlight = retry
+    return retry
+  }
+
   retain(): void {
     if (this.destroyed || !this.released) return
     this.released = false
@@ -289,7 +335,11 @@ export class CollaborationDocumentController {
     const canEdit = this.authenticated
       && this.synced
       && this.blockingFailure === null
-      && (this.state.access === 'edit' || this.state.access === 'suggest')
+      && (
+        this.state.access === 'comment'
+        || this.state.access === 'edit'
+        || this.state.access === 'suggest'
+      )
     this.publish({
       canEdit,
       synced: this.authenticated
@@ -377,6 +427,16 @@ export class CollaborationDocumentController {
     this.release()
   }
 
+  /**
+   * Permanently dispose a lifecycle after its unconfirmed local state was
+   * copied into a separate recovery artifact. This is intentionally distinct
+   * from normal release, which waits for durable acknowledgement and retains a
+   * failed controller for retry.
+   */
+  discardAfterRecoveryCapture(): void {
+    this.finalizeDestroy()
+  }
+
   private finalizeDestroy(): void {
     if (this.destroyed) return
     const onSettled = this.onReleasedSettled
@@ -409,12 +469,24 @@ export class CollaborationDocumentController {
     const currentToken = this.leaseToken
     if (!currentToken || this.destroyed) return
     this.clearRefreshTimer()
-    this.publish({
-      canEdit: false,
-      connectionStatus: mode === 'reconnect' ? 'reconnecting' : 'connecting',
-      error: null,
-      lifecycleStatus: mode === 'reconnect' ? 'reconnecting' : 'connecting',
-    })
+    if (mode === 'reconnect') {
+      this.publish({
+        canEdit: false,
+        connectionStatus: 'reconnecting',
+        error: null,
+        lifecycleStatus: 'reconnecting',
+        nextReconnectAt: null,
+        recoverability: 'retry',
+      })
+    } else {
+      // Hocuspocus token sync is deliberately one-way: sendToken() resolves
+      // after sending and the server updates the connection context without a
+      // second "authenticated" response. Keep the already-authenticated,
+      // already-synced transport ready while its lease rotates. Any HTTP,
+      // send, or later server-close failure still enters the fail-closed
+      // reconnect path below.
+      this.publish({ error: null })
+    }
     try {
       const rotationCommandId = this.rotationCommandId
         ?? this.dependencies.createCommandId()
@@ -430,9 +502,19 @@ export class CollaborationDocumentController {
         await this.providerAdapter.connect()
       } else {
         await this.providerAdapter.syncToken()
+        this.publishReadiness()
       }
     } catch (error) {
-      if (requestStatus(error) === 401 && !this.destroyed) {
+      const status = requestStatus(error)
+      if (
+        (status === 401 || status === 403 || status === 404)
+        && !this.destroyed
+      ) {
+        // A policy event invalidates the old lease for both a real revocation
+        // and a still-authorized permission downgrade. Re-issuing once through
+        // the cookie-authenticated session boundary is the only trustworthy
+        // way to distinguish those cases: a downgrade returns a fresh
+        // read-only lease, while a revocation remains a non-disclosing 404.
         this.rotationCommandId = null
         try {
           const session = await this.options.requestSession()
@@ -441,6 +523,7 @@ export class CollaborationDocumentController {
             await this.providerAdapter.connect()
           } else {
             await this.providerAdapter.syncToken()
+            this.publishReadiness()
           }
           return
         } catch (recoveryError) {
@@ -450,6 +533,26 @@ export class CollaborationDocumentController {
       }
       this.handleSessionFailure(error, true)
     }
+  }
+
+  private readonly performManualRetry = async (): Promise<void> => {
+    this.clearReconnectTimer()
+    this.publish({
+      canEdit: false,
+      connectionStatus: 'reconnecting',
+      error: null,
+      lifecycleStatus: 'reconnecting',
+      nextReconnectAt: null,
+      recoverability: 'retry',
+      synced: false,
+    })
+    this.disconnectTransport()
+    if (this.leaseToken && this.providerAdapter) {
+      await this.refreshLease('reconnect')
+      return
+    }
+    this.started = false
+    await this.start()
   }
 
   private applySession(
@@ -496,13 +599,31 @@ export class CollaborationDocumentController {
       this.enterAccessRevoked('Collaboration identity changed while refreshing access.')
       return false
     }
+    if (
+      !initial
+      && this.state.access !== 'view'
+      && session.access === 'view'
+      && this.hasUnreconciledUpdates()
+    ) {
+      this.enterAccessChangeWithUnconfirmedUpdates()
+      return false
+    }
     this.room = session.room
     this.leaseToken = session.lease_token
     this.providerFlushMs = providerFlushMs ?? COLLABORATION_UPDATE_BATCH_MS
     this.scheduleRefresh(session.expires_at, refreshAfter)
+    const preserveCanEdit = (
+      !initial
+      && this.state.canEdit
+      && (
+        session.access === 'comment'
+        || session.access === 'edit'
+        || session.access === 'suggest'
+      )
+    )
     this.publish({
       access: session.access,
-      canEdit: false,
+      canEdit: preserveCanEdit,
       connectionStatus: initial ? 'connecting' : this.state.connectionStatus,
       error: null,
       lifecycleStatus: initial ? 'connecting' : this.state.lifecycleStatus,
@@ -548,13 +669,13 @@ export class CollaborationDocumentController {
       return
     }
     if (reason.includes('access_revoked')) {
-      this.enterAccessRevoked('Access to this collaboration document was revoked.')
+      this.revalidateAccess()
       return
     }
     this.enterReconnect('Collaboration authentication failed; reconnecting read-only.')
   }
 
-  private readonly handleClose = (code: number): void => {
+  private readonly handleClose = (code: number, reason: string): void => {
     if (this.destroyed) return
     this.authenticated = false
     this.synced = false
@@ -563,26 +684,46 @@ export class CollaborationDocumentController {
       this.ignoreNextClose = false
       return
     }
-    this.handlingClose = true
-    try {
-      if (code === 4409) {
-        this.enterIncompatible('The collaboration protocol is not compatible with this client.')
-        return
-      }
-      if (code === 4403) {
-        this.enterAccessRevoked('Access to this collaboration document was revoked.')
-        return
-      }
-      if (code === 1009) {
-        this.enterDurabilityFailure(
-          'The collaboration document exceeded the supported update size.',
-        )
-        return
-      }
-      this.enterReconnect('The collaboration connection was interrupted; reconnecting read-only.')
-    } finally {
-      this.handlingClose = false
+    // The reason decides and the code only confirms. A close the server sends
+    // in band reaches the provider with its code rewritten to 1000 and only
+    // the reason preserved, so branching on the code first is blind to every
+    // close the collaboration service itself initiates.
+    if (isCompatibilityReason(reason) || code === 4409) {
+      this.enterIncompatible('The collaboration protocol is not compatible with this client.')
+      return
     }
+    if (reason.includes('origin_rejected')) {
+      // A transport misconfiguration, not a permission change: the address the
+      // browser reached is not the one the server publishes as its public
+      // origin. Terminal like any other incompatibility, but it must not be
+      // reported as a revoked authorization or the operator searches the
+      // sharing settings instead of the base URL.
+      this.enterOriginRejected(
+        'The collaboration server rejected this page origin. The address the browser '
+        + 'uses does not match the configured public address of the server.',
+      )
+      return
+    }
+    if (reason.includes('suggestion_policy_violation')) {
+      this.enterDurabilityFailure(
+        'The proposed editor action was rejected by the collaboration policy. '
+        + 'Your local document state is retained for diagnosis or backup.',
+      )
+      return
+    }
+    if (reason.includes('access_revoked') || code === 4403) {
+      // Revalidate rather than declare: the authoritative revocation comes
+      // from the access refresh answering 403/404, not from a close frame.
+      this.revalidateAccess()
+      return
+    }
+    if (reason.includes('message_too_large') || code === 1009) {
+      this.enterDurabilityFailure(
+        'The collaboration document exceeded the supported update size.',
+      )
+      return
+    }
+    this.enterReconnect('The collaboration connection was interrupted; reconnecting read-only.')
   }
 
   private readonly handleStateless = (payload: string): void => {
@@ -618,6 +759,20 @@ export class CollaborationDocumentController {
       this.handleDurabilitySettled()
       return
     }
+    if (
+      isCollaborationCommentEvent(message, this.options.documentId)
+    ) {
+      this.publish({
+        commentEventVersion: this.state.commentEventVersion + 1,
+        ...(message.type === 'collaboration_comment_mentioned'
+          ? {
+              commentMentionEventVersion:
+                this.state.commentMentionEventVersion + 1,
+            }
+          : {}),
+      })
+      return
+    }
     if (isDurableRejection(message)) {
       this.enterDurabilityFailure(
         `A collaboration update was rejected (${message.code}).`,
@@ -634,7 +789,34 @@ export class CollaborationDocumentController {
       || this.durabilityFailed
       || origin === REMOTE_EDITOR_ORIGIN
     ) return
+    const suggestionUpdate = classifySuggestionUpdate(update)
+    // Suggestion metadata starts a distinct server-policy transaction. This
+    // keeps editor normalization or another direct edit out of the first
+    // proposal while retaining normal batching for consecutive suggestion
+    // text. A slash structure command adds a second boundary because the
+    // server must inspect its short-lived `/query` insertion before Yjs can
+    // garbage-collect it into the structure proposal.
+    if (
+      this.localUpdateBatch.length > 0
+      && (
+        suggestionUpdate.hasStructure
+        || (
+          suggestionUpdate.hasSuggestionBoundary
+          && !this.localUpdateBatchHasSuggestionBoundary
+        )
+      )
+    ) {
+      if (this.localUpdateTimer !== null) {
+        this.dependencies.cancelTimer(this.localUpdateTimer)
+        this.localUpdateTimer = null
+      }
+      this.flushLocalUpdateBatch()
+    }
     this.localUpdateBatch.push(update)
+    this.localUpdateBatchHasSuggestionBoundary = (
+      this.localUpdateBatchHasSuggestionBoundary
+      || suggestionUpdate.hasSuggestionBoundary
+    )
     this.publish({ durabilityStatus: 'pending' })
     if (this.localUpdateTimer !== null) return
     this.localUpdateTimer = this.dependencies.scheduleTimer(
@@ -667,8 +849,35 @@ export class CollaborationDocumentController {
       || this.localUpdateBatch.length === 0
     ) return
     const update = Y.mergeUpdates(this.localUpdateBatch.splice(0))
-    this.trackSentUpdate(update)
-    Y.applyUpdate(this.transportDocument, update, LOCAL_TRANSPORT_ORIGIN)
+    this.localUpdateBatchHasSuggestionBoundary = false
+    let transportedUpdate: Uint8Array | null = null
+    const captureTransportedUpdate = (
+      emittedUpdate: Uint8Array,
+      origin: unknown,
+    ): void => {
+      if (origin === LOCAL_TRANSPORT_ORIGIN) {
+        transportedUpdate = Uint8Array.from(emittedUpdate)
+      }
+    }
+    this.transportDocument.on('update', captureTransportedUpdate)
+    try {
+      Y.applyUpdate(this.transportDocument, update, LOCAL_TRANSPORT_ORIGIN)
+    } finally {
+      this.transportDocument.off('update', captureTransportedUpdate)
+    }
+    // The editor document may merge a local transaction with structs that
+    // already arrived remotely on the transport document. Yjs removes those
+    // redundant structs before emitting the actual provider update. Durable
+    // acknowledgements hash that emitted payload, so tracking the pre-merge
+    // input can leave a phantom pending hash forever after concurrent edits.
+    if (transportedUpdate) {
+      this.trackSentUpdate(transportedUpdate)
+      return
+    }
+    this.publish({
+      durabilityStatus: this.hasPendingDurability() ? 'pending' : 'saved',
+    })
+    this.handleDurabilitySettled()
   }
 
   private trackSentUpdate(update: Uint8Array): void {
@@ -715,6 +924,21 @@ export class CollaborationDocumentController {
       this.enterAccessRevoked('Access to this collaboration document is unavailable.')
       return
     }
+    if (status === 401) {
+      this.clearRefreshTimer()
+      this.clearReconnectTimer()
+      this.disconnectTransport()
+      this.publish({
+        canEdit: false,
+        connectionStatus: 'error',
+        error: 'The collaboration session expired. Sign in again to continue.',
+        lifecycleStatus: 'error',
+        nextReconnectAt: null,
+        recoverability: 'login',
+        synced: false,
+      })
+      return
+    }
     if (refresh) {
       this.enterReconnect('The collaboration lease could not be refreshed; reconnecting read-only.')
       return
@@ -726,6 +950,8 @@ export class CollaborationDocumentController {
       connectionStatus: 'error',
       error: messageFromError(error),
       lifecycleStatus: 'error',
+      nextReconnectAt: null,
+      recoverability: 'retry',
     })
   }
 
@@ -735,21 +961,61 @@ export class CollaborationDocumentController {
       || this.hasUnreconciledUpdates()
     this.clearRefreshTimer()
     this.disconnectTransport()
+    const reconnectAttempt = this.state.reconnectAttempt + 1
+    const delayMs = collaborationReconnectDelayMs(
+      reconnectAttempt,
+      this.dependencies.random(),
+    )
+    const nextReconnectAt = this.dependencies.now() + delayMs
     this.publish({
       canEdit: false,
       connectionStatus: 'reconnecting',
       error,
       lifecycleStatus: 'reconnecting',
+      nextReconnectAt,
+      reconnectAttempt,
+      recoverability: 'retry',
       synced: false,
     })
     this.clearReconnectTimer()
     this.reconnectTimer = this.dependencies.scheduleTimer(() => {
       this.reconnectTimer = null
+      this.publish({ nextReconnectAt: null })
       void this.refreshLease('reconnect')
-    }, RECONNECT_DELAY_MS)
+    }, delayMs)
+  }
+
+  private revalidateAccess(): void {
+    if (this.hasUnreconciledUpdates()) {
+      this.enterAccessChangeWithUnconfirmedUpdates()
+      return
+    }
+    if (
+      this.state.connectionStatus === 'reconnecting'
+      && (this.reconnectTimer !== null || this.refreshInFlight !== null)
+    ) return
+    this.enterReconnect('Collaboration access changed; revalidating read-only.')
+  }
+
+  private enterAccessChangeWithUnconfirmedUpdates(): void {
+    this.enterDurabilityFailure(
+      'Collaboration access changed before local updates were durably confirmed. '
+      + 'Your local document state is retained for recovery or backup.',
+    )
   }
 
   private enterIncompatible(error: string): void {
+    this.enterUnrecoverable('incompatible', error)
+  }
+
+  private enterOriginRejected(error: string): void {
+    this.enterUnrecoverable('origin_rejected', error)
+  }
+
+  private enterUnrecoverable(
+    connectionStatus: 'incompatible' | 'origin_rejected',
+    error: string,
+  ): void {
     const durabilityStatus = this.hasUnreconciledUpdates()
       ? 'error'
       : this.state.durabilityStatus
@@ -759,10 +1025,12 @@ export class CollaborationDocumentController {
     this.disconnectTransport()
     this.publish({
       canEdit: false,
-      connectionStatus: 'incompatible',
+      connectionStatus,
       durabilityStatus,
       error,
       lifecycleStatus: 'error',
+      nextReconnectAt: null,
+      recoverability: 'reload',
       synced: false,
     })
     this.rejectDurabilityWaiters(new Error(error))
@@ -784,6 +1052,8 @@ export class CollaborationDocumentController {
       durabilityStatus,
       error,
       lifecycleStatus: 'error',
+      nextReconnectAt: null,
+      recoverability: 'none',
       synced: false,
     })
     this.rejectDurabilityWaiters(new Error(error))
@@ -800,6 +1070,8 @@ export class CollaborationDocumentController {
       durabilityStatus: 'error',
       error,
       lifecycleStatus: 'error',
+      nextReconnectAt: null,
+      recoverability: 'none',
       synced: false,
     })
     this.rejectDurabilityWaiters(new Error(error))
@@ -843,6 +1115,7 @@ export class CollaborationDocumentController {
       this.localUpdateTimer = null
     }
     this.localUpdateBatch.splice(0)
+    this.localUpdateBatchHasSuggestionBoundary = false
   }
 
   private flushScheduledBatch(): void {
@@ -866,7 +1139,7 @@ export class CollaborationDocumentController {
   }
 
   private disconnectTransport(): void {
-    if (!this.providerAdapter || this.handlingClose) return
+    if (!this.providerAdapter) return
     this.authenticated = false
     this.synced = false
     this.replayedPendingHashes.clear()
@@ -942,6 +1215,8 @@ export class CollaborationDocumentController {
       durabilityStatus: 'error',
       error,
       lifecycleStatus: 'error',
+      nextReconnectAt: null,
+      recoverability: 'none',
       synced: false,
     })
     this.rejectDurabilityWaiters(new Error(error))
@@ -957,12 +1232,19 @@ export class CollaborationDocumentController {
       || this.blockingFailure !== null
     ) return
     const canEdit = !this.released
-      && (this.state.access === 'edit' || this.state.access === 'suggest')
+      && (
+        this.state.access === 'comment'
+        || this.state.access === 'edit'
+        || this.state.access === 'suggest'
+      )
     this.publish({
       canEdit,
       connectionStatus: this.readyConnectionStatus(),
       error: null,
       lifecycleStatus: this.readyLifecycleStatus(),
+      nextReconnectAt: null,
+      reconnectAttempt: 0,
+      recoverability: 'none',
       synced: true,
     })
   }
@@ -1010,6 +1292,7 @@ export class CollaborationDocumentController {
     const nextState = {
       ...this.state,
       ...patch,
+      hasUnconfirmedLocalChanges: this.hasPendingDurability(),
       pendingHashes: [...this.pendingHashes],
     }
     this.state = {
@@ -1019,6 +1302,50 @@ export class CollaborationDocumentController {
         : this.state.authorityRevision,
     }
     for (const listener of this.listeners) listener(this.state)
+  }
+}
+
+export function containsStructureSuggestionAttribute(
+  update: Uint8Array,
+): boolean {
+  return classifySuggestionUpdate(update).hasStructure
+}
+
+export function containsSuggestionBoundary(update: Uint8Array): boolean {
+  return classifySuggestionUpdate(update).hasSuggestionBoundary
+}
+
+function classifySuggestionUpdate(update: Uint8Array): {
+  hasStructure: boolean
+  hasSuggestionBoundary: boolean
+} {
+  try {
+    let hasStructure = false
+    let hasSuggestionBoundary = false
+    for (const struct of Y.decodeUpdate(update).structs) {
+      if (!(struct instanceof Y.Item)) continue
+      const structure = (
+        struct.parentSub === INQTRIX_STRUCTURE_SUGGESTION_ATTR
+        || (
+          struct.content instanceof Y.ContentAny
+          && struct.content.getContent().length === 1
+          && isStructureSuggestionData(struct.content.getContent()[0])
+        )
+      )
+      if (structure) {
+        hasStructure = true
+        hasSuggestionBoundary = true
+      }
+      if (
+        struct.content instanceof Y.ContentFormat
+        && SUGGESTION_MARK_NAMES.has(struct.content.key)
+      ) {
+        hasSuggestionBoundary = true
+      }
+    }
+    return { hasStructure, hasSuggestionBoundary }
+  } catch {
+    return { hasStructure: false, hasSuggestionBoundary: false }
   }
 }
 
@@ -1059,6 +1386,38 @@ export function releaseLifecycleController(
     },
     (error) => recordLifecycleFailure(key, error),
   )
+}
+
+export function retireCollaborationDocumentLifecycle({
+  documentId,
+  generation,
+  workspaceId,
+}: {
+  documentId: string
+  generation: number
+  workspaceId: string
+}): boolean {
+  const key = `${workspaceId}:${documentId}:g${generation}`
+  const entry = lifecycleRegistry.get(key)
+  if (!entry) return false
+  lifecycleRegistry.delete(key)
+  lifecycleFailures.delete(key)
+  entry.controller.discardAfterRecoveryCapture()
+  return true
+}
+
+export function collaborationDocumentLifecycleHasUnconfirmedChanges({
+  documentId,
+  generation,
+  workspaceId,
+}: {
+  documentId: string
+  generation: number
+  workspaceId: string
+}): boolean {
+  return lifecycleRegistry
+    .get(`${workspaceId}:${documentId}:g${generation}`)
+    ?.controller.getSnapshot().hasUnconfirmedLocalChanges === true
 }
 
 function recordLifecycleFailure(key: string, error: string): void {
@@ -1165,6 +1524,96 @@ export function useCollaborationDocument({
   )
 }
 
+export function useGuestCollaborationDocument({
+  access,
+  active,
+}: {
+  access: EditorGuestAccessSession | null
+  active: boolean
+}): CollaborationDocumentHandle {
+  const documentId = access?.document.id ?? null
+  const generation = access?.document.generation ?? null
+  const persistedSequence = access?.document.persisted_sequence ?? 0
+  const guestId = access?.guest.id ?? null
+  const displayName = access?.guest.display_name ?? undefined
+  const collaborationActive = (
+    active
+    && documentId !== null
+    && generation !== null
+    && guestId !== null
+  )
+  const requestedInactiveHandle = useMemo(
+    () => inactiveHandle(documentId, generation),
+    [documentId, generation],
+  )
+  const [state, setState] = useState<CollaborationDocumentHandle>(
+    () => requestedInactiveHandle,
+  )
+
+  useEffect(() => {
+    if (
+      !collaborationActive
+      || documentId === null
+      || generation === null
+      || guestId === null
+    ) {
+      setState(requestedInactiveHandle)
+      return
+    }
+    const lifecycleRegistryKey = (
+      `guest:${guestId}:${documentId}:g${generation}`
+    )
+    const controller = acquireLifecycleController(
+      lifecycleRegistryKey,
+      () => new CollaborationDocumentController({
+        documentId,
+        generation,
+        initialPersistedSequence: persistedSequence,
+        requestSession: (leaseToken, rotationCommandId) => (
+          createGuestEditorCollaborationSession({
+            protocol_version: EDITOR_COLLABORATION_PROTOCOL_VERSION,
+            schema_version: EDITOR_SCHEMA_VERSION,
+            ...(displayName === undefined
+              ? {}
+              : { display_name: displayName }),
+            ...(leaseToken === undefined
+              ? {}
+              : { lease_token: leaseToken }),
+            ...(rotationCommandId === undefined
+              ? {}
+              : { rotation_command_id: rotationCommandId }),
+          })
+        ),
+        resolveWebSocketUrl: collaborationWebSocketUrl,
+        schemaVersion: EDITOR_SCHEMA_VERSION,
+      }),
+    )
+    const unsubscribe = controller.subscribe(setState)
+    setState(controller.getSnapshot())
+    void controller.start()
+    return () => {
+      unsubscribe()
+      releaseLifecycleController(lifecycleRegistryKey, controller)
+    }
+  }, [
+    collaborationActive,
+    displayName,
+    documentId,
+    generation,
+    guestId,
+    persistedSequence,
+    requestedInactiveHandle,
+  ])
+
+  return collaborationHandleForRequestedDocument(
+    state,
+    documentId,
+    generation,
+    collaborationActive,
+    requestedInactiveHandle,
+  )
+}
+
 /** Never expose a retained lifecycle snapshot under a newly requested
  * document while React is waiting to run the switch effect. */
 export function collaborationHandleForRequestedDocument(
@@ -1197,6 +1646,23 @@ export function leaseRefreshDelayMs(expiresAt: number, nowMs: number): number {
   const remainingMs = expiresAt * 1_000 - nowMs
   return Math.max(1_000, Math.floor(remainingMs / 2))
 }
+
+export function collaborationReconnectDelayMs(
+  attempt: number,
+  randomValue: number,
+): number {
+  const safeAttempt = Math.max(1, Math.floor(attempt))
+  const baseDelay = COLLABORATION_RECONNECT_DELAYS_MS[
+    Math.min(safeAttempt - 1, COLLABORATION_RECONNECT_DELAYS_MS.length - 1)
+  ] ?? COLLABORATION_RECONNECT_DELAYS_MS.at(-1)!
+  const normalizedRandom = Number.isFinite(randomValue)
+    ? Math.min(1, Math.max(0, randomValue))
+    : 0.5
+  const jitteredDelay = Math.round(baseDelay * (0.85 + normalizedRandom * 0.3))
+  return Math.min(COLLABORATION_RECONNECT_DELAYS_MS.at(-1)!, jitteredDelay)
+}
+
+export const COLLABORATION_AWARENESS_THROTTLE_MS = 75
 
 export function createHocuspocusProvider({
   document,
@@ -1231,10 +1697,10 @@ export function createHocuspocusProvider({
   // auto-attach the provider (manageSocket=false skips attach() in the
   // constructor). Without this attach the provider never registers on the
   // socket, its onOpen never fires, and the authentication token is NEVER
-  // sent — the connection sits unauthenticated until it is torn down, so
-  // every participant (owner included) stays read-only forever (live
-  // incident 2026-07-15). The unit fakes replace this factory entirely,
-  // which is why no test caught it.
+  // sent. The connection would remain unauthenticated until teardown and
+  // every participant, including the owner, would stay read-only. Unit
+  // fakes replace this factory entirely, so this integration contract needs
+  // a test that drives the real provider.
   provider.attach()
   // Hocuspocus 4.3's default awareness handler re-broadcasts EVERY changed
   // client — including states just RECEIVED from the server (no origin
@@ -1244,30 +1710,58 @@ export function createHocuspocusProvider({
   // a foreign state to the sender's identity otherwise. Forward only OUR
   // OWN awareness changes; the server relays everyone else authoritatively.
   const awareness = provider.awareness
+  let disposeAwarenessForwarding = () => undefined
   if (awareness) {
     awareness.off('update', provider.boundAwarenessUpdateHandler)
-    awareness.on(
-      'update',
-      (changes: { added: number[]; removed: number[]; updated: number[] }) => {
-        const ownClientId = document.clientID
-        const filtered = {
-          added: changes.added.filter((id) => id === ownClientId),
-          removed: changes.removed.filter((id) => id === ownClientId),
-          updated: changes.updated.filter((id) => id === ownClientId),
-        }
-        if (
-          filtered.added.length + filtered.removed.length
-            + filtered.updated.length === 0
-        ) return
-        provider.awarenessUpdateHandler(filtered, undefined)
-      },
-    )
+    let pendingOwnUpdate = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const flushOwnUpdate = () => {
+      timer = null
+      if (!pendingOwnUpdate) return
+      pendingOwnUpdate = false
+      const ownClientId = document.clientID
+      const removed = awareness.getLocalState() === null
+      provider.awarenessUpdateHandler({
+        added: [],
+        removed: removed ? [ownClientId] : [],
+        updated: removed ? [] : [ownClientId],
+      }, 'local')
+    }
+    const handleAwarenessUpdate = (
+      changes: { added: number[]; removed: number[]; updated: number[] },
+      origin: unknown,
+    ) => {
+      // Incoming server messages are applied with the provider as origin.
+      // Sending them back can form an awareness echo, including for our own
+      // clientID when the server normalized the state.
+      if (origin === provider) return
+      const ownClientId = document.clientID
+      if (
+        !changes.added.includes(ownClientId)
+        && !changes.removed.includes(ownClientId)
+        && !changes.updated.includes(ownClientId)
+      ) return
+      pendingOwnUpdate = true
+      if (timer === null) {
+        timer = setTimeout(flushOwnUpdate, COLLABORATION_AWARENESS_THROTTLE_MS)
+      }
+    }
+    awareness.on('update', handleAwarenessUpdate)
+    disposeAwarenessForwarding = () => {
+      awareness.off('update', handleAwarenessUpdate)
+      pendingOwnUpdate = false
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+    }
   }
   return {
     connect: async () => {
       await websocket.connect()
     },
     destroy: () => {
+      disposeAwarenessForwarding()
       provider.destroy()
       websocket.destroy()
     },
@@ -1282,11 +1776,12 @@ export function createHocuspocusProvider({
 
 const browserDependencies: CollaborationDocumentControllerDependencies = {
   cancelTimer: (timer) => window.clearTimeout(timer),
-  createCommandId: () => globalThis.crypto.randomUUID(),
+  createCommandId: collaborationCommandId,
   createDocument: () => new Y.Doc(),
   createProvider: createHocuspocusProvider,
-  hashUpdate: sha256Hex,
+  hashUpdate: collaborationSha256Hex,
   now: () => Date.now(),
+  random: secureRandomUnitInterval,
   scheduleTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
 }
 
@@ -1311,6 +1806,8 @@ function inactiveHandle(
     authorityRevision: 0,
     blockingFailure: null,
     canEdit: false,
+    commentEventVersion: 0,
+    commentMentionEventVersion: 0,
     connectionStatus: 'inactive',
     document: null,
     documentId,
@@ -1320,11 +1817,16 @@ function inactiveHandle(
     lastPersistedSequence: 0,
     lastLocalDurableSequence: 0,
     generation,
+    hasUnconfirmedLocalChanges: false,
     lifecycleStatus: 'inactive',
     lifecycleKey: 'inactive',
     pendingHashes: [],
     provider: null,
     readAuthority: () => authority,
+    reconnectAttempt: 0,
+    recoverability: 'none',
+    retryConnection: async () => undefined,
+    nextReconnectAt: null,
     setAuthoritativeSequence: () => undefined,
     synced: false,
     flushAndAwaitDurable: async () => 0,
@@ -1351,14 +1853,9 @@ function deterministicUser(user: EditorCollaborationUser): EditorCollaborationUs
   return { color: user.color, id: user.id, name: user.name }
 }
 
-async function sha256Hex(update: Uint8Array): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest(
-    'SHA-256',
-    Uint8Array.from(update).buffer,
-  )
-  return [...new Uint8Array(digest)]
-    .map((value) => value.toString(16).padStart(2, '0'))
-    .join('')
+function secureRandomUnitInterval(): number {
+  const value = globalThis.crypto.getRandomValues(new Uint32Array(1))[0] ?? 0
+  return value / 0x1_0000_0000
 }
 
 function requestStatus(error: unknown): number | undefined {
@@ -1374,15 +1871,35 @@ function requestReason(error: unknown): string {
 }
 
 function isCompatibilityReason(reason: string): boolean {
-  return reason.includes('protocol_conflict')
-    || reason.includes('schema_conflict')
-    || reason.includes('generation_conflict')
+  // The reasons the collaboration service and the gateway actually emit for
+  // "this client cannot proceed without changing": see CollaborationErrorReason
+  // in apps/collaboration-server/src/errors.ts.
+  return reason.includes('update_required')
+    || reason.includes('invalid_schema')
+    || reason.includes('generation_mismatch')
+    || reason.includes('binary_frames_required')
 }
 
 function messageFromError(error: unknown): string {
   return error instanceof Error
     ? error.message
     : 'Collaboration could not be started.'
+}
+
+function isCollaborationCommentEvent(
+  value: unknown,
+  documentId: string,
+): value is {
+  document_id: string
+  type: 'collaboration_comment_changed' | 'collaboration_comment_mentioned'
+} {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Record<string, unknown>
+  return candidate.document_id === documentId
+    && (
+      candidate.type === 'collaboration_comment_changed'
+      || candidate.type === 'collaboration_comment_mentioned'
+    )
 }
 
 function isDurableRejection(value: unknown): value is {

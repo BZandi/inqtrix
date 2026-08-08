@@ -13,7 +13,6 @@ import hashlib
 import logging
 import uuid
 import re
-import uuid
 from typing import TYPE_CHECKING, Any
 
 from inqtrix.agents.memory_ports import (
@@ -25,7 +24,6 @@ from inqtrix.agents.memory_ports import (
     AgentMemoryCandidateStore,
     AgentFeedbackRecord,
     AgentFeedbackStore,
-    AgentMemoryNotFound,
     AgentMemoryProvider,
     AgentMemoryRecord,
     AgentMemoryUnavailable,
@@ -262,6 +260,32 @@ class AgentMemoryService:
     ) -> list[AgentMemoryCandidate]:
         if self._mode == "off":
             return []
+        # Idempotent per source run: a terminal segment can be redelivered
+        # after a crash (both engines stage from the terminal write), which
+        # would otherwise DUPLICATE this run's candidates. If any already
+        # exist for this run, return them instead of staging again. Shared
+        # sink for the mission engine and the kernel — one root, no per-
+        # engine guard. (The reflection LLM call upstream still re-runs on
+        # redelivery; that cost residual is bounded to the rare crash path.)
+        if source_run_id:
+            tenant_id, user_id = self._principal_key(principal)
+            existing = await self._candidate_store.list_candidates(
+                tenant_id=tenant_id, user_id=user_id, status=None
+            )
+            prior = [
+                candidate
+                for candidate in existing
+                if candidate.source_run_id == source_run_id
+            ]
+            if prior:
+                log.info(
+                    "Memory-Kandidaten fuer Lauf %s bereits gestaged "
+                    "(%d) — erneutes Staging uebersprungen (idempotent "
+                    "bei Redelivery).",
+                    source_run_id,
+                    len(prior),
+                )
+                return prior
         staged: list[AgentMemoryCandidate] = []
         for item in candidates[:5]:
             try:
@@ -277,7 +301,10 @@ class AgentMemoryService:
                     )
                 )
             except AgentMemoryValidationError as exc:
-                log.warning("Agent memory candidate skipped: %s", exc)
+                log.warning(
+                    "Agent memory candidate skipped (error_type=%s)",
+                    type(exc).__name__,
+                )
         return staged
 
     async def list_candidates(

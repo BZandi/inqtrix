@@ -2,7 +2,6 @@
 
 Revision ID: 0043_agent_task_contract
 Revises: 0042_agent_session_integrity
-Create Date: 2026-07-11
 
 Backfills legacy plan-approval subjects, adds the non-error terminal task
 outcome ``insufficient_evidence`` and an internal task-result recovery payload,

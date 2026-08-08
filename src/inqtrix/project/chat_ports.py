@@ -73,6 +73,9 @@ class ChatThread:
         tenant_id: Tenant scope.
         created_by_user_id: Ownership anchor (see :class:`ChatThreadGroup`).
         workspace_id: Workspace the thread's project lives in.
+        model_selection: The model picked inside this thread, as
+            client-owned JSON (the ``items_json`` pattern). ``''`` means
+            nothing was picked here.
     """
 
     id: str
@@ -85,6 +88,7 @@ class ChatThread:
     tenant_id: str = "default"
     created_by_user_id: uuid.UUID | None = None
     workspace_id: str | None = None
+    model_selection: str = ""
 
 
 @dataclass(frozen=True)
@@ -135,12 +139,14 @@ class ChatStore(Protocol):
         updated_at: float,
         created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
+        model_selection: str = "",
     ) -> ChatThread:
         """Create or idempotently update a thread by id (autosave upsert).
 
         On an existing id only the mutable metadata (title, preview,
-        source, group_id, updated_at) is overwritten; ``created_at`` and
-        the ownership columns are never reassigned by a later write.
+        source, group_id, model_selection, updated_at) is overwritten;
+        ``created_at`` and the ownership columns are never reassigned by a
+        later write.
         """
         ...
 

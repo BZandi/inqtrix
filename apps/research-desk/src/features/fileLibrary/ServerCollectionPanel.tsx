@@ -1,12 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { FileText, Plus, RotateCcw, Users, XCircle } from '@/components/icons'
+import { AlertTriangle, FileText, Plus, RotateCcw, Users, XCircle } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import {
-  deleteKnowledgeCollection,
-  deleteKnowledgeDocument,
-  listKnowledgeDocuments,
-} from '@/api/inqtrixClient'
+import { listKnowledgeDocuments, type ServerDeletionOperation } from '@/api/inqtrixClient'
 import type {
   FileAssetRecord,
   FileGroupRecord,
@@ -26,16 +22,27 @@ import {
 
 export type ServerCollectionJobState = {
   completedDocuments: number
+  currentBatch?: number
   currentDocumentTitle?: string
   error?: string
   jobId: string
-  status: 'cancelling' | 'error' | 'queued' | 'running'
+  pauseMessage?: string
+  phase?: string
+  status:
+    | 'cancelling'
+    | 'error'
+    | 'paused_dependency'
+    | 'paused_validation'
+    | 'queued'
+    | 'running'
+  totalBatches?: number
   totalDocuments: number
 }
 
 type ServerCollectionPanelProps = {
   assets: FileAssetRecord[]
   collection: KnowledgeCollectionInfo
+  deletionOperations: Readonly<Record<string, ServerDeletionOperation>>
   ensureAssetBodiesLoaded?: (assetIds: readonly string[]) => Promise<Map<string, string>>
   groups: FileGroupRecord[]
   job: ServerCollectionJobState | null
@@ -44,9 +51,15 @@ type ServerCollectionPanelProps = {
   onCancelReindex: (jobId: string) => Promise<void>
   onCollectionDeleted: () => void
   onCollectionMutated: () => void
+  onDeleteCollection: (collectionId: string) => Promise<void>
+  onDeleteDocument: (documentId: string) => Promise<void>
+  onRetryDeletion: (operationId: string) => Promise<void>
+  onResumeReindex: (jobId: string) => Promise<void>
+  onResumeRawReindex: (jobId: string) => Promise<void>
   onShare?: (collection: KnowledgeCollectionInfo) => void
   onStartReindex: (collectionId: string) => Promise<void>
   query?: string
+  recoveryPending?: 'raw' | 'resume' | null
   refreshToken?: number
   sections: FileLibrarySectionRecord[]
 }
@@ -57,6 +70,7 @@ type ServerCollectionPanelProps = {
 export function ServerCollectionPanel({
   assets,
   collection,
+  deletionOperations,
   ensureAssetBodiesLoaded,
   groups,
   job,
@@ -65,9 +79,15 @@ export function ServerCollectionPanel({
   onCancelReindex,
   onCollectionDeleted,
   onCollectionMutated,
+  onDeleteCollection,
+  onDeleteDocument,
+  onRetryDeletion,
+  onResumeReindex,
+  onResumeRawReindex,
   onShare,
   onStartReindex,
   query = '',
+  recoveryPending = null,
   refreshToken = 0,
   sections,
 }: ServerCollectionPanelProps) {
@@ -78,8 +98,35 @@ export function ServerCollectionPanel({
   const [adding, setAdding] = useState(false)
   const [mutating, setMutating] = useState(false)
   const generationRef = useRef(0)
+  const completedDeletionIdsRef = useRef(new Set<string>())
+  const deletionList = useMemo(
+    () => Object.values(deletionOperations).sort(
+      (left, right) => right.created_at - left.created_at,
+    ),
+    [deletionOperations],
+  )
+  const collectionDeletion = deletionList.find(
+    (operation) => operation.target_kind === 'knowledge_collection'
+      && operation.target_id === collection.id,
+  )
+  const documentDeletions = useMemo(() => {
+    const byDocument = new Map<string, ServerDeletionOperation>()
+    for (const operation of deletionList) {
+      if (
+        operation.target_kind === 'knowledge_document'
+        && !byDocument.has(operation.target_id)
+      ) {
+        byDocument.set(operation.target_id, operation)
+      }
+    }
+    return byDocument
+  }, [deletionList])
+  const collectionDeleting = collectionDeletion?.status === 'queued'
+    || collectionDeletion?.status === 'running'
+  const collectionDeleteFailed = collectionDeletion?.status === 'delete_failed'
 
   const loadDocuments = useCallback(async () => {
+    if (collectionDeleting) return
     const generation = ++generationRef.current
     setLoading(true)
     try {
@@ -103,7 +150,7 @@ export function ServerCollectionPanel({
     } finally {
       if (generation === generationRef.current) setLoading(false)
     }
-  }, [collection.id, knowledgeSync])
+  }, [collection.id, collectionDeleting, knowledgeSync])
 
   useEffect(() => {
     void loadDocuments()
@@ -111,6 +158,32 @@ export function ServerCollectionPanel({
       generationRef.current += 1
     }
   }, [loadDocuments, refreshToken])
+
+  useEffect(() => {
+    if (
+      collectionDeletion?.status === 'deleted'
+      && !completedDeletionIdsRef.current.has(collectionDeletion.operation_id)
+    ) {
+      completedDeletionIdsRef.current.add(collectionDeletion.operation_id)
+      onCollectionDeleted()
+      onCollectionMutated()
+    }
+    const deletedDocumentIds: string[] = []
+    for (const [documentId, operation] of documentDeletions) {
+      if (
+        operation.status === 'deleted'
+        && !completedDeletionIdsRef.current.has(operation.operation_id)
+      ) {
+        completedDeletionIdsRef.current.add(operation.operation_id)
+        deletedDocumentIds.push(documentId)
+      }
+    }
+    if (deletedDocumentIds.length > 0) {
+      const deleted = new Set(deletedDocumentIds)
+      setDocuments((current) => current.filter((item) => !deleted.has(item.id)))
+      onCollectionMutated()
+    }
+  }, [collectionDeletion, documentDeletions, onCollectionDeleted, onCollectionMutated])
 
   const owner = collection.access.mode === 'owner'
   const editable = owner
@@ -121,6 +194,8 @@ export function ServerCollectionPanel({
       .filter((value): value is string => typeof value === 'string'),
   ), [documents])
   const activeJob = job?.status === 'error' ? null : job
+  const paused = activeJob?.status === 'paused_dependency'
+    || activeJob?.status === 'paused_validation'
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const visibleDocuments = useMemo(
     () => normalizedQuery.length === 0
@@ -142,6 +217,26 @@ export function ServerCollectionPanel({
     if (!activeJob) return
     try {
       await onCancelReindex(activeJob.jobId)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  const resumeReindex = async () => {
+    if (!activeJob || !paused) return
+    setError(null)
+    try {
+      await onResumeReindex(activeJob.jobId)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  const resumeRawReindex = async () => {
+    if (!activeJob || !paused) return
+    setError(null)
+    try {
+      await onResumeRawReindex(activeJob.jobId)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -196,12 +291,10 @@ export function ServerCollectionPanel({
   }
 
   const removeDocument = async (documentId: string) => {
-    if (!editable || mutating) return
+    if (!editable || mutating || collectionDeleting) return
     setMutating(true)
     try {
-      await deleteKnowledgeDocument(documentId, knowledgeSync)
-      await loadDocuments()
-      onCollectionMutated()
+      await onDeleteDocument(documentId)
       setError(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -211,15 +304,24 @@ export function ServerCollectionPanel({
   }
 
   const removeCollection = async () => {
-    if (!owner || mutating) return
+    if (!owner || mutating || collectionDeleting) return
     setMutating(true)
     try {
-      await deleteKnowledgeCollection(collection.id, knowledgeSync)
-      onCollectionDeleted()
-      onCollectionMutated()
+      await onDeleteCollection(collection.id)
+      setError(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
       setMutating(false)
+    }
+  }
+
+  const retryDeletion = async (operationId: string) => {
+    setError(null)
+    try {
+      await onRetryDeletion(operationId)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
     }
   }
 
@@ -248,27 +350,33 @@ export function ServerCollectionPanel({
             </div>
             <div className="flex shrink-0 flex-wrap items-center gap-2">
               {owner && onShare ? (
-                <Button onClick={() => onShare(collection)} size="sm" type="button" variant="outline">
+                <Button disabled={collectionDeleting} onClick={() => onShare(collection)} size="sm" type="button" variant="outline">
                   <Users className="size-4" />
                   {t.sharing.share}
                 </Button>
               ) : null}
               {editable ? (
                 <Button
-                  disabled={activeJob !== null || mutating}
-                  onClick={() => void startReindex()}
+                  disabled={collectionDeleting || recoveryPending !== null || (!paused && activeJob !== null) || mutating}
+                  onClick={() => void (paused ? resumeReindex() : startReindex())}
                   size="sm"
                   type="button"
                   variant="outline"
                 >
-                  <RotateCcw className="size-4" />
-                  {t.vectorIndex.reindex}
+                  <RotateCcw className={recoveryPending === 'resume'
+                    ? 'size-4 motion-safe:animate-spin'
+                    : 'size-4'} />
+                  {recoveryPending === 'resume'
+                    ? t.vectorIndex.resumeRequesting
+                    : paused
+                      ? t.vectorIndex.resumeIndexing
+                      : t.vectorIndex.reindex}
                 </Button>
               ) : null}
               {activeJob ? (
                 <Button
                   aria-label={t.vectorIndex.cancelIndexing}
-                  disabled={activeJob.status === 'cancelling'}
+                  disabled={activeJob.status === 'cancelling' || recoveryPending !== null}
                   onClick={() => void cancelReindex()}
                   size="icon"
                   type="button"
@@ -277,7 +385,7 @@ export function ServerCollectionPanel({
                   <XCircle className="size-4" />
                 </Button>
               ) : null}
-              {owner ? (
+              {owner && !collectionDeleting && !collectionDeleteFailed ? (
                 <ConfirmDelete
                   ariaLabel={t.fileLibrary.removeCollection}
                   hint={t.fileLibrary.removeCollectionHint}
@@ -285,9 +393,35 @@ export function ServerCollectionPanel({
                   onConfirm={() => void removeCollection()}
                 />
               ) : null}
+              {owner && collectionDeleteFailed && collectionDeletion ? (
+                <Button
+                  aria-label={t.fileLibrary.collectionDeletionRetry}
+                  className="text-warning"
+                  onClick={() => void retryDeletion(collectionDeletion.operation_id)}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <RotateCcw className="size-4" />
+                  {t.fileLibrary.collectionDeletionRetry}
+                </Button>
+              ) : null}
             </div>
           </div>
-          {activeJob ? (
+          {collectionDeleting ? (
+            <p className="mt-3 flex items-center gap-2 border-t border-border/70 pt-3 t-meta text-muted-foreground" role="status">
+              <span className="size-2 rounded-full bg-warning motion-safe:animate-pulse" />
+              {collectionDeletion && collectionDeletion.completed_items > 0
+                ? t.fileLibrary.deletionSearchDetached
+                : t.fileLibrary.collectionDeletionRunning}
+            </p>
+          ) : null}
+          {collectionDeleteFailed ? (
+            <p className="mt-3 border-t border-warning/25 pt-3 t-meta text-warning" role="alert">
+              {collectionDeletion?.error?.message ?? t.fileLibrary.collectionDeletionFailed}
+            </p>
+          ) : null}
+          {activeJob && !paused ? (
             <p className="mt-3 border-t border-border/70 pt-3 t-meta text-muted-foreground">
               {activeJob.status === 'cancelling'
                 ? t.vectorIndex.cancelling
@@ -301,6 +435,46 @@ export function ServerCollectionPanel({
               {activeJob.currentDocumentTitle ? ` · ${activeJob.currentDocumentTitle}` : ''}
             </p>
           ) : null}
+          {activeJob && paused ? (
+            <div
+              className="mt-3 rounded-md border border-warning/30 bg-warning-subtle px-3 py-2 text-warning"
+              role="status"
+            >
+              <p className="flex items-center gap-1.5 t-meta font-semibold">
+                <AlertTriangle className="size-3.5 shrink-0" />
+                {activeJob.status === 'paused_validation'
+                  ? t.vectorIndex.pausedValidationTitle
+                  : t.vectorIndex.pausedDependencyTitle}
+              </p>
+              <p className="mt-0.5 t-meta-sm [overflow-wrap:anywhere]">
+                {activeJob.pauseMessage ?? t.vectorIndex.pausedFallback}
+              </p>
+              <p className="mt-1 t-hint text-warning/90">
+                {t.vectorIndex.pausedCheckpoint
+                  .replace('{phase}', activeJob.phase ?? '—')
+                  .replace('{batch}', String(activeJob.currentBatch ?? 0))
+                  .replace('{total}', String(activeJob.totalBatches ?? 0))}
+                {' · '}{t.vectorIndex.activeGenerationUnchanged}
+              </p>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-warning/20 pt-2">
+                <p className="max-w-3xl t-hint text-warning/90">
+                  {t.vectorIndex.resumeWithoutContextHint}
+                </p>
+                <Button
+                  className="shrink-0 border-warning/35 text-warning hover:bg-warning/10 hover:text-warning"
+                  disabled={recoveryPending !== null}
+                  onClick={() => void resumeRawReindex()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {recoveryPending === 'raw'
+                    ? t.vectorIndex.resumeWithoutContextRequesting
+                    : t.vectorIndex.resumeWithoutContext}
+                </Button>
+              </div>
+            </div>
+          ) : null}
           {job?.error ? <p className="mt-2 t-meta text-destructive">{job.error}</p> : null}
           {error ? <p className="mt-2 t-meta text-destructive">{error}</p> : null}
         </div>
@@ -310,7 +484,7 @@ export function ServerCollectionPanel({
         <div className="flex flex-col gap-4 px-4 pb-4 pt-4 md:px-6 md:pb-6">
           {editable ? (
             <div>
-              <Button disabled={mutating || activeJob !== null} onClick={() => setAdding(true)} size="sm" type="button">
+              <Button disabled={collectionDeleting || mutating || activeJob !== null} onClick={() => setAdding(true)} size="sm" type="button">
                 <Plus className="size-4" />
                 {t.vectorIndex.addDocuments}
               </Button>
@@ -348,16 +522,48 @@ export function ServerCollectionPanel({
             </div>
           ) : (
             <div className="overflow-hidden rounded-lg border border-border bg-card">
-              {visibleDocuments.map((document) => (
-                <div className="flex items-center gap-3 border-b border-border/70 px-3 py-2.5 last:border-b-0" key={document.id}>
+              {visibleDocuments.map((document) => {
+                const deletion = documentDeletions.get(document.id)
+                const deleting = deletion?.status === 'queued' || deletion?.status === 'running'
+                const deleteFailed = deletion?.status === 'delete_failed'
+                return (
+                <div
+                  aria-disabled={deleting || collectionDeleting}
+                  className="flex items-center gap-3 border-b border-border/70 px-3 py-2.5 last:border-b-0"
+                  key={document.id}
+                >
                   <FileText className="size-4 shrink-0 text-file" />
                   <div className="min-w-0 flex-1">
                     <p className="truncate t-list text-foreground">{document.title}</p>
-                    <p className="t-meta-sm text-muted-foreground">
-                      {t.vectorIndex.chunks.replace('{count}', String(document.chunk_count))}
-                    </p>
+                    {deleting ? (
+                      <p className="flex items-center gap-1.5 t-meta-sm text-muted-foreground" role="status">
+                        <span className="size-1.5 rounded-full bg-warning motion-safe:animate-pulse" />
+                        {deletion && deletion.completed_items > 0
+                          ? t.fileLibrary.deletionSearchDetached
+                          : t.fileLibrary.deletionRunning}
+                      </p>
+                    ) : deleteFailed ? (
+                      <p className="t-meta-sm text-warning" role="alert">
+                        {deletion?.error?.message ?? t.fileLibrary.deletionFailed}
+                      </p>
+                    ) : (
+                      <p className="t-meta-sm text-muted-foreground">
+                        {t.vectorIndex.chunks.replace('{count}', String(document.chunk_count))}
+                      </p>
+                    )}
                   </div>
-                  {editable ? (
+                  {editable && deleteFailed && deletion ? (
+                    <Button
+                      aria-label={t.fileLibrary.deletionRetry}
+                      className="size-7 text-warning"
+                      onClick={() => void retryDeletion(deletion.operation_id)}
+                      size="icon"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <RotateCcw className="size-3.5" />
+                    </Button>
+                  ) : editable && !deleting && !collectionDeleting ? (
                     <ConfirmDelete
                       ariaLabel={t.vectorIndex.removeDocument}
                       hint={t.vectorIndex.removeDocumentHint}
@@ -365,7 +571,8 @@ export function ServerCollectionPanel({
                     />
                   ) : null}
                 </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>

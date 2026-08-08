@@ -59,6 +59,7 @@ _CHILD_PROJECTED_EVENTS = frozenset(
     {
         "inqtrix.run.queued",
         "inqtrix.run.started",
+        "inqtrix.run.resumed",
         "inqtrix.run.snapshot",
         "inqtrix.run.cancel_requested",
         "inqtrix.run.waiting",
@@ -69,6 +70,9 @@ _CHILD_PROJECTED_EVENTS = frozenset(
         "inqtrix.node.finished",
         "inqtrix.node.failed",
         "inqtrix.progress.message",
+        "inqtrix.knowledge.retrieval.degraded",
+        "inqtrix.knowledge.retrieval.warning",
+        "inqtrix.knowledge.grounding.checked",
     }
 )
 
@@ -103,6 +107,22 @@ def status_value(status: Any) -> str:
     return getattr(status, "value", status)
 
 
+def run_segment_id(run_id: str, ordinal: int) -> str:
+    """Stable public identity for one execution segment of a run."""
+    suffix = run_id.removeprefix("run_")[-20:]
+    return f"seg_{suffix}_{ordinal}"
+
+
+def answer_artifact_id(run_id: str) -> str:
+    """Stable run-local artifact identity for one native answer."""
+    return f"art_{run_id[-12:]}_answer"
+
+
+def answer_publication_id(run_id: str) -> str:
+    """Stable event-publication identity for one native answer."""
+    return f"pub_{run_id[-12:]}_answer"
+
+
 def access_annotation(
     shared: Any,
     *,
@@ -131,9 +151,7 @@ def access_permits_edit(access: Mapping[str, Any] | None) -> bool:
     if access.get("mode") != "shared":
         return False
     try:
-        return SharePermission(access.get("permission")).at_least(
-            SharePermission.EDIT
-        )
+        return SharePermission(access.get("permission")).at_least(SharePermission.EDIT)
     except ValueError:
         return False
 
@@ -159,10 +177,8 @@ def build_run_summary(
     clients render a "cancelling" state (and gate delete flows) without
     a new status enum value.
     """
-    elapsed = None
-    if record.started_at is not None:
-        end = record.finished_at or time.time()
-        elapsed = round(max(0.0, end - record.started_at), 2)
+    now = time.time()
+    elapsed = run_elapsed_seconds(record, now=now)
     cancel_requested = bool(getattr(record, "cancel_requested", False)) and (
         status_value(record.status) not in TERMINAL_RUN_STATUS_VALUES
     )
@@ -177,6 +193,39 @@ def build_run_summary(
         value = getattr(record, key, None)
         if value:
             agent_tree[key] = value
+    segment_count = max(0, int(getattr(record, "segment_count", 0) or 0))
+    status = status_value(record.status)
+    active_seconds = max(0.0, float(getattr(record, "active_seconds", 0.0) or 0.0))
+    active_started_at = getattr(record, "active_started_at", None)
+    if status == "running" and active_started_at is not None:
+        active_seconds += max(0.0, now - float(active_started_at))
+    waiting_seconds = max(0.0, float(getattr(record, "waiting_seconds", 0.0) or 0.0))
+    waiting_since = getattr(record, "waiting_since", None)
+    if (
+        status in {"waiting_for_approval", "waiting_for_input", "waiting_for_children"}
+        and waiting_since is not None
+    ):
+        waiting_seconds += max(0.0, now - float(waiting_since))
+    queued_seconds = max(0.0, float(getattr(record, "queued_seconds", 0.0) or 0.0))
+    queued_since = getattr(record, "queued_since", None)
+    if status == "queued" and queued_since is not None:
+        queued_seconds += max(0.0, now - float(queued_since))
+    # Agent runs can park and resume repeatedly. Expose their timing split so
+    # the UI and audit trail can distinguish active work from explicit waits;
+    # standard run summaries keep their historical exact key set.
+    runtime_timing = (
+        {
+            "total_seconds": elapsed,
+            "active_seconds": round(active_seconds, 2),
+            "waiting_seconds": round(waiting_seconds, 2),
+            "queued_seconds": round(queued_seconds, 2),
+            "segment_count": segment_count,
+            "resume_count": max(0, segment_count - 1),
+            "current_segment_id": getattr(record, "current_segment_id", None),
+        }
+        if kind != "standard"
+        else None
+    )
     return {
         "run_id": record.run_id,
         "status": status_value(record.status),
@@ -195,9 +244,30 @@ def build_run_summary(
         "events_url": f"/v1/runs/{record.run_id}/events",
         "result_url": f"/v1/runs/{record.run_id}/result",
         **agent_tree,
+        **({"timing": runtime_timing} if runtime_timing is not None else {}),
         **({"cancel_requested": True} if cancel_requested else {}),
         **({"access": access} if access is not None else {}),
     }
+
+
+def run_elapsed_seconds(
+    record: RunRecordView,
+    *,
+    now: float | None = None,
+) -> float | None:
+    """Project durable wall time without applying public visibility.
+
+    Run workers need this value while the owned row is still executing. The
+    calculation is shared with the public summary, but callers must obtain the
+    record through their store's internal lifecycle read rather than routing a
+    worker through the user-facing authorization surface.
+    """
+
+    if record.started_at is None:
+        return None
+    current = time.time() if now is None else float(now)
+    end = record.finished_at if record.finished_at is not None else current
+    return round(max(0.0, float(end) - float(record.started_at)), 2)
 
 
 def replay_after(
@@ -218,8 +288,7 @@ def replay_after(
     return [
         event
         for event in replay
-        if not isinstance(event.get("sequence"), int)
-        or event["sequence"] > after
+        if not isinstance(event.get("sequence"), int) or event["sequence"] > after
     ]
 
 
@@ -242,9 +311,7 @@ def build_child_progress_payload(
     clean = sanitize_event_payload(event_type, dict(payload))
     carried_snapshot = clean.get("snapshot")
     source_snapshot = (
-        carried_snapshot
-        if isinstance(carried_snapshot, dict)
-        else dict(snapshot or {})
+        carried_snapshot if isinstance(carried_snapshot, dict) else dict(snapshot or {})
     )
     compact_snapshot = {
         key: value
@@ -253,11 +320,7 @@ def build_child_progress_payload(
     }
     raw_metrics = clean.get("metrics")
     metrics = (
-        {
-            key: value
-            for key, value in raw_metrics.items()
-            if key in _CHILD_METRIC_KEYS
-        }
+        {key: value for key, value in raw_metrics.items() if key in _CHILD_METRIC_KEYS}
         if isinstance(raw_metrics, dict)
         else {}
     )
@@ -291,13 +354,59 @@ def build_child_progress_payload(
         projected["message"] = message
     if metrics:
         projected["metrics"] = metrics
+    if event_type == "inqtrix.knowledge.grounding.checked":
+        # A delegated mission's child stream owns the full event.  The parent
+        # receives only the bounded verdict/count projection needed to explain
+        # why a Knowledge task did not complete; quote/source text never
+        # crosses the run boundary.
+        for key in ("status", "failure_code", "marker", "format_repaired"):
+            if clean.get(key) is not None:
+                projected[key] = clean[key]
+        grounding_metrics = {
+            key: clean[key]
+            for key in ("quotes_total", "quotes_verified")
+            if clean.get(key) is not None
+        }
+        if grounding_metrics:
+            projected["metrics"] = {
+                **dict(projected.get("metrics") or {}),
+                **grounding_metrics,
+            }
+    if event_type == "inqtrix.knowledge.retrieval.degraded":
+        # Only the reason and bounded counters cross into the parent.  The
+        # child retains query/source detail in its own protected run record.
+        for key in (
+            "reason",
+            "retrieval_mode",
+            "stage",
+            "requested_candidate_pool",
+            "returned_candidate_pool",
+            "final_top_k",
+            "final_evidence_complete",
+            "requested_top_k",
+            "returned_hits",
+            "candidate_cap",
+        ):
+            if clean.get(key) is not None:
+                projected[key] = clean[key]
+    if event_type == "inqtrix.knowledge.retrieval.warning":
+        # Source-integrity exclusions cross run boundaries only as bounded
+        # aggregate metadata. Queries, source ids and evidence text remain in
+        # the authorized child run.
+        for key in (
+            "code",
+            "reason",
+            "stage",
+            "count",
+            "recommended_action",
+        ):
+            if clean.get(key) is not None:
+                projected[key] = clean[key]
     if attempt is not None:
         projected["attempt"] = max(1, int(attempt))
     if isinstance(error, dict):
         projected["error"] = {
-            key: error[key]
-            for key in ("type", "message")
-            if error.get(key)
+            key: error[key] for key in ("type", "message") if error.get(key)
         }
     elif error:
         projected["error"] = {"message": str(error)}

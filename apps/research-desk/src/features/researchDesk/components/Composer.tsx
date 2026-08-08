@@ -1,7 +1,9 @@
 import {
+  AlertTriangle,
   Check,
   FileText,
   ListChecks,
+  LoaderCircle,
   PanelBottomClose,
   Repeat2,
   Search,
@@ -47,18 +49,20 @@ import { appMotion } from '@/motion/transitions'
 
 type ComposerProps = {
   form: ComposerFormState
+  isSubmitting?: boolean
   onHide: () => void
-  onSubmit: (request: CreateResearchRunRequest) => void
+  onSubmit: (request: CreateResearchRunRequest) => Promise<boolean>
   reduceMotion: boolean | null
   selectedStack: string
   setForm: Dispatch<SetStateAction<ComposerFormState>>
   /** Externally disable submission (send button, Enter, form submit) —
    * e.g. while the auth session is still resolving. Typing stays enabled. */
   submitDisabled?: boolean
+  submissionError?: string | null
 }
 
 export type ComposerFormState = {
-  confidenceStop: 7 | 8 | 9
+  confidenceStop: 6 | 7 | 8 | 9
   firstRoundQueries: 4 | 6 | 8
   maxRounds: 1 | 2 | 3 | 4
   minRounds: 1 | 2
@@ -73,7 +77,7 @@ type ComposerReportProfilePreset = Pick<
 
 export const composerReportProfilePresets: Record<ComposerFormState['reportProfile'], ComposerReportProfilePreset> = {
   schnell: {
-    confidenceStop: 7,
+    confidenceStop: 6,
     firstRoundQueries: 6,
     maxRounds: 1,
     minRounds: 1,
@@ -144,22 +148,84 @@ export function buildComposerRequest(
   question: string,
   selectedStack: string,
 ): CreateResearchRunRequest {
+  // Send only what a human actually changed. The backend skips profile
+  // application for every field the request states explicitly, so sending
+  // all four unconditionally made the report profile decorative: the run
+  // used the composer's values even where the profile disagreed.
+  const preset = composerReportProfilePresets[form.reportProfile]
+  const minRounds = Math.min(
+    form.minRounds,
+    form.maxRounds,
+  ) as ComposerFormState['minRounds']
+  const overrides: CreateResearchRunRequest['agentOverrides'] = {
+    reportProfile: form.reportProfile,
+  }
+  if (form.confidenceStop !== preset.confidenceStop) {
+    overrides.confidenceStop = form.confidenceStop
+  }
+  if (form.firstRoundQueries !== preset.firstRoundQueries) {
+    overrides.firstRoundQueries = form.firstRoundQueries
+  }
+  if (form.maxRounds !== preset.maxRounds) {
+    overrides.maxRounds = form.maxRounds
+  }
+  if (minRounds !== preset.minRounds) {
+    overrides.minRounds = minRounds
+  }
   return {
-    agentOverrides: {
-      confidenceStop: form.confidenceStop,
-      firstRoundQueries: form.firstRoundQueries,
-      maxRounds: form.maxRounds,
-      minRounds: Math.min(form.minRounds, form.maxRounds) as ComposerFormState['minRounds'],
-      reportProfile: form.reportProfile,
-    },
+    agentOverrides: overrides,
     mode: 'research',
     question: question.trim(),
     stack: selectedStack,
   }
 }
 
+export async function runComposerSubmission({
+  form,
+  onSubmit,
+  selectedStack,
+  setForm,
+}: {
+  form: ComposerFormState
+  onSubmit: (request: CreateResearchRunRequest) => Promise<boolean>
+  selectedStack: string
+  setForm: Dispatch<SetStateAction<ComposerFormState>>
+}): Promise<boolean> {
+  const submittedQuestion = form.question
+  const accepted = await onSubmit(buildComposerRequest(form, submittedQuestion, selectedStack))
+  if (!accepted) return false
+
+  setForm((currentForm) => currentForm.question === submittedQuestion
+    ? { ...currentForm, question: '' }
+    : currentForm)
+  return true
+}
+
+export function ResearchSubmissionAlert({ message }: { message: string }) {
+  return (
+    <div
+      className="mt-2 flex items-start gap-1.5 rounded-md border border-destructive/25 bg-destructive/5 px-3 py-2 t-meta text-destructive"
+      data-research-submission-error
+      role="alert"
+    >
+      <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+      <span>{message}</span>
+    </div>
+  )
+}
+
 export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer(
-  { form, onHide, onSubmit, reduceMotion, selectedStack, setForm, submitDisabled },
+  {
+    form,
+    isSubmitting = false,
+    onHide,
+    onSubmit,
+    reduceMotion,
+    selectedStack,
+    setForm,
+    submitDisabled,
+    submissionError,
+  },
   ref,
 ) {
   const { t } = useLocale()
@@ -184,6 +250,11 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
     },
   ]
   const confidenceOptions: ComposerOption[] = [
+    {
+      description: t.composer.optionConfidence6Description,
+      label: '6 / 10',
+      value: '6',
+    },
     {
       description: t.composer.optionConfidence7Description,
       label: '7 / 10',
@@ -246,7 +317,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
 
   function submitResearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    submitCurrentQuestion()
+    void submitCurrentQuestion()
   }
 
   function handleQuestionKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -261,14 +332,18 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
     }
 
     event.preventDefault()
-    submitCurrentQuestion()
+    void submitCurrentQuestion()
   }
 
-  function submitCurrentQuestion() {
+  async function submitCurrentQuestion() {
     if (!canSubmit) return
-
-    onSubmit(buildComposerRequest(form, form.question, selectedStack))
-    setForm((currentForm) => ({ ...currentForm, question: '' }))
+    const accepted = await runComposerSubmission({
+      form,
+      onSubmit,
+      selectedStack,
+      setForm,
+    })
+    if (!accepted) questionTextareaRef.current?.focus()
   }
 
   return (
@@ -281,7 +356,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
       transition={appMotion.composer}
       className="shrink-0 px-4 pb-4 pt-2"
     >
-      <form className="mx-auto max-w-4xl" onSubmit={submitResearch}>
+      <form aria-busy={isSubmitting} className="mx-auto max-w-4xl" onSubmit={submitResearch}>
         <div className="relative rounded-xl border border-border bg-card px-3 py-2.5 shadow-[0_8px_28px_-12px_var(--shadow-soft)] transition-[border-color,box-shadow] duration-150 focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/15">
           <Textarea
             aria-label={t.composer.placeholder}
@@ -455,7 +530,7 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                 selectedStack={selectedStack}
               />
               <Button
-                aria-label={t.composer.send}
+                aria-label={isSubmitting ? t.composer.submitting : t.composer.send}
                 className={cn(
                   'size-7 shrink-0 rounded-md',
                   canSubmit
@@ -467,11 +542,14 @@ export const Composer = forwardRef<HTMLElement, ComposerProps>(function Composer
                 type="submit"
                 variant={canSubmit ? 'default' : 'ghost'}
               >
-                <SendHorizontal className="size-4" />
+                {isSubmitting
+                  ? <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" />
+                  : <SendHorizontal className="size-4" />}
               </Button>
             </div>
           </div>
         </div>
+        {submissionError ? <ResearchSubmissionAlert message={submissionError} /> : null}
       </form>
     </motion.section>
   )

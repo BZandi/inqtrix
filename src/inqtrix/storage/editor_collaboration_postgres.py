@@ -8,15 +8,22 @@ import logging
 import time
 import uuid
 from contextlib import AbstractAsyncContextManager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import delete, func, insert, select, text, tuple_, update
+from sqlalchemy import delete, func, insert, null, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from inqtrix.auth.permissions import SharePermission
+from inqtrix.auth.permissions import (
+    SharePermission,
+    share_permissions_satisfying,
+)
 from inqtrix.project.editor_collaboration_ports import (
     CollaborationActivity,
     CollaborationChangeKind,
+    CollaborationCommentActivity,
+    CollaborationCommentMessage,
+    CollaborationCommentPage,
+    CollaborationCommentThread,
     CollaborationConflict,
     CollaborationDocumentNotFound,
     CollaborationDocumentState,
@@ -27,6 +34,7 @@ from inqtrix.project.editor_collaboration_ports import (
     CollaborationLoadedState,
     CollaborationOpenPatch,
     CollaborationOpenPatchPage,
+    CollaborationPatchState,
     CollaborationPolicyEvent,
     CollaborationPolicyPage,
     CollaborationPersistedCommand,
@@ -42,20 +50,30 @@ from inqtrix.project.editor_collaboration_ports import (
 from inqtrix.storage.auth_orm import auth_sessions
 from inqtrix.storage.db import tenant_session
 from inqtrix.storage.editor_collaboration_orm import (
+    editor_collaboration_comment_messages,
+    editor_collaboration_comment_reads,
+    editor_collaboration_comment_threads,
     editor_collaboration_instances,
     editor_collaboration_leases,
     editor_collaboration_snapshots,
     editor_collaboration_updates,
 )
-from inqtrix.storage.editor_orm import editor_documents
+from inqtrix.storage.editor_guest_link_orm import (
+    editor_document_guest_identities,
+    editor_document_share_links,
+)
+from inqtrix.storage.editor_orm import editor_comments, editor_documents
 from inqtrix.storage.editor_patch_orm import editor_patches
-from inqtrix.storage.identity_orm import resource_shares, users
+from inqtrix.storage.identity_orm import audit_log, resource_shares, users
 from inqtrix.storage.user_event_orm import user_events
 from inqtrix.storage.resource_access import (
+    VISIBLE_SHARE_PERMISSION,
     append_resource_effects,
     lock_resource_access,
     revoke_resource_shares,
+    visible_resource_select,
 )
+from inqtrix.storage.user_events_postgres import append_user_invalidation
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -82,7 +100,96 @@ def _suggestion_kind_for_edit(
         return "insertion"
     if find and not replacement:
         return "deletion"
-    return "modification"
+    return "replacement"
+
+
+async def _has_creator_private_suggestion_draft(
+    session: "AsyncSession",
+    *,
+    tenant_id: str,
+    document_id: str,
+    creator_user_id: uuid.UUID,
+    patch_id: str,
+    publication_command_id: uuid.UUID,
+) -> bool:
+    """Whether a creator-private draft authorizes one shared patch publish."""
+    draft_comment_id = await session.scalar(
+        select(editor_comments.c.id)
+        .where(
+            editor_comments.c.tenant_id == tenant_id,
+            editor_comments.c.document_id == document_id,
+            editor_comments.c.created_by_user_id == creator_user_id,
+            editor_comments.c.suggestion_draft["patch_id"].astext == patch_id,
+            editor_comments.c.suggestion_draft["publication_command_id"].astext
+            == str(publication_command_id),
+        )
+        .limit(1)
+    )
+    return draft_comment_id is not None
+
+
+def _is_valid_slash_structure_supersession(
+    *,
+    patch_state: CollaborationPatchState,
+    prior_active_ids: set[str],
+    active_ids: set[str],
+    stored_descriptors: dict[str, dict[str, Any]],
+    incoming_descriptors: dict[str, dict[str, Any]],
+    actor_user_id: uuid.UUID,
+    created_by_user_id: uuid.UUID,
+    source: str,
+    change_kind: CollaborationChangeKind,
+) -> bool:
+    """Validate the persisted half of one sidecar-proven slash replacement.
+
+    The Node policy owns the content-level proof that the removed insertion is
+    a complete ``/query``. PostgreSQL independently pins the only membership
+    transition that proof may authorize: one actor-owned insertion is replaced
+    by one structure suggestion with identical patch metadata.
+    """
+    superseded_ids = set(patch_state.superseded_suggestion_ids)
+    if (
+        source != "human"
+        or change_kind != "suggestion"
+        or actor_user_id != created_by_user_id
+        or len(prior_active_ids) != 1
+        or len(active_ids) != 1
+        or superseded_ids != prior_active_ids
+        or active_ids & superseded_ids
+        or patch_state.kinds != ("structure",)
+    ):
+        return False
+    prior_id = next(iter(prior_active_ids))
+    replacement_id = next(iter(active_ids))
+    stored_prior = stored_descriptors.get(prior_id)
+    reported_prior = incoming_descriptors.get(prior_id)
+    replacement = incoming_descriptors.get(replacement_id)
+    expected_metadata = {
+        "patch_id": patch_state.patch_id,
+        "author_id": str(created_by_user_id),
+        "created_at": patch_state.created_at,
+    }
+    if (
+        stored_prior is None
+        or reported_prior != stored_prior
+        or set(incoming_descriptors) != {prior_id, replacement_id}
+    ):
+        return False
+    return (
+        stored_prior.get("suggestion_id") == prior_id
+        and stored_prior.get("kind") == "insertion"
+        and all(
+            stored_prior.get(field) == value
+            for field, value in expected_metadata.items()
+        )
+        and replacement is not None
+        and replacement.get("suggestion_id") == replacement_id
+        and replacement.get("kind") == "structure"
+        and all(
+            replacement.get(field) == value
+            for field, value in expected_metadata.items()
+        )
+    )
 
 
 def _document_state(row: Any) -> CollaborationDocumentState:
@@ -128,9 +235,12 @@ def _collaboration_update(row: Any) -> CollaborationUpdate:
             bytes(row.update_bytes) if row.update_bytes is not None else None
         ),
         actor_user_id=row.actor_user_id,
+        actor_guest_identity_id=row.actor_guest_identity_id,
         actor_kind=row.actor_kind,
         change_kind=row.change_kind,
         suggestion_ids=tuple(str(item) for item in (row.suggestion_ids or [])),
+        change_summary=dict(row.change_summary or {}),
+        decision_outcome=row.decision_outcome,
         command_id=row.command_id,
         created_at=float(row.created_at),
         payload_pruned_at=row.payload_pruned_at,
@@ -146,10 +256,13 @@ def _lease(row: Any) -> CollaborationLease:
         generation=int(row.generation),
         user_id=row.user_id,
         permission=row.permission,
-        session_id=str(row.session_id),
+        session_id=(str(row.session_id) if row.session_id is not None else None),
         issued_at=float(row.issued_at),
         expires_at=float(row.expires_at),
         last_validated_at=float(row.validated_at or row.issued_at),
+        actor_kind=row.actor_kind,
+        guest_identity_id=row.guest_identity_id,
+        guest_link_id=row.guest_link_id,
         rotation_command_id=row.rotation_command_id,
         rotated_from_lease_id=row.rotated_from_lease_id,
         revoked_at=row.revoked_at,
@@ -164,6 +277,9 @@ def _lease_values(lease: CollaborationLease) -> dict[str, Any]:
         "document_id": lease.document_id,
         "generation": lease.generation,
         "user_id": lease.user_id,
+        "actor_kind": lease.actor_kind,
+        "guest_identity_id": lease.guest_identity_id,
+        "guest_link_id": lease.guest_link_id,
         "permission": lease.permission,
         "session_id": lease.session_id,
         "issued_at": lease.issued_at,
@@ -173,6 +289,50 @@ def _lease_values(lease: CollaborationLease) -> dict[str, Any]:
         "rotation_command_id": lease.rotation_command_id,
         "rotated_from_lease_id": lease.rotated_from_lease_id,
     }
+
+
+def _comment_message(row: Any) -> CollaborationCommentMessage:
+    return CollaborationCommentMessage(
+        message_id=row.id,
+        thread_id=row.thread_id,
+        revision=int(row.revision),
+        author_user_id=row.author_user_id,
+        author_guest_identity_id=row.author_guest_identity_id,
+        body_markdown=str(row.body_markdown),
+        mention_user_ids=tuple(
+            uuid.UUID(str(value)) for value in (row.mention_user_ids or [])
+        ),
+        created_at=float(row.created_at),
+        edited_at=float(row.edited_at) if row.edited_at is not None else None,
+        deleted_at=(
+            float(row.deleted_at) if row.deleted_at is not None else None
+        ),
+    )
+
+
+def _comment_thread(
+    row: Any,
+    messages: tuple[CollaborationCommentMessage, ...],
+) -> CollaborationCommentThread:
+    return CollaborationCommentThread(
+        thread_id=row.id,
+        document_id=str(row.document_id),
+        generation=int(row.generation),
+        revision=int(row.revision),
+        status=row.status,
+        created_by_user_id=row.created_by_user_id,
+        created_by_guest_identity_id=row.created_by_guest_identity_id,
+        resolved_by_user_id=row.resolved_by_user_id,
+        resolved_by_guest_identity_id=row.resolved_by_guest_identity_id,
+        resolved_at=(
+            float(row.resolved_at) if row.resolved_at is not None else None
+        ),
+        anchor=dict(row.anchor or {}),
+        quote_text=str(row.quote_text),
+        created_at=float(row.created_at),
+        updated_at=float(row.updated_at),
+        messages=messages,
+    )
 
 
 def _persisted_command(
@@ -233,6 +393,109 @@ async def _lock_instance_fence(
     return row
 
 
+def _lease_matches_update_actor(
+    lease: Any,
+    update_record: PersistCollaborationUpdate,
+) -> bool:
+    """Return whether one lease belongs to the update's exact actor union."""
+    if update_record.actor_kind == "guest":
+        return (
+            lease.actor_kind == "guest"
+            and lease.guest_identity_id
+            == update_record.actor_guest_identity_id
+        )
+    return (
+        lease.actor_kind == "user"
+        and lease.user_id == update_record.actor_user_id
+    )
+
+
+def _same_rotation_authority(previous: Any, successor: Any) -> bool:
+    """Require one rotation to preserve identity and connection scope."""
+    return (
+        successor.tenant_id == previous.tenant_id
+        and successor.document_id == previous.document_id
+        and int(successor.generation) == int(previous.generation)
+        and successor.actor_kind == previous.actor_kind
+        and successor.user_id == previous.user_id
+        and successor.guest_identity_id == previous.guest_identity_id
+        and successor.guest_link_id == previous.guest_link_id
+        and successor.session_id == previous.session_id
+    )
+
+
+async def _lock_append_lease(
+    session: "AsyncSession",
+    *,
+    update_record: PersistCollaborationUpdate,
+    now: float,
+) -> Any:
+    """Lock the current authority for one already-started client update.
+
+    A token refresh atomically revokes a lease before the WebSocket can
+    replace the context captured by an update already in progress. Such an
+    update may use exactly the active immediate successor while the original
+    lease is still within its lifetime. All current access, session and
+    permission checks remain downstream and use that successor.
+    """
+    supplied = (
+        await session.execute(
+            select(editor_collaboration_leases)
+            .where(
+                editor_collaboration_leases.c.tenant_id
+                == update_record.tenant_id,
+                editor_collaboration_leases.c.lease_id
+                == update_record.lease_id,
+                editor_collaboration_leases.c.document_id
+                == update_record.document_id,
+                editor_collaboration_leases.c.generation
+                == update_record.generation,
+            )
+            .with_for_update()
+        )
+    ).one_or_none()
+    if (
+        supplied is None
+        or float(supplied.expires_at) <= now
+        or not _lease_matches_update_actor(supplied, update_record)
+    ):
+        raise CollaborationLeaseInvalid()
+    if supplied.revoked_at is None:
+        return supplied
+
+    successors = (
+        await session.execute(
+            select(editor_collaboration_leases)
+            .where(
+                editor_collaboration_leases.c.tenant_id
+                == update_record.tenant_id,
+                editor_collaboration_leases.c.rotated_from_lease_id
+                == supplied.lease_id,
+                editor_collaboration_leases.c.document_id
+                == update_record.document_id,
+                editor_collaboration_leases.c.generation
+                == update_record.generation,
+                editor_collaboration_leases.c.revoked_at.is_(None),
+                editor_collaboration_leases.c.issued_at <= now,
+                editor_collaboration_leases.c.expires_at > now,
+            )
+            .limit(2)
+            .with_for_update()
+        )
+    ).all()
+    if len(successors) != 1:
+        raise CollaborationLeaseInvalid()
+    successor = successors[0]
+    if (
+        supplied.revoked_at != successor.issued_at
+        or successor.rotation_command_id is None
+        or not _same_rotation_authority(supplied, successor)
+        or not _lease_matches_update_actor(successor, update_record)
+    ):
+        raise CollaborationLeaseInvalid()
+    return successor
+
+
 async def _lock_lease_rate_scope(
     session: "AsyncSession",
     *,
@@ -252,6 +515,357 @@ async def _lock_lease_rate_scope(
     )
 
 
+async def _active_guest_access(
+    session: "AsyncSession",
+    *,
+    tenant_id: str,
+    guest_identity_id: uuid.UUID,
+    guest_link_id: uuid.UUID,
+    document_id: str,
+    generation: int,
+    minimum: SharePermission,
+    now: float,
+    allow_comment: bool = False,
+    guest_links_enabled: bool = True,
+) -> Any | None:
+    """Return the live guest identity/link pair for one required capability."""
+    if not guest_links_enabled:
+        return None
+    row = (
+        await session.execute(
+            select(
+                editor_document_guest_identities.c.id.label(
+                    "guest_identity_id"
+                ),
+                editor_document_share_links.c.id.label("guest_link_id"),
+                editor_document_share_links.c.permission,
+            )
+            .join(
+                editor_document_share_links,
+                (
+                    editor_document_share_links.c.tenant_id
+                    == editor_document_guest_identities.c.tenant_id
+                )
+                & (
+                    editor_document_share_links.c.id
+                    == editor_document_guest_identities.c.link_id
+                ),
+            )
+            .where(
+                editor_document_guest_identities.c.tenant_id == tenant_id,
+                editor_document_guest_identities.c.id == guest_identity_id,
+                editor_document_guest_identities.c.link_id == guest_link_id,
+                editor_document_guest_identities.c.document_id == document_id,
+                editor_document_guest_identities.c.generation == generation,
+                editor_document_guest_identities.c.revoked_at.is_(None),
+                editor_document_guest_identities.c.expires_at > now,
+                editor_document_share_links.c.document_id == document_id,
+                editor_document_share_links.c.generation == generation,
+                editor_document_share_links.c.revoked_at.is_(None),
+                editor_document_share_links.c.expires_at > now,
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    if allow_comment:
+        return row if str(row.permission) in {"comment", "suggest", "edit"} else None
+    permission_rank = {
+        "view": 1,
+        "comment": 1,
+        "suggest": 2,
+        "edit": 3,
+    }
+    minimum_rank = {
+        SharePermission.VIEW: 1,
+        SharePermission.SUGGEST: 2,
+        SharePermission.EDIT: 3,
+    }[minimum]
+    if permission_rank.get(str(row.permission), 0) < minimum_rank:
+        return None
+    return row
+
+
+async def _lock_comment_document(
+    session: "AsyncSession",
+    *,
+    tenant_id: str,
+    document_id: str,
+    generation: int,
+    actor_user_id: uuid.UUID | None,
+    actor_guest_identity_id: uuid.UUID | None,
+    guest_link_id: uuid.UUID | None,
+    minimum: SharePermission,
+    restrict_to_workspace_members: bool,
+    sharing_enabled: bool,
+    guest_links_enabled: bool,
+    now: float,
+    allow_comment: bool = False,
+) -> tuple[Any, uuid.UUID]:
+    is_guest = actor_guest_identity_id is not None or guest_link_id is not None
+    if is_guest:
+        if (
+            actor_user_id is not None
+            or actor_guest_identity_id is None
+            or guest_link_id is None
+        ):
+            raise ValueError("shared-comment actor union is invalid")
+        access = await _active_guest_access(
+            session,
+            tenant_id=tenant_id,
+            guest_identity_id=actor_guest_identity_id,
+            guest_link_id=guest_link_id,
+            document_id=document_id,
+            generation=generation,
+            minimum=minimum,
+            now=now,
+            allow_comment=allow_comment,
+            guest_links_enabled=guest_links_enabled,
+        )
+        if access is None:
+            raise CollaborationDocumentNotFound(document_id)
+    else:
+        if actor_user_id is None:
+            raise ValueError("shared-comment actor is required")
+        access = await lock_resource_access(
+            session,
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            resource_type="editor_document",
+            resource_table=editor_documents,
+            id_column=editor_documents.c.id,
+            resource_id=document_id,
+            owner_column=editor_documents.c.created_by_user_id,
+            minimum=minimum,
+            restrict_to_workspace_members=restrict_to_workspace_members,
+            sharing_enabled=sharing_enabled,
+        )
+        if access is None or access.owner_user_id is None:
+            raise CollaborationDocumentNotFound(document_id)
+    row = (
+        await session.execute(
+            select(editor_documents)
+            .where(
+                editor_documents.c.tenant_id == tenant_id,
+                editor_documents.c.id == document_id,
+            )
+            .with_for_update()
+        )
+    ).one()
+    if (
+        row.content_mode != "collaboration"
+        or row.deleted_at is not None
+        or int(row.collaboration_generation) != generation
+    ):
+        raise CollaborationConflict("generation_conflict")
+    owner_user_id = row.created_by_user_id
+    if owner_user_id is None:
+        raise CollaborationDocumentNotFound(document_id)
+    return row, owner_user_id
+
+
+async def _read_comment_document(
+    session: "AsyncSession",
+    *,
+    tenant_id: str,
+    document_id: str,
+    generation: int,
+    actor_user_id: uuid.UUID | None,
+    actor_guest_identity_id: uuid.UUID | None,
+    guest_link_id: uuid.UUID | None,
+    restrict_to_workspace_members: bool,
+    sharing_enabled: bool,
+    guest_links_enabled: bool,
+    now: float,
+) -> tuple[Any, uuid.UUID]:
+    """Authorize a comment read/read-state write without mutation row locks.
+
+    Listing a thread or advancing a personal read coordinate never changes the
+    document authority. Taking the mutation path's user and document
+    ``FOR UPDATE`` locks here creates an avoidable inversion with a comment
+    transaction that owns the document and appends user-event foreign keys.
+    A single MVCC snapshot is sufficient: callers either return content already
+    authorized in that snapshot or update only the actor's personal read row.
+    """
+    is_guest = actor_guest_identity_id is not None or guest_link_id is not None
+    if is_guest:
+        if (
+            actor_user_id is not None
+            or actor_guest_identity_id is None
+            or guest_link_id is None
+        ):
+            raise ValueError("shared-comment actor union is invalid")
+        access = await _active_guest_access(
+            session,
+            tenant_id=tenant_id,
+            guest_identity_id=actor_guest_identity_id,
+            guest_link_id=guest_link_id,
+            document_id=document_id,
+            generation=generation,
+            minimum=SharePermission.VIEW,
+            now=now,
+            guest_links_enabled=guest_links_enabled,
+        )
+        if access is None:
+            raise CollaborationDocumentNotFound(document_id)
+        statement = select(editor_documents).where(
+            editor_documents.c.tenant_id == tenant_id,
+            editor_documents.c.id == document_id,
+            editor_documents.c.deleted_at.is_(None),
+        )
+    else:
+        if actor_user_id is None:
+            raise ValueError("shared-comment actor is required")
+        statement = visible_resource_select(
+            resource_table=editor_documents,
+            id_column=editor_documents.c.id,
+            owner_column=editor_documents.c.created_by_user_id,
+            resource_type="editor_document",
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            restrict_to_workspace_members=restrict_to_workspace_members,
+            sharing_enabled=sharing_enabled,
+        ).where(editor_documents.c.id == document_id)
+    row = (await session.execute(statement)).one_or_none()
+    if row is None:
+        raise CollaborationDocumentNotFound(document_id)
+    if (
+        row.content_mode != "collaboration"
+        or row.deleted_at is not None
+        or int(row.collaboration_generation) != generation
+    ):
+        raise CollaborationConflict("generation_conflict")
+    owner_user_id = row.created_by_user_id
+    if owner_user_id is None:
+        raise CollaborationDocumentNotFound(document_id)
+    return row, owner_user_id
+
+
+async def _comment_thread_in_session(
+    session: "AsyncSession",
+    *,
+    tenant_id: str,
+    document_id: str,
+    generation: int,
+    thread_id: uuid.UUID,
+) -> CollaborationCommentThread:
+    row = (
+        await session.execute(
+            select(editor_collaboration_comment_threads).where(
+                editor_collaboration_comment_threads.c.tenant_id == tenant_id,
+                editor_collaboration_comment_threads.c.document_id == document_id,
+                editor_collaboration_comment_threads.c.generation == generation,
+                editor_collaboration_comment_threads.c.id == thread_id,
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        raise CollaborationConflict("comment_thread_not_found")
+    message_rows = (
+        await session.execute(
+            select(editor_collaboration_comment_messages)
+            .where(
+                editor_collaboration_comment_messages.c.tenant_id == tenant_id,
+                editor_collaboration_comment_messages.c.thread_id == thread_id,
+            )
+            .order_by(
+                editor_collaboration_comment_messages.c.created_at,
+                editor_collaboration_comment_messages.c.id,
+            )
+        )
+    ).all()
+    return _comment_thread(
+        row,
+        tuple(_comment_message(message) for message in message_rows),
+    )
+
+
+async def _validate_comment_mentions(
+    session: "AsyncSession",
+    *,
+    tenant_id: str,
+    document_id: str,
+    owner_user_id: uuid.UUID,
+    mention_user_ids: tuple[uuid.UUID, ...],
+    sharing_enabled: bool,
+) -> None:
+    mentions = set(mention_user_ids)
+    if not mentions:
+        return
+    shared_participants: set[uuid.UUID] = set()
+    if sharing_enabled:
+        shared_participants = set(
+            (
+                await session.execute(
+                    select(resource_shares.c.recipient_user_id).where(
+                        resource_shares.c.tenant_id == tenant_id,
+                        resource_shares.c.resource_type == "editor_document",
+                        resource_shares.c.resource_id == document_id,
+                        resource_shares.c.accepted_at.isnot(None),
+                        resource_shares.c.revoked_at.is_(None),
+                    )
+                )
+            ).scalars()
+        )
+    participants = shared_participants | {owner_user_id}
+    active_mentions = set(
+        (
+            await session.execute(
+                select(users.c.id).where(
+                    users.c.tenant_id == tenant_id,
+                    users.c.id.in_(mentions),
+                    users.c.disabled_at.is_(None),
+                )
+            )
+        ).scalars()
+    )
+    if not mentions.issubset(participants & active_mentions):
+        raise ValueError("mentions must reference active document participants")
+
+
+async def _append_comment_effects(
+    session: "AsyncSession",
+    *,
+    tenant_id: str,
+    document_id: str,
+    actor_user_id: uuid.UUID | None,
+    actor_guest_identity_id: uuid.UUID | None,
+    owner_user_id: uuid.UUID,
+    action: str,
+    mention_user_ids: tuple[uuid.UUID, ...] = (),
+) -> None:
+    await append_resource_effects(
+        session,
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
+        actor_type=(
+            "guest" if actor_guest_identity_id is not None else "user"
+        ),
+        detail=(
+            {"guest_identity_id": str(actor_guest_identity_id)}
+            if actor_guest_identity_id is not None
+            else {}
+        ),
+        owner_user_id=owner_user_id,
+        action=action,
+        resource_type="editor_document",
+        resource_id=document_id,
+        scope="collaboration_comment_changed",
+        additional_targets=mention_user_ids,
+    )
+    for mentioned_user_id in sorted(set(mention_user_ids), key=str):
+        if actor_user_id is not None and mentioned_user_id == actor_user_id:
+            continue
+        await append_user_invalidation(
+            session,
+            tenant_id=tenant_id,
+            target_user_id=mentioned_user_id,
+            scope="collaboration_comment_mention",
+            resource_type="editor_document",
+            resource_id=document_id,
+        )
+
+
 class PostgresEditorCollaborationStore:
     """Durable collaboration state on the shared platform session factory."""
 
@@ -261,10 +875,14 @@ class PostgresEditorCollaborationStore:
         session_factory: "async_sessionmaker[AsyncSession]",
         app_role: str,
         restrict_to_workspace_members: bool,
+        sharing_enabled: bool = True,
+        guest_links_enabled: bool = True,
     ) -> None:
         self._session_factory = session_factory
         self._app_role = app_role
         self._restrict_to_workspace_members = restrict_to_workspace_members
+        self._sharing_enabled = sharing_enabled
+        self._guest_links_enabled = guest_links_enabled
 
     def _session(
         self, tenant_id: str
@@ -433,15 +1051,19 @@ class PostgresEditorCollaborationStore:
                 raise CollaborationConflict("revision_conflict")
             if int(row.metadata_revision) != expected_metadata_revision:
                 raise CollaborationConflict("metadata_conflict")
-            active_share = await session.scalar(
-                select(resource_shares.c.id)
-                .where(
-                    resource_shares.c.tenant_id == tenant_id,
-                    resource_shares.c.resource_type == "editor_document",
-                    resource_shares.c.resource_id == document_id,
-                    resource_shares.c.revoked_at.is_(None),
+            active_share = (
+                await session.scalar(
+                    select(resource_shares.c.id)
+                    .where(
+                        resource_shares.c.tenant_id == tenant_id,
+                        resource_shares.c.resource_type == "editor_document",
+                        resource_shares.c.resource_id == document_id,
+                        resource_shares.c.revoked_at.is_(None),
+                    )
+                    .limit(1)
                 )
-                .limit(1)
+                if self._sharing_enabled
+                else None
             )
             if active_share is not None:
                 raise CollaborationConflict("share_conflict")
@@ -505,34 +1127,60 @@ class PostgresEditorCollaborationStore:
         if max_active < 1 or max_issued_per_window < 1:
             raise ValueError("lease limits must be positive")
         minimum = SharePermission(lease.permission)
+        rate_actor_id = lease.user_id or lease.guest_identity_id
+        if rate_actor_id is None:
+            raise ValueError("lease actor is required")
+        if (lease.actor_kind == "guest") != (lease.session_id is None):
+            raise ValueError("lease session does not match its actor kind")
         async with self._session(lease.tenant_id) as session:
             await _lock_lease_rate_scope(
                 session,
                 tenant_id=lease.tenant_id,
-                user_id=lease.user_id,
+                user_id=rate_actor_id,
             )
-            access = await lock_resource_access(
-                session,
-                tenant_id=lease.tenant_id,
-                actor_user_id=lease.user_id,
-                resource_type="editor_document",
-                resource_table=editor_documents,
-                id_column=editor_documents.c.id,
-                resource_id=lease.document_id,
-                owner_column=editor_documents.c.created_by_user_id,
-                minimum=minimum,
-                restrict_to_workspace_members=self._restrict_to_workspace_members,
-            )
+            if lease.actor_kind == "guest":
+                if lease.guest_identity_id is None or lease.guest_link_id is None:
+                    raise ValueError("guest lease actor is incomplete")
+                access = await _active_guest_access(
+                    session,
+                    tenant_id=lease.tenant_id,
+                    guest_identity_id=lease.guest_identity_id,
+                    guest_link_id=lease.guest_link_id,
+                    document_id=lease.document_id,
+                    generation=lease.generation,
+                    minimum=minimum,
+                    now=lease.issued_at,
+                    guest_links_enabled=self._guest_links_enabled,
+                )
+                session_exists = access
+            else:
+                if lease.user_id is None:
+                    raise ValueError("user lease actor is incomplete")
+                access = await lock_resource_access(
+                    session,
+                    tenant_id=lease.tenant_id,
+                    actor_user_id=lease.user_id,
+                    resource_type="editor_document",
+                    resource_table=editor_documents,
+                    id_column=editor_documents.c.id,
+                    resource_id=lease.document_id,
+                    owner_column=editor_documents.c.created_by_user_id,
+                    minimum=minimum,
+                    restrict_to_workspace_members=(
+                        self._restrict_to_workspace_members
+                    ),
+                    sharing_enabled=self._sharing_enabled,
+                )
+                session_exists = await session.scalar(
+                    select(auth_sessions.c.id).where(
+                        auth_sessions.c.tenant_id == lease.tenant_id,
+                        auth_sessions.c.id == lease.session_id,
+                        auth_sessions.c.user_id == lease.user_id,
+                        auth_sessions.c.expires_at > lease.issued_at,
+                    )
+                )
             if access is None:
                 raise CollaborationDocumentNotFound(lease.document_id)
-            session_exists = await session.scalar(
-                select(auth_sessions.c.id).where(
-                    auth_sessions.c.tenant_id == lease.tenant_id,
-                    auth_sessions.c.id == lease.session_id,
-                    auth_sessions.c.user_id == lease.user_id,
-                    auth_sessions.c.expires_at > lease.issued_at,
-                )
-            )
             document_row = (
                 await session.execute(
                     select(editor_documents).where(
@@ -560,7 +1208,13 @@ class PostgresEditorCollaborationStore:
                         == lease.document_id,
                         editor_collaboration_leases.c.generation
                         == lease.generation,
-                        editor_collaboration_leases.c.user_id == lease.user_id,
+                        (
+                            editor_collaboration_leases.c.user_id
+                            == lease.user_id
+                            if lease.actor_kind == "user"
+                            else editor_collaboration_leases.c.guest_identity_id
+                            == lease.guest_identity_id
+                        ),
                         editor_collaboration_leases.c.revoked_at.is_(None),
                         editor_collaboration_leases.c.expires_at
                         > lease.issued_at,
@@ -577,7 +1231,13 @@ class PostgresEditorCollaborationStore:
                     .where(
                         editor_collaboration_leases.c.tenant_id
                         == lease.tenant_id,
-                        editor_collaboration_leases.c.user_id == lease.user_id,
+                        (
+                            editor_collaboration_leases.c.user_id
+                            == lease.user_id
+                            if lease.actor_kind == "user"
+                            else editor_collaboration_leases.c.guest_identity_id
+                            == lease.guest_identity_id
+                        ),
                         editor_collaboration_leases.c.issued_at >= issued_since,
                     )
                 )
@@ -606,11 +1266,16 @@ class PostgresEditorCollaborationStore:
             or replacement.rotated_from_lease_id != previous_lease_id
         ):
             raise ValueError("replacement must identify its rotation command")
+        rate_actor_id = replacement.user_id or replacement.guest_identity_id
+        if rate_actor_id is None:
+            raise ValueError("replacement lease actor is required")
+        if (replacement.actor_kind == "guest") != (replacement.session_id is None):
+            raise ValueError("replacement lease session does not match its actor kind")
         async with self._session(replacement.tenant_id) as session:
             await _lock_lease_rate_scope(
                 session,
                 tenant_id=replacement.tenant_id,
-                user_id=replacement.user_id,
+                user_id=rate_actor_id,
             )
             existing_replacement = (
                 await session.execute(
@@ -649,6 +1314,12 @@ class PostgresEditorCollaborationStore:
                     or int(existing_replacement.generation)
                     != replacement.generation
                     or existing_replacement.user_id != replacement.user_id
+                    or existing_replacement.actor_kind
+                    != replacement.actor_kind
+                    or existing_replacement.guest_identity_id
+                    != replacement.guest_identity_id
+                    or existing_replacement.guest_link_id
+                    != replacement.guest_link_id
                     or existing_replacement.session_id != replacement.session_id
                 ):
                     raise CollaborationConflict("rotation_command_conflict")
@@ -665,29 +1336,56 @@ class PostgresEditorCollaborationStore:
                 previous.document_id != replacement.document_id
                 or int(previous.generation) != replacement.generation
                 or previous.user_id != replacement.user_id
+                or previous.actor_kind != replacement.actor_kind
+                or previous.guest_identity_id != replacement.guest_identity_id
+                or previous.guest_link_id != replacement.guest_link_id
                 or previous.session_id != replacement.session_id
             ):
                 raise CollaborationLeaseInvalid("lease_invalid")
-            access = await lock_resource_access(
-                session,
-                tenant_id=replacement.tenant_id,
-                actor_user_id=replacement.user_id,
-                resource_type="editor_document",
-                resource_table=editor_documents,
-                id_column=editor_documents.c.id,
-                resource_id=replacement.document_id,
-                owner_column=editor_documents.c.created_by_user_id,
-                minimum=SharePermission(replacement.permission),
-                restrict_to_workspace_members=self._restrict_to_workspace_members,
-            )
-            active_session = await session.scalar(
-                select(auth_sessions.c.id).where(
-                    auth_sessions.c.tenant_id == replacement.tenant_id,
-                    auth_sessions.c.id == replacement.session_id,
-                    auth_sessions.c.user_id == replacement.user_id,
-                    auth_sessions.c.expires_at > replacement.issued_at,
+            if replacement.actor_kind == "guest":
+                if (
+                    replacement.guest_identity_id is None
+                    or replacement.guest_link_id is None
+                ):
+                    raise CollaborationLeaseInvalid("lease_invalid")
+                access = await _active_guest_access(
+                    session,
+                    tenant_id=replacement.tenant_id,
+                    guest_identity_id=replacement.guest_identity_id,
+                    guest_link_id=replacement.guest_link_id,
+                    document_id=replacement.document_id,
+                    generation=replacement.generation,
+                    minimum=SharePermission(replacement.permission),
+                    now=replacement.issued_at,
+                    guest_links_enabled=self._guest_links_enabled,
                 )
-            )
+                active_session = access
+            else:
+                if replacement.user_id is None:
+                    raise CollaborationLeaseInvalid("lease_invalid")
+                access = await lock_resource_access(
+                    session,
+                    tenant_id=replacement.tenant_id,
+                    actor_user_id=replacement.user_id,
+                    resource_type="editor_document",
+                    resource_table=editor_documents,
+                    id_column=editor_documents.c.id,
+                    resource_id=replacement.document_id,
+                    owner_column=editor_documents.c.created_by_user_id,
+                    minimum=SharePermission(replacement.permission),
+                    restrict_to_workspace_members=(
+                        self._restrict_to_workspace_members
+                    ),
+                    sharing_enabled=self._sharing_enabled,
+                )
+                active_session = await session.scalar(
+                    select(auth_sessions.c.id).where(
+                        auth_sessions.c.tenant_id == replacement.tenant_id,
+                        auth_sessions.c.id == replacement.session_id,
+                        auth_sessions.c.user_id == replacement.user_id,
+                        auth_sessions.c.expires_at > replacement.issued_at,
+                    )
+                )
             if access is None or active_session is None:
                 raise CollaborationLeaseInvalid("access_revoked")
             issued_count = int(
@@ -697,8 +1395,13 @@ class PostgresEditorCollaborationStore:
                     .where(
                         editor_collaboration_leases.c.tenant_id
                         == replacement.tenant_id,
-                        editor_collaboration_leases.c.user_id
-                        == replacement.user_id,
+                        (
+                            editor_collaboration_leases.c.user_id
+                            == replacement.user_id
+                            if replacement.actor_kind == "user"
+                            else editor_collaboration_leases.c.guest_identity_id
+                            == replacement.guest_identity_id
+                        ),
                         editor_collaboration_leases.c.issued_at >= issued_since,
                     )
                 )
@@ -748,26 +1451,70 @@ class PostgresEditorCollaborationStore:
                 raise CollaborationLeaseInvalid("access_revoked")
             if float(row.expires_at) <= now:
                 raise CollaborationLeaseInvalid("lease_expired")
-            access = await lock_resource_access(
-                session,
-                tenant_id=tenant_id,
-                actor_user_id=row.user_id,
-                resource_type="editor_document",
-                resource_table=editor_documents,
-                id_column=editor_documents.c.id,
-                resource_id=row.document_id,
-                owner_column=editor_documents.c.created_by_user_id,
-                minimum=SharePermission(row.permission),
-                restrict_to_workspace_members=self._restrict_to_workspace_members,
-            )
-            active_session = await session.scalar(
-                select(auth_sessions.c.id).where(
-                    auth_sessions.c.tenant_id == tenant_id,
-                    auth_sessions.c.id == row.session_id,
-                    auth_sessions.c.user_id == row.user_id,
-                    auth_sessions.c.expires_at > now,
+            if row.actor_kind == "guest":
+                access = (
+                    await _active_guest_access(
+                        session,
+                        tenant_id=tenant_id,
+                        guest_identity_id=row.guest_identity_id,
+                        guest_link_id=row.guest_link_id,
+                        document_id=str(row.document_id),
+                        generation=int(row.generation),
+                        minimum=SharePermission(row.permission),
+                        now=now,
+                        guest_links_enabled=self._guest_links_enabled,
+                    )
+                    if row.guest_identity_id is not None
+                    and row.guest_link_id is not None
+                    else None
                 )
-            )
+                active_session = access
+            else:
+                access_row = (
+                    await session.execute(
+                        visible_resource_select(
+                            resource_table=editor_documents,
+                            id_column=editor_documents.c.id,
+                            owner_column=editor_documents.c.created_by_user_id,
+                            resource_type="editor_document",
+                            tenant_id=tenant_id,
+                            actor_user_id=row.user_id,
+                            restrict_to_workspace_members=(
+                                self._restrict_to_workspace_members
+                            ),
+                            sharing_enabled=self._sharing_enabled,
+                        ).where(editor_documents.c.id == row.document_id)
+                    )
+                ).one_or_none()
+                allowed_permissions = {
+                    permission.value
+                    for permission in share_permissions_satisfying(
+                        "editor_document",
+                        SharePermission(row.permission),
+                    )
+                }
+                access = (
+                    access_row
+                    if access_row is not None
+                    and (
+                        access_row.created_by_user_id == row.user_id
+                        or str(
+                            access_row._mapping.get(
+                                VISIBLE_SHARE_PERMISSION
+                            )
+                        )
+                        in allowed_permissions
+                    )
+                    else None
+                )
+                active_session = await session.scalar(
+                    select(auth_sessions.c.id).where(
+                        auth_sessions.c.tenant_id == tenant_id,
+                        auth_sessions.c.id == row.session_id,
+                        auth_sessions.c.user_id == row.user_id,
+                        auth_sessions.c.expires_at > now,
+                    )
+                )
             if access is None or active_session is None:
                 await session.execute(
                     update(editor_collaboration_leases)
@@ -776,13 +1523,17 @@ class PostgresEditorCollaborationStore:
                 )
                 raise CollaborationLeaseInvalid("access_revoked")
             document_row = (
-                await session.execute(
-                    select(editor_documents).where(
-                        editor_documents.c.tenant_id == tenant_id,
-                        editor_documents.c.id == row.document_id,
+                access
+                if row.actor_kind != "guest"
+                else (
+                    await session.execute(
+                        select(editor_documents).where(
+                            editor_documents.c.tenant_id == tenant_id,
+                            editor_documents.c.id == row.document_id,
+                        )
                     )
-                )
-            ).one()
+                ).one()
+            )
             if (
                 document_row.content_mode != "collaboration"
                 or document_row.deleted_at is not None
@@ -992,6 +1743,22 @@ class PostgresEditorCollaborationStore:
         self, update_record: PersistCollaborationUpdate
     ) -> PersistedCollaborationUpdate:
         now = update_record.now or time.time()
+        if (
+            update_record.actor_kind == "guest"
+            and (
+                update_record.actor_user_id is not None
+                or update_record.actor_guest_identity_id is None
+            )
+        ) or (
+            update_record.actor_kind != "guest"
+            and update_record.actor_guest_identity_id is not None
+        ):
+            raise ValueError("collaboration update actor union is invalid")
+        if (
+            update_record.actor_kind == "human"
+            and update_record.actor_user_id is None
+        ):
+            raise ValueError("human collaboration update requires a user")
         if not update_record.update_bytes:
             raise ValueError("update_bytes must be non-empty")
         _require_sha256(update_record.update_hash, field="update_hash")
@@ -1043,29 +1810,11 @@ class PostgresEditorCollaborationStore:
             )
             lease_row = None
             if update_record.lease_id is not None:
-                lease_row = (
-                    await session.execute(
-                        select(editor_collaboration_leases)
-                        .where(
-                            editor_collaboration_leases.c.tenant_id
-                            == update_record.tenant_id,
-                            editor_collaboration_leases.c.lease_id
-                            == update_record.lease_id,
-                            editor_collaboration_leases.c.document_id
-                            == update_record.document_id,
-                            editor_collaboration_leases.c.generation
-                            == update_record.generation,
-                            editor_collaboration_leases.c.revoked_at.is_(None),
-                            editor_collaboration_leases.c.expires_at > now,
-                        )
-                        .with_for_update()
-                    )
-                ).one_or_none()
-                if (
-                    lease_row is None
-                    or lease_row.user_id != update_record.actor_user_id
-                ):
-                    raise CollaborationLeaseInvalid()
+                lease_row = await _lock_append_lease(
+                    session,
+                    update_record=update_record,
+                    now=now,
+                )
                 if (
                     update_record.change_kind == "suggestion"
                     and lease_row.permission not in {"suggest", "edit"}
@@ -1074,14 +1823,32 @@ class PostgresEditorCollaborationStore:
                     and lease_row.permission != "edit"
                 ):
                     raise CollaborationLeaseInvalid("permission_denied")
-                active_session = await session.scalar(
-                    select(auth_sessions.c.id).where(
-                        auth_sessions.c.tenant_id == update_record.tenant_id,
-                        auth_sessions.c.id == lease_row.session_id,
-                        auth_sessions.c.user_id == lease_row.user_id,
-                        auth_sessions.c.expires_at > now,
+                if lease_row.actor_kind == "guest":
+                    active_session = (
+                        await _active_guest_access(
+                            session,
+                            tenant_id=update_record.tenant_id,
+                            guest_identity_id=lease_row.guest_identity_id,
+                            guest_link_id=lease_row.guest_link_id,
+                            document_id=update_record.document_id,
+                            generation=update_record.generation,
+                            minimum=minimum,
+                            now=now,
+                            guest_links_enabled=self._guest_links_enabled,
+                        )
+                        if lease_row.guest_identity_id is not None
+                        and lease_row.guest_link_id is not None
+                        else None
                     )
-                )
+                else:
+                    active_session = await session.scalar(
+                        select(auth_sessions.c.id).where(
+                            auth_sessions.c.tenant_id == update_record.tenant_id,
+                            auth_sessions.c.id == lease_row.session_id,
+                            auth_sessions.c.user_id == lease_row.user_id,
+                            auth_sessions.c.expires_at > now,
+                        )
+                    )
                 if active_session is None:
                     raise CollaborationLeaseInvalid("session_invalid")
             elif (
@@ -1089,18 +1856,42 @@ class PostgresEditorCollaborationStore:
                 or update_record.change_kind not in {"decision", "suggestion"}
             ):
                 raise CollaborationLeaseInvalid("lease_required")
-            access = await lock_resource_access(
-                session,
-                tenant_id=update_record.tenant_id,
-                actor_user_id=update_record.actor_user_id,
-                resource_type="editor_document",
-                resource_table=editor_documents,
-                id_column=editor_documents.c.id,
-                resource_id=update_record.document_id,
-                owner_column=editor_documents.c.created_by_user_id,
-                minimum=minimum,
-                restrict_to_workspace_members=self._restrict_to_workspace_members,
-            )
+            if update_record.actor_kind == "guest":
+                access = (
+                    await _active_guest_access(
+                        session,
+                        tenant_id=update_record.tenant_id,
+                        guest_identity_id=cast(
+                            uuid.UUID,
+                            update_record.actor_guest_identity_id,
+                        ),
+                        guest_link_id=lease_row.guest_link_id,
+                        document_id=update_record.document_id,
+                        generation=update_record.generation,
+                        minimum=minimum,
+                        now=now,
+                        guest_links_enabled=self._guest_links_enabled,
+                    )
+                    if lease_row is not None
+                    and lease_row.guest_link_id is not None
+                    else None
+                )
+            else:
+                access = await lock_resource_access(
+                    session,
+                    tenant_id=update_record.tenant_id,
+                    actor_user_id=update_record.actor_user_id,
+                    resource_type="editor_document",
+                    resource_table=editor_documents,
+                    id_column=editor_documents.c.id,
+                    resource_id=update_record.document_id,
+                    owner_column=editor_documents.c.created_by_user_id,
+                    minimum=minimum,
+                    restrict_to_workspace_members=(
+                        self._restrict_to_workspace_members
+                    ),
+                    sharing_enabled=self._sharing_enabled,
+                )
             if access is None:
                 raise CollaborationLeaseInvalid("access_revoked")
             document = (
@@ -1208,9 +1999,14 @@ class PostgresEditorCollaborationStore:
                     update_hash=update_record.update_hash,
                     update_bytes=update_record.update_bytes,
                     actor_user_id=update_record.actor_user_id,
+                    actor_guest_identity_id=(
+                        update_record.actor_guest_identity_id
+                    ),
                     actor_kind=update_record.actor_kind,
                     change_kind=update_record.change_kind,
                     suggestion_ids=list(update_record.suggestion_ids),
+                    change_summary=update_record.change_summary,
+                    decision_outcome=update_record.decision_outcome,
                     command_id=command_id,
                     command_payload_hash=command_payload_hash,
                     created_at=now,
@@ -1244,6 +2040,13 @@ class PostgresEditorCollaborationStore:
         """Persist patch membership and decisions in the update transaction."""
         if not update_record.patches:
             return
+        actor_id = (
+            update_record.actor_guest_identity_id
+            if update_record.actor_kind == "guest"
+            else update_record.actor_user_id
+        )
+        if actor_id is None:
+            raise CollaborationConflict("patch_actor_missing")
         suggestions_by_patch: dict[str, dict[str, dict[str, Any]]] = {}
         for suggestion in update_record.suggestions:
             suggestions_by_patch.setdefault(suggestion.patch_id, {})[
@@ -1273,10 +2076,26 @@ class PostgresEditorCollaborationStore:
                 )
             ).mappings().one_or_none()
             if row is None:
+                private_assistant_publish = (
+                    update_record.actor_kind == "assistant"
+                    and update_record.actor_user_id is not None
+                    and update_record.command_id is not None
+                    and await _has_creator_private_suggestion_draft(
+                        session,
+                        tenant_id=update_record.tenant_id,
+                        document_id=update_record.document_id,
+                        creator_user_id=update_record.actor_user_id,
+                        patch_id=patch_state.patch_id,
+                        publication_command_id=update_record.command_id,
+                    )
+                )
                 if (
-                    update_record.actor_kind != "human"
+                    (
+                        update_record.actor_kind not in {"human", "guest"}
+                        and not private_assistant_publish
+                    )
                     or update_record.change_kind != "suggestion"
-                    or patch_state.author_id != update_record.actor_user_id
+                    or patch_state.author_id != actor_id
                     or not patch_state.active_suggestion_ids
                 ):
                     raise CollaborationConflict("patch_not_found")
@@ -1302,17 +2121,38 @@ class PostgresEditorCollaborationStore:
                         applied_revision=None,
                         applied_edit_ids=None,
                         note="",
-                        created_by_user_id=patch_state.author_id,
+                        created_by_user_id=(
+                            patch_state.author_id
+                            if update_record.actor_kind in {"human", "assistant"}
+                            else None
+                        ),
+                        created_by_guest_identity_id=(
+                            patch_state.author_id
+                            if update_record.actor_kind == "guest"
+                            else None
+                        ),
                         decided_by_user_id=None,
-                        command_id=None,
+                        decided_by_guest_identity_id=None,
+                        command_id=update_record.command_id,
                         created_at=patch_state.created_at,
                         decided_at=None,
                     )
                 )
+                await self._clear_published_private_draft(
+                    session,
+                    update_record=update_record,
+                    patch_id=patch_state.patch_id,
+                    actor_user_id=update_record.actor_user_id,
+                )
                 continue
             if (
                 row["collaboration_generation"] != update_record.generation
-                or row["created_by_user_id"] != patch_state.author_id
+                or (
+                    row["created_by_guest_identity_id"]
+                    if update_record.actor_kind == "guest"
+                    else row["created_by_user_id"]
+                )
+                != patch_state.author_id
                 or row["status"] != "pending"
             ):
                 raise CollaborationConflict("patch_metadata_conflict")
@@ -1340,6 +2180,9 @@ class PostgresEditorCollaborationStore:
                             else None
                         ),
                         decided_by_user_id=update_record.actor_user_id,
+                        decided_by_guest_identity_id=(
+                            update_record.actor_guest_identity_id
+                        ),
                         command_id=update_record.command_id,
                         decided_at=now,
                     )
@@ -1349,16 +2192,44 @@ class PostgresEditorCollaborationStore:
             prior_active_ids = {
                 str(item) for item in (row["suggestion_ids"] or [])
             }
-            if update_record.actor_user_id != row["created_by_user_id"]:
+            created_by_actor_id = (
+                row["created_by_guest_identity_id"]
+                if update_record.actor_kind == "guest"
+                else row["created_by_user_id"]
+            )
+            if actor_id != created_by_actor_id:
                 raise CollaborationConflict("patch_author_conflict")
-            if not prior_active_ids.issubset(active_ids):
-                raise CollaborationConflict("patch_membership_shrink")
             new_descriptors = suggestions_by_patch.get(patch_state.patch_id, {})
             if any(
-                descriptor["author_id"] != str(row["created_by_user_id"])
+                descriptor["author_id"] != str(created_by_actor_id)
                 for descriptor in new_descriptors.values()
             ):
                 raise CollaborationConflict("patch_author_conflict")
+            stored_descriptors = (
+                {
+                    str(item.get("suggestion_id")): dict(item)
+                    for item in (row["edits"] or [])
+                    if isinstance(item, dict) and item.get("suggestion_id")
+                }
+                if row["source"] == "human"
+                else {}
+            )
+            removed_ids = prior_active_ids - active_ids
+            if removed_ids:
+                if not _is_valid_slash_structure_supersession(
+                    patch_state=patch_state,
+                    prior_active_ids=prior_active_ids,
+                    active_ids=active_ids,
+                    stored_descriptors=stored_descriptors,
+                    incoming_descriptors=new_descriptors,
+                    actor_user_id=actor_id,
+                    created_by_user_id=created_by_actor_id,
+                    source=row["source"],
+                    change_kind=update_record.change_kind,
+                ):
+                    raise CollaborationConflict("patch_membership_shrink")
+            elif patch_state.superseded_suggestion_ids:
+                raise CollaborationConflict("patch_supersession_invalid")
             known_ids = prior_active_ids | set(new_descriptors)
             if not active_ids.issubset(known_ids):
                 raise CollaborationConflict("patch_metadata_conflict")
@@ -1371,11 +2242,7 @@ class PostgresEditorCollaborationStore:
                 ),
             }
             if row["source"] == "human":
-                descriptors = {
-                    str(item.get("suggestion_id")): dict(item)
-                    for item in (row["edits"] or [])
-                    if isinstance(item, dict) and item.get("suggestion_id")
-                }
+                descriptors = stored_descriptors
                 descriptors.update(new_descriptors)
                 if not active_ids.issubset(descriptors):
                     raise CollaborationConflict("patch_metadata_conflict")
@@ -1392,6 +2259,39 @@ class PostgresEditorCollaborationStore:
                 )
                 .values(**values)
             )
+            await self._clear_published_private_draft(
+                session,
+                update_record=update_record,
+                patch_id=patch_state.patch_id,
+                actor_user_id=update_record.actor_user_id,
+            )
+
+    @staticmethod
+    async def _clear_published_private_draft(
+        session: "AsyncSession",
+        *,
+        update_record: PersistCollaborationUpdate,
+        patch_id: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> None:
+        """Clear the creator-private draft in the shared-publish transaction."""
+        if (
+            update_record.decision is not None
+            or update_record.change_kind != "suggestion"
+            or actor_user_id is None
+        ):
+            return
+        await session.execute(
+            update(editor_comments)
+            .where(
+                editor_comments.c.tenant_id == update_record.tenant_id,
+                editor_comments.c.document_id == update_record.document_id,
+                editor_comments.c.created_by_user_id == actor_user_id,
+                editor_comments.c.suggestion_draft["patch_id"].astext
+                == patch_id,
+            )
+            .values(suggestion_draft=null())
+        )
 
     async def lookup_command(
         self,
@@ -1736,9 +2636,12 @@ class PostgresEditorCollaborationStore:
         statement = select(
             editor_collaboration_updates.c.sequence,
             editor_collaboration_updates.c.actor_user_id,
+            editor_collaboration_updates.c.actor_guest_identity_id,
             editor_collaboration_updates.c.actor_kind,
             editor_collaboration_updates.c.change_kind,
             editor_collaboration_updates.c.suggestion_ids,
+            editor_collaboration_updates.c.change_summary,
+            editor_collaboration_updates.c.decision_outcome,
             editor_collaboration_updates.c.command_id,
             editor_collaboration_updates.c.created_at,
         ).where(
@@ -1767,13 +2670,57 @@ class PostgresEditorCollaborationStore:
             CollaborationActivity(
                 sequence=int(row.sequence),
                 actor_user_id=row.actor_user_id,
+                actor_guest_identity_id=row.actor_guest_identity_id,
                 actor_kind=row.actor_kind,
                 change_kind=row.change_kind,
                 suggestion_ids=tuple(
                     str(item) for item in (row.suggestion_ids or [])
                 ),
+                change_summary=dict(row.change_summary or {}),
+                decision_outcome=row.decision_outcome,
                 command_id=row.command_id,
                 created_at=float(row.created_at),
+            )
+            for row in rows
+        )
+
+    async def list_comment_activity(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        before_id: int | None,
+        author_user_id: uuid.UUID | None,
+        limit: int,
+    ) -> tuple[CollaborationCommentActivity, ...]:
+        statement = select(
+            audit_log.c.id,
+            audit_log.c.actor_user_id,
+            audit_log.c.action,
+            audit_log.c.occurred_at,
+        ).where(
+            audit_log.c.tenant_id == tenant_id,
+            audit_log.c.resource_type == "editor_document",
+            audit_log.c.resource_id == document_id,
+            audit_log.c.action.like("editor.collaboration_comment.%"),
+        )
+        if before_id is not None:
+            statement = statement.where(audit_log.c.id < before_id)
+        if author_user_id is not None:
+            statement = statement.where(
+                audit_log.c.actor_user_id == author_user_id
+            )
+        statement = statement.order_by(audit_log.c.id.desc()).limit(
+            max(1, min(limit, 201))
+        )
+        async with self._session(tenant_id) as session:
+            rows = (await session.execute(statement)).all()
+        return tuple(
+            CollaborationCommentActivity(
+                id=int(row.id),
+                actor_user_id=row.actor_user_id,
+                action=str(row.action),
+                created_at=float(row.occurred_at.timestamp()),
             )
             for row in rows
         )
@@ -1817,7 +2764,10 @@ class PostgresEditorCollaborationStore:
                         ) AS items(edit)
                         WHERE CASE
                             WHEN editor_patches.source = 'human'
-                                THEN items.edit ->> 'kind'
+                                THEN CASE items.edit ->> 'kind'
+                                    WHEN 'modification' THEN 'replacement'
+                                    ELSE items.edit ->> 'kind'
+                                END
                             WHEN items.edit ->> 'position'
                                 IN ('append', 'prepend')
                                 OR (
@@ -1828,7 +2778,7 @@ class PostgresEditorCollaborationStore:
                             WHEN COALESCE(items.edit ->> 'find', '') <> ''
                                 AND COALESCE(items.edit ->> 'text', '') = ''
                                 THEN 'deletion'
-                            ELSE 'modification'
+                            ELSE 'replacement'
                         END = :suggestion_kind
                     )
                     """
@@ -1867,8 +2817,19 @@ class PostgresEditorCollaborationStore:
                         for item in edits
                         if isinstance(item, dict)
                         and item.get("kind")
-                        in {"insertion", "deletion", "modification"}
+                        in {
+                            "insertion",
+                            "deletion",
+                            "replacement",
+                            "format",
+                            "structure",
+                            "modification",
+                        }
                     )
+                )
+                kinds = tuple(
+                    "replacement" if kind == "modification" else kind
+                    for kind in kinds
                 )
             else:
                 exact_edits = tuple(
@@ -1964,6 +2925,874 @@ class PostgresEditorCollaborationStore:
         if len(rows) > limit:
             raise CollaborationConflict("all_open_too_large")
         return tuple(str(patch_id) for patch_id in rows)
+
+    async def list_comment_threads(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        since_revision: int,
+        status: str,
+        limit: int,
+    ) -> CollaborationCommentPage:
+        if since_revision < 0 or status not in {"all", "open", "resolved"}:
+            raise ValueError("invalid shared-comment filters")
+        bounded_limit = max(1, min(limit, 200))
+        async with self._session(tenant_id) as session:
+            document, owner_user_id = await _read_comment_document(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=actor_guest_identity_id,
+                guest_link_id=guest_link_id,
+                restrict_to_workspace_members=self._restrict_to_workspace_members,
+                sharing_enabled=self._sharing_enabled,
+                guest_links_enabled=self._guest_links_enabled,
+                now=time.time(),
+            )
+            current_revision = int(document.collaboration_comment_revision)
+            statement = select(editor_collaboration_comment_threads).where(
+                editor_collaboration_comment_threads.c.tenant_id == tenant_id,
+                editor_collaboration_comment_threads.c.document_id == document_id,
+                editor_collaboration_comment_threads.c.generation == generation,
+                editor_collaboration_comment_threads.c.revision > since_revision,
+            )
+            # Incremental pages return transitions out of the selected status
+            # as well, so clients can remove a row that was resolved remotely.
+            if since_revision == 0 and status != "all":
+                statement = statement.where(
+                    editor_collaboration_comment_threads.c.status == status
+                )
+            thread_rows = (
+                await session.execute(
+                    statement.order_by(
+                        editor_collaboration_comment_threads.c.revision,
+                        editor_collaboration_comment_threads.c.id,
+                    ).limit(bounded_limit + 1)
+                )
+            ).all()
+            has_more = len(thread_rows) > bounded_limit
+            page_rows = thread_rows[:bounded_limit]
+            page_revision = (
+                int(page_rows[-1].revision)
+                if has_more and page_rows
+                else current_revision
+            )
+            thread_ids = tuple(row.id for row in page_rows)
+            messages_by_thread: dict[
+                uuid.UUID, list[CollaborationCommentMessage]
+            ] = {thread_id: [] for thread_id in thread_ids}
+            if thread_ids:
+                message_rows = (
+                    await session.execute(
+                        select(editor_collaboration_comment_messages)
+                        .where(
+                            editor_collaboration_comment_messages.c.tenant_id
+                            == tenant_id,
+                            editor_collaboration_comment_messages.c.thread_id.in_(
+                                thread_ids
+                            ),
+                        )
+                        .order_by(
+                            editor_collaboration_comment_messages.c.created_at,
+                            editor_collaboration_comment_messages.c.id,
+                        )
+                    )
+                ).all()
+                for message_row in message_rows:
+                    messages_by_thread[message_row.thread_id].append(
+                        _comment_message(message_row)
+                    )
+            if actor_guest_identity_id is not None:
+                read_row = await session.scalar(
+                    select(
+                        editor_document_guest_identities.c.last_read_revision
+                    ).where(
+                        editor_document_guest_identities.c.tenant_id
+                        == tenant_id,
+                        editor_document_guest_identities.c.id
+                        == actor_guest_identity_id,
+                    )
+                )
+            else:
+                read_row = (
+                    await session.execute(
+                        select(
+                            editor_collaboration_comment_reads.c.last_read_revision
+                        ).where(
+                            editor_collaboration_comment_reads.c.tenant_id
+                            == tenant_id,
+                            editor_collaboration_comment_reads.c.document_id
+                            == document_id,
+                            editor_collaboration_comment_reads.c.generation
+                            == generation,
+                            editor_collaboration_comment_reads.c.user_id
+                            == actor_user_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+            shared_participants: set[uuid.UUID] = set()
+            if self._sharing_enabled:
+                shared_participants = set(
+                    (
+                        await session.execute(
+                            select(resource_shares.c.recipient_user_id).where(
+                                resource_shares.c.tenant_id == tenant_id,
+                                resource_shares.c.resource_type
+                                == "editor_document",
+                                resource_shares.c.resource_id == document_id,
+                                resource_shares.c.accepted_at.isnot(None),
+                                resource_shares.c.revoked_at.is_(None),
+                            )
+                        )
+                    ).scalars()
+                )
+            participant_ids = shared_participants | {owner_user_id}
+            active_participant_ids = tuple(
+                sorted(
+                    (
+                        await session.execute(
+                            select(users.c.id).where(
+                                users.c.tenant_id == tenant_id,
+                                users.c.id.in_(participant_ids),
+                                users.c.disabled_at.is_(None),
+                            )
+                        )
+                    ).scalars(),
+                    key=str,
+                )
+            )
+            guest_participant_ids = tuple(
+                sorted(
+                    {
+                        guest_id
+                        for thread in (
+                            _comment_thread(
+                                row,
+                                tuple(messages_by_thread.get(row.id, ())),
+                            )
+                            for row in page_rows
+                        )
+                        for guest_id in (
+                            thread.created_by_guest_identity_id,
+                            thread.resolved_by_guest_identity_id,
+                            *(
+                                message.author_guest_identity_id
+                                for message in thread.messages
+                            ),
+                        )
+                        if guest_id is not None
+                    },
+                    key=str,
+                )
+            )
+            return CollaborationCommentPage(
+                threads=tuple(
+                    _comment_thread(
+                        row,
+                        tuple(messages_by_thread.get(row.id, ())),
+                    )
+                    for row in page_rows
+                ),
+                revision=page_revision,
+                last_read_revision=int(read_row or 0),
+                current_revision=current_revision,
+                has_more=has_more,
+                participant_user_ids=active_participant_ids,
+                participant_guest_identity_ids=guest_participant_ids,
+            )
+
+    async def create_comment_thread(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        anchor: dict[str, Any],
+        quote_text: str,
+        body_markdown: str,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        expected_revision: int,
+        command_id: uuid.UUID,
+        command_payload_hash: str,
+        now: float,
+    ) -> CollaborationCommentThread:
+        async with self._session(tenant_id) as session:
+            document, owner_user_id = await _lock_comment_document(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=actor_guest_identity_id,
+                guest_link_id=guest_link_id,
+                minimum=SharePermission.SUGGEST,
+                restrict_to_workspace_members=self._restrict_to_workspace_members,
+                sharing_enabled=self._sharing_enabled,
+                guest_links_enabled=self._guest_links_enabled,
+                now=now,
+                allow_comment=True,
+            )
+            existing = (
+                await session.execute(
+                    select(editor_collaboration_comment_threads).where(
+                        editor_collaboration_comment_threads.c.tenant_id
+                        == tenant_id,
+                        editor_collaboration_comment_threads.c.id == thread_id,
+                    )
+                )
+            ).one_or_none()
+            if existing is not None:
+                if (
+                    existing.last_command_id == command_id
+                    and existing.last_command_payload_hash
+                    == command_payload_hash
+                    and existing.last_command_kind == "create"
+                ):
+                    return await _comment_thread_in_session(
+                        session,
+                        tenant_id=tenant_id,
+                        document_id=document_id,
+                        generation=generation,
+                        thread_id=thread_id,
+                    )
+                raise CollaborationConflict("comment_command_conflict")
+            current_revision = int(document.collaboration_comment_revision)
+            if current_revision != expected_revision:
+                raise CollaborationConflict(
+                    "comment_revision_conflict",
+                    current_sequence=current_revision,
+                )
+            await _validate_comment_mentions(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                owner_user_id=owner_user_id,
+                mention_user_ids=mention_user_ids,
+                sharing_enabled=self._sharing_enabled,
+            )
+            revision = current_revision + 1
+            await session.execute(
+                insert(editor_collaboration_comment_threads).values(
+                    id=thread_id,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    generation=generation,
+                    revision=revision,
+                    status="open",
+                    created_by_user_id=actor_user_id,
+                    created_by_guest_identity_id=actor_guest_identity_id,
+                    resolved_by_user_id=None,
+                    resolved_at=None,
+                    anchor=anchor,
+                    quote_text=quote_text,
+                    created_at=now,
+                    updated_at=now,
+                    last_command_id=command_id,
+                    last_command_payload_hash=command_payload_hash,
+                    last_command_kind="create",
+                )
+            )
+            await session.execute(
+                insert(editor_collaboration_comment_messages).values(
+                    id=message_id,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    thread_id=thread_id,
+                    revision=revision,
+                    author_user_id=actor_user_id,
+                    author_guest_identity_id=actor_guest_identity_id,
+                    body_markdown=body_markdown,
+                    mention_user_ids=[str(value) for value in mention_user_ids],
+                    created_at=now,
+                    edited_at=None,
+                    deleted_at=None,
+                    last_command_id=command_id,
+                    last_command_payload_hash=command_payload_hash,
+                    last_command_kind="create",
+                )
+            )
+            await session.execute(
+                update(editor_documents)
+                .where(
+                    editor_documents.c.tenant_id == tenant_id,
+                    editor_documents.c.id == document_id,
+                )
+                .values(collaboration_comment_revision=revision)
+            )
+            await _append_comment_effects(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=actor_guest_identity_id,
+                owner_user_id=owner_user_id,
+                action="editor.collaboration_comment.created",
+                mention_user_ids=mention_user_ids,
+            )
+            return await _comment_thread_in_session(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                generation=generation,
+                thread_id=thread_id,
+            )
+
+    async def add_comment_reply(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        body_markdown: str,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        expected_revision: int,
+        command_id: uuid.UUID,
+        command_payload_hash: str,
+        now: float,
+    ) -> CollaborationCommentThread:
+        async with self._session(tenant_id) as session:
+            document, owner_user_id = await _lock_comment_document(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=actor_guest_identity_id,
+                guest_link_id=guest_link_id,
+                minimum=SharePermission.SUGGEST,
+                restrict_to_workspace_members=self._restrict_to_workspace_members,
+                sharing_enabled=self._sharing_enabled,
+                guest_links_enabled=self._guest_links_enabled,
+                now=now,
+                allow_comment=True,
+            )
+            existing_message = (
+                await session.execute(
+                    select(editor_collaboration_comment_messages).where(
+                        editor_collaboration_comment_messages.c.tenant_id
+                        == tenant_id,
+                        editor_collaboration_comment_messages.c.id == message_id,
+                    )
+                )
+            ).one_or_none()
+            if existing_message is not None:
+                if (
+                    existing_message.thread_id == thread_id
+                    and existing_message.last_command_id == command_id
+                    and existing_message.last_command_payload_hash
+                    == command_payload_hash
+                    and existing_message.last_command_kind == "reply"
+                ):
+                    return await _comment_thread_in_session(
+                        session,
+                        tenant_id=tenant_id,
+                        document_id=document_id,
+                        generation=generation,
+                        thread_id=thread_id,
+                    )
+                raise CollaborationConflict("comment_command_conflict")
+            thread_row = (
+                await session.execute(
+                    select(editor_collaboration_comment_threads)
+                    .where(
+                        editor_collaboration_comment_threads.c.tenant_id
+                        == tenant_id,
+                        editor_collaboration_comment_threads.c.document_id
+                        == document_id,
+                        editor_collaboration_comment_threads.c.generation
+                        == generation,
+                        editor_collaboration_comment_threads.c.id == thread_id,
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if thread_row is None:
+                raise CollaborationConflict("comment_thread_not_found")
+            if thread_row.status != "open":
+                raise CollaborationConflict("comment_thread_resolved")
+            if int(thread_row.revision) != expected_revision:
+                raise CollaborationConflict(
+                    "comment_revision_conflict",
+                    current_sequence=int(thread_row.revision),
+                )
+            await _validate_comment_mentions(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                owner_user_id=owner_user_id,
+                mention_user_ids=mention_user_ids,
+                sharing_enabled=self._sharing_enabled,
+            )
+            revision = int(document.collaboration_comment_revision) + 1
+            await session.execute(
+                insert(editor_collaboration_comment_messages).values(
+                    id=message_id,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    thread_id=thread_id,
+                    revision=revision,
+                    author_user_id=actor_user_id,
+                    author_guest_identity_id=actor_guest_identity_id,
+                    body_markdown=body_markdown,
+                    mention_user_ids=[str(value) for value in mention_user_ids],
+                    created_at=now,
+                    edited_at=None,
+                    deleted_at=None,
+                    last_command_id=command_id,
+                    last_command_payload_hash=command_payload_hash,
+                    last_command_kind="reply",
+                )
+            )
+            await session.execute(
+                update(editor_collaboration_comment_threads)
+                .where(
+                    editor_collaboration_comment_threads.c.tenant_id
+                    == tenant_id,
+                    editor_collaboration_comment_threads.c.id == thread_id,
+                )
+                .values(revision=revision, updated_at=now)
+            )
+            await session.execute(
+                update(editor_documents)
+                .where(
+                    editor_documents.c.tenant_id == tenant_id,
+                    editor_documents.c.id == document_id,
+                )
+                .values(collaboration_comment_revision=revision)
+            )
+            await _append_comment_effects(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=actor_guest_identity_id,
+                owner_user_id=owner_user_id,
+                action="editor.collaboration_comment.replied",
+                mention_user_ids=mention_user_ids,
+            )
+            return await _comment_thread_in_session(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                generation=generation,
+                thread_id=thread_id,
+            )
+
+    async def update_comment_message(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        body_markdown: str | None,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        delete_message: bool,
+        expected_revision: int,
+        command_id: uuid.UUID,
+        command_payload_hash: str,
+        now: float,
+    ) -> CollaborationCommentThread:
+        command_kind = "delete" if delete_message else "edit"
+        async with self._session(tenant_id) as session:
+            document, owner_user_id = await _lock_comment_document(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=actor_guest_identity_id,
+                guest_link_id=guest_link_id,
+                minimum=SharePermission.SUGGEST,
+                restrict_to_workspace_members=self._restrict_to_workspace_members,
+                sharing_enabled=self._sharing_enabled,
+                guest_links_enabled=self._guest_links_enabled,
+                now=now,
+                allow_comment=True,
+            )
+            thread_row = (
+                await session.execute(
+                    select(editor_collaboration_comment_threads)
+                    .where(
+                        editor_collaboration_comment_threads.c.tenant_id
+                        == tenant_id,
+                        editor_collaboration_comment_threads.c.document_id
+                        == document_id,
+                        editor_collaboration_comment_threads.c.generation
+                        == generation,
+                        editor_collaboration_comment_threads.c.id == thread_id,
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if thread_row is None:
+                raise CollaborationConflict("comment_thread_not_found")
+            message_row = (
+                await session.execute(
+                    select(editor_collaboration_comment_messages)
+                    .where(
+                        editor_collaboration_comment_messages.c.tenant_id
+                        == tenant_id,
+                        editor_collaboration_comment_messages.c.thread_id
+                        == thread_id,
+                        editor_collaboration_comment_messages.c.id == message_id,
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if message_row is None:
+                raise CollaborationConflict("comment_message_not_found")
+            if (
+                message_row.last_command_id == command_id
+                and message_row.last_command_payload_hash == command_payload_hash
+                and message_row.last_command_kind == command_kind
+            ):
+                return await _comment_thread_in_session(
+                    session,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    generation=generation,
+                    thread_id=thread_id,
+                )
+            if int(thread_row.revision) != expected_revision:
+                raise CollaborationConflict(
+                    "comment_revision_conflict",
+                    current_sequence=int(thread_row.revision),
+                )
+            if (
+                message_row.author_user_id != actor_user_id
+                or message_row.author_guest_identity_id
+                != actor_guest_identity_id
+            ):
+                raise CollaborationConflict("comment_author_required")
+            if message_row.deleted_at is not None:
+                raise CollaborationConflict("comment_message_deleted")
+            if not delete_message:
+                await _validate_comment_mentions(
+                    session,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    owner_user_id=owner_user_id,
+                    mention_user_ids=mention_user_ids,
+                    sharing_enabled=self._sharing_enabled,
+                )
+            revision = int(document.collaboration_comment_revision) + 1
+            values: dict[str, Any] = {
+                "revision": revision,
+                "last_command_id": command_id,
+                "last_command_payload_hash": command_payload_hash,
+                "last_command_kind": command_kind,
+            }
+            if delete_message:
+                values.update(
+                    body_markdown="",
+                    mention_user_ids=[],
+                    deleted_at=now,
+                )
+            else:
+                values.update(
+                    body_markdown=body_markdown,
+                    mention_user_ids=[
+                        str(value) for value in mention_user_ids
+                    ],
+                    edited_at=now,
+                )
+            await session.execute(
+                update(editor_collaboration_comment_messages)
+                .where(
+                    editor_collaboration_comment_messages.c.tenant_id
+                    == tenant_id,
+                    editor_collaboration_comment_messages.c.id == message_id,
+                )
+                .values(**values)
+            )
+            await session.execute(
+                update(editor_collaboration_comment_threads)
+                .where(
+                    editor_collaboration_comment_threads.c.tenant_id
+                    == tenant_id,
+                    editor_collaboration_comment_threads.c.id == thread_id,
+                )
+                .values(revision=revision, updated_at=now)
+            )
+            await session.execute(
+                update(editor_documents)
+                .where(
+                    editor_documents.c.tenant_id == tenant_id,
+                    editor_documents.c.id == document_id,
+                )
+                .values(collaboration_comment_revision=revision)
+            )
+            await _append_comment_effects(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=actor_guest_identity_id,
+                owner_user_id=owner_user_id,
+                action=(
+                    "editor.collaboration_comment.message_deleted"
+                    if delete_message
+                    else "editor.collaboration_comment.message_edited"
+                ),
+                mention_user_ids=(
+                    () if delete_message else mention_user_ids
+                ),
+            )
+            return await _comment_thread_in_session(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                generation=generation,
+                thread_id=thread_id,
+            )
+
+    async def set_comment_thread_status(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        thread_id: uuid.UUID,
+        status: str,
+        can_moderate: bool,
+        expected_revision: int,
+        command_id: uuid.UUID,
+        command_payload_hash: str,
+        now: float,
+    ) -> CollaborationCommentThread:
+        if status not in {"open", "resolved"}:
+            raise ValueError("invalid shared-comment status")
+        command_kind = "resolve" if status == "resolved" else "reopen"
+        async with self._session(tenant_id) as session:
+            document, owner_user_id = await _lock_comment_document(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=actor_guest_identity_id,
+                guest_link_id=guest_link_id,
+                minimum=SharePermission.SUGGEST,
+                restrict_to_workspace_members=self._restrict_to_workspace_members,
+                sharing_enabled=self._sharing_enabled,
+                guest_links_enabled=self._guest_links_enabled,
+                now=now,
+                allow_comment=True,
+            )
+            thread_row = (
+                await session.execute(
+                    select(editor_collaboration_comment_threads)
+                    .where(
+                        editor_collaboration_comment_threads.c.tenant_id
+                        == tenant_id,
+                        editor_collaboration_comment_threads.c.document_id
+                        == document_id,
+                        editor_collaboration_comment_threads.c.generation
+                        == generation,
+                        editor_collaboration_comment_threads.c.id == thread_id,
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if thread_row is None:
+                raise CollaborationConflict("comment_thread_not_found")
+            if (
+                thread_row.last_command_id == command_id
+                and thread_row.last_command_payload_hash == command_payload_hash
+                and thread_row.last_command_kind == command_kind
+            ):
+                return await _comment_thread_in_session(
+                    session,
+                    tenant_id=tenant_id,
+                    document_id=document_id,
+                    generation=generation,
+                    thread_id=thread_id,
+                )
+            if int(thread_row.revision) != expected_revision:
+                raise CollaborationConflict(
+                    "comment_revision_conflict",
+                    current_sequence=int(thread_row.revision),
+                )
+            if (
+                (
+                    thread_row.created_by_user_id != actor_user_id
+                    or thread_row.created_by_guest_identity_id
+                    != actor_guest_identity_id
+                )
+                and not can_moderate
+            ):
+                raise CollaborationConflict("comment_resolve_forbidden")
+            if thread_row.status == status:
+                raise CollaborationConflict("comment_status_conflict")
+            revision = int(document.collaboration_comment_revision) + 1
+            await session.execute(
+                update(editor_collaboration_comment_threads)
+                .where(
+                    editor_collaboration_comment_threads.c.tenant_id
+                    == tenant_id,
+                    editor_collaboration_comment_threads.c.id == thread_id,
+                )
+                .values(
+                    revision=revision,
+                    status=status,
+                    resolved_by_user_id=(
+                        actor_user_id if status == "resolved" else None
+                    ),
+                    resolved_by_guest_identity_id=(
+                        actor_guest_identity_id
+                        if status == "resolved"
+                        else None
+                    ),
+                    resolved_at=now if status == "resolved" else None,
+                    updated_at=now,
+                    last_command_id=command_id,
+                    last_command_payload_hash=command_payload_hash,
+                    last_command_kind=command_kind,
+                )
+            )
+            await session.execute(
+                update(editor_documents)
+                .where(
+                    editor_documents.c.tenant_id == tenant_id,
+                    editor_documents.c.id == document_id,
+                )
+                .values(collaboration_comment_revision=revision)
+            )
+            await _append_comment_effects(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=actor_guest_identity_id,
+                owner_user_id=owner_user_id,
+                action=(
+                    "editor.collaboration_comment.resolved"
+                    if status == "resolved"
+                    else "editor.collaboration_comment.reopened"
+                ),
+            )
+            return await _comment_thread_in_session(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                generation=generation,
+                thread_id=thread_id,
+            )
+
+    async def mark_comments_read(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        revision: int,
+        now: float,
+    ) -> int:
+        if revision < 0:
+            raise ValueError("revision must be non-negative")
+        async with self._session(tenant_id) as session:
+            document, _owner_user_id = await _read_comment_document(
+                session,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=actor_guest_identity_id,
+                guest_link_id=guest_link_id,
+                restrict_to_workspace_members=self._restrict_to_workspace_members,
+                sharing_enabled=self._sharing_enabled,
+                guest_links_enabled=self._guest_links_enabled,
+                now=now,
+            )
+            current = int(document.collaboration_comment_revision)
+            if revision > current:
+                raise CollaborationConflict(
+                    "comment_revision_conflict",
+                    current_sequence=current,
+                )
+            if actor_guest_identity_id is not None:
+                await session.execute(
+                    update(editor_document_guest_identities)
+                    .where(
+                        editor_document_guest_identities.c.tenant_id
+                        == tenant_id,
+                        editor_document_guest_identities.c.id
+                        == actor_guest_identity_id,
+                    )
+                    .values(
+                        last_read_revision=func.greatest(
+                            editor_document_guest_identities.c.last_read_revision,
+                            revision,
+                        ),
+                        last_seen_at=now,
+                    )
+                )
+            else:
+                await session.execute(
+                    pg_insert(editor_collaboration_comment_reads)
+                    .values(
+                        tenant_id=tenant_id,
+                        document_id=document_id,
+                        generation=generation,
+                        user_id=actor_user_id,
+                        last_read_revision=revision,
+                        updated_at=now,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=(
+                            editor_collaboration_comment_reads.c.tenant_id,
+                            editor_collaboration_comment_reads.c.document_id,
+                            editor_collaboration_comment_reads.c.generation,
+                            editor_collaboration_comment_reads.c.user_id,
+                        ),
+                        set_={
+                            "last_read_revision": func.greatest(
+                                editor_collaboration_comment_reads.c.last_read_revision,
+                                revision,
+                            ),
+                            "updated_at": now,
+                        },
+                    )
+                )
+            return revision
+
+    async def current_policy_cursor(self, *, tenant_id: str) -> int:
+        """Return the tenant's greatest committed content-free event ID."""
+        async with self._session(tenant_id) as session:
+            current = await session.scalar(
+                select(func.max(user_events.c.id)).where(
+                    user_events.c.tenant_id == tenant_id
+                )
+            )
+        return int(current) if current is not None else 0
 
     async def policy_events_after(
         self,
@@ -2134,6 +3963,7 @@ class PostgresEditorCollaborationStore:
                 owner_column=editor_documents.c.created_by_user_id,
                 minimum=SharePermission.VIEW,
                 restrict_to_workspace_members=self._restrict_to_workspace_members,
+                sharing_enabled=self._sharing_enabled,
                 owner_only=True,
             )
             if access is None:

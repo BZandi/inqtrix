@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import type { ResearchRunEvent, ResearchRunSummary } from '@/features/researchRuns/types'
+import type {
+  ResearchRunEvent,
+  ResearchRunResult,
+  ResearchRunSummary,
+} from '@/features/researchRuns/types'
 import { DEFAULT_PANEL_LAYOUT } from '@/features/project/panelLayout'
 import { createEmptyProjectState } from '@/features/project/seedProject'
 import type {
@@ -66,6 +70,48 @@ describe('applyRunEvent startedAt', () => {
     expect(hydrated.startedAt).toBe('2026-01-01T00:00:01.000Z')
     const next = applyRunEvent(hydrated, makeRunEvent({ created_at: Date.parse('2026-01-01T00:00:09.000Z') / 1000 }))
     expect(next.startedAt).toBe('2026-01-01T00:00:01.000Z')
+  })
+})
+
+describe('applyRunEvent lifecycle status', () => {
+  it('does not treat a completed research query as a completed run', () => {
+    const running = applyRunEvent(
+      fromRunSummary(makeRunSummary(), 'test-stack'),
+      makeRunEvent(),
+    )
+
+    const next = applyRunEvent(
+      running,
+      makeRunEvent({
+        created_at: Date.parse('2026-01-01T00:00:12.000Z') / 1000,
+        data: { query: 'Primärquellen', status: 'completed' },
+        sequence: 2,
+        type: 'inqtrix.research.query.finished',
+      }),
+    )
+
+    expect(next.status).toBe('running')
+    expect(next.finishedAt).toBeUndefined()
+  })
+
+  it('accepts status from the authoritative run snapshot event', () => {
+    const running = applyRunEvent(
+      fromRunSummary(makeRunSummary(), 'test-stack'),
+      makeRunEvent(),
+    )
+
+    const next = applyRunEvent(
+      running,
+      makeRunEvent({
+        created_at: Date.parse('2026-01-01T00:00:20.000Z') / 1000,
+        data: { snapshot: { done: true }, status: 'completed' },
+        sequence: 3,
+        type: 'inqtrix.run.snapshot',
+      }),
+    )
+
+    expect(next.status).toBe('completed')
+    expect(next.finishedAt).toBe('2026-01-01T00:00:20.000Z')
   })
 })
 
@@ -782,6 +828,7 @@ describe('knowledge session reducer actions', () => {
           answer: {
             answerMarkdown: 'Old answer',
             degradedStages: [],
+            retrievalDegradations: [],
             references: [],
             refusal: false,
             quotes: [],
@@ -849,6 +896,7 @@ describe('knowledge session reducer actions', () => {
       answer: {
         answerMarkdown: 'Fresh answer',
         degradedStages: [],
+        retrievalDegradations: [],
         references: [],
         refusal: false,
         quotes: [],
@@ -862,6 +910,52 @@ describe('knowledge session reducer actions', () => {
     expect(completed.knowledgeItems['ki-1'].progress.steps[0].status).toBe('done')
     expect(completed.knowledgeSessions[defaultSessionId].updatedAt).toBe(completed.knowledgeItems['ki-1'].completedAt)
     expect(completed.dirty).toBe(true)
+  })
+
+  it('keeps an event-only retrieval degradation on the final answer', () => {
+    const base = createEmptyProjectState()
+    const defaultSessionId = base.selectedKnowledgeSessionId as string
+    const seeded = {
+      ...base,
+      knowledgeItemOrder: ['ki-1'],
+      knowledgeItems: {
+        'ki-1': makeKnowledgeItem('ki-1', defaultSessionId),
+      },
+    }
+    const degradation = {
+      candidate_cap: 64,
+      final_evidence_complete: false,
+      final_top_k: 8,
+      reason: 'vector_overfetch_cap',
+      requested_candidate_pool: 40,
+      requested_top_k: 8,
+      retrieval_mode: 'hybrid',
+      returned_candidate_pool: 6,
+      returned_hits: 3,
+      stage: 'vector_candidate_pool',
+    }
+    const withEvent = researchDeskReducer(seeded, {
+      event: makeRunEvent({
+        data: degradation,
+        run_id: 'run-ki-1',
+        type: 'inqtrix.knowledge.retrieval.degraded',
+      }),
+      type: 'appendApiRunEvent',
+    })
+    const completed = researchDeskReducer(withEvent, {
+      result: {
+        answer: 'Antwort.',
+        run_id: 'run-ki-1',
+        status: 'completed',
+        top_claims: [],
+        top_sources: [],
+      } as unknown as ResearchRunResult,
+      type: 'attachApiRunResult',
+    })
+
+    expect(completed.knowledgeItems['ki-1'].answer?.retrievalDegradations).toEqual([
+      degradation,
+    ])
   })
 
   it('marks a running knowledge item as cancelled when its run is cancelled', () => {
@@ -1101,6 +1195,130 @@ describe('knowledge session reducer actions', () => {
 })
 
 describe('chat folder reducer actions', () => {
+  it('creates a localized empty chat without synthetic conversation history', () => {
+    const next = researchDeskReducer(createEmptyProjectState(), {
+      preview: 'Bereit für eine freie Frage.',
+      title: 'Neuer Chat',
+      type: 'createChatThread',
+    })
+    const threadId = next.ui.selectedChatThreadId
+    const thread = threadId ? next.chatThreads[threadId] : undefined
+
+    expect(thread).toMatchObject({
+      messages: [],
+      preview: 'Bereit für eine freie Frage.',
+      title: 'Neuer Chat',
+    })
+  })
+
+  it('starts a new chat on the account preference, not on the previous pick', () => {
+    let state = createEmptyProjectState()
+    // The user switched this chat to a strong model...
+    state = researchDeskReducer(state, {
+      model: 'claude-opus-4-8',
+      type: 'setSelectedChatModel',
+    })
+    expect(state.ui.selectedChatModel).toBe('claude-opus-4-8')
+
+    // ...opening a NEW chat must not carry that over; it starts on the
+    // preference the user configured in Settings.
+    state = researchDeskReducer(state, {
+      modelTier: 'fast',
+      preview: 'Bereit.',
+      title: 'Neuer Chat',
+      type: 'createChatThread',
+    })
+    expect(state.ui.selectedChatModelTier).toBe('fast')
+    // Exclusivity: a tier clears the explicit model and its effort.
+    expect(state.ui.selectedChatModel).toBeNull()
+    expect(state.ui.selectedChatEffort).toBeNull()
+  })
+
+  it('a new chat without a preference falls back to the server default', () => {
+    const state = researchDeskReducer(createEmptyProjectState(), {
+      preview: 'Bereit.',
+      title: 'Neuer Chat',
+      type: 'createChatThread',
+    })
+    // null is what the picker shows as its server-default entry — never an
+    // invented tier.
+    expect(state.ui.selectedChatModelTier).toBeNull()
+  })
+
+  it('a new chat never touches the agent selection', () => {
+    // An agent run fans out over several thinking nodes while a chat answer is
+    // a single call. Opening a chat must not move agent spend.
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      tier: 'high',
+      type: 'setSelectedAgentModelTier',
+    })
+    state = researchDeskReducer(state, {
+      modelTier: 'fast',
+      preview: 'Bereit.',
+      title: 'Neuer Chat',
+      type: 'createChatThread',
+    })
+    expect(state.ui.selectedChatModelTier).toBe('fast')
+    expect(state.ui.selectedAgentModelTier).toBe('high')
+  })
+
+  it('uses the active UI language when a conversation is cleared', () => {
+    const base = createEmptyProjectState()
+    const thread = makeChatThread('ct-1', 'Frage', {
+      messages: [{
+        contentMarkdown: 'Was ist neu?',
+        createdAt: '2026-01-01T00:00:01.000Z',
+        id: 'cm-1',
+        role: 'user',
+      }],
+      preview: 'Was ist neu?',
+    })
+    const cleared = researchDeskReducer({
+      ...base,
+      chatThreadOrder: [thread.id],
+      chatThreads: { [thread.id]: thread },
+    }, {
+      emptyPreview: 'Bereit für eine freie Frage.',
+      threadId: thread.id,
+      type: 'clearChatThread',
+    })
+
+    expect(cleared.chatThreads[thread.id]).toMatchObject({
+      messages: [],
+      preview: 'Bereit für eine freie Frage.',
+      title: 'Frage',
+    })
+  })
+
+  it('uses the active UI language when every selected message is deleted', () => {
+    const base = createEmptyProjectState()
+    const thread = makeChatThread('ct-1', 'Question', {
+      messages: [{
+        contentMarkdown: 'What changed?',
+        createdAt: '2026-01-01T00:00:01.000Z',
+        id: 'cm-1',
+        role: 'user',
+      }],
+      preview: 'What changed?',
+    })
+    const cleared = researchDeskReducer({
+      ...base,
+      chatThreadOrder: [thread.id],
+      chatThreads: { [thread.id]: thread },
+    }, {
+      emptyPreview: 'Ready for an open question.',
+      messageIds: ['cm-1'],
+      threadId: thread.id,
+      type: 'deleteChatMessages',
+    })
+
+    expect(cleared.chatThreads[thread.id]).toMatchObject({
+      messages: [],
+      preview: 'Ready for an open question.',
+      title: 'Question',
+    })
+  })
+
   it('creates a chat thread inside the requested folder', () => {
     const withFolder = researchDeskReducer(createEmptyProjectState(), {
       title: 'Folder',
@@ -1110,6 +1328,8 @@ describe('chat folder reducer actions', () => {
 
     const next = researchDeskReducer(withFolder, {
       groupId,
+      preview: 'Ready for an open question.',
+      title: 'New chat',
       type: 'createChatThread',
     })
     const threadId = next.ui.selectedChatThreadId
@@ -1171,6 +1391,150 @@ describe('editor folder reducer actions', () => {
 })
 
 describe('file-asset reducer actions', () => {
+  it('replaces unreferenced local bootstrap sections with the server scope', () => {
+    const base = createEmptyProjectState()
+    const localIds = [...base.fileLibrarySectionOrder]
+    const createdAt = '2026-01-01T00:00:00.000Z'
+    const serverSections: ProjectState['fileLibrarySections'] = {
+      'server-library': {
+        createdAt,
+        id: 'server-library',
+        kind: 'custom',
+        title: 'Bibliothek',
+        updatedAt: createdAt,
+      },
+      'server-temp': {
+        createdAt,
+        id: 'server-temp',
+        kind: 'temporary',
+        title: 'Temporäre Dateien',
+        updatedAt: createdAt,
+      },
+    }
+    const hydrated = researchDeskReducer(base, {
+      sections: Object.values(serverSections),
+      type: 'upsertServerAssetSections',
+    })
+    const next = researchDeskReducer(hydrated, {
+      hiddenServerIds: [],
+      serverHasTemporarySection: true,
+      serverIds: Object.keys(serverSections),
+      type: 'pruneLocalBootstrapFileSections',
+    })
+
+    expect(next.fileLibrarySectionOrder).toEqual([
+      'server-library',
+      'server-temp',
+    ])
+    expect(localIds.every((id) => next.fileLibrarySections[id] === undefined))
+      .toBe(true)
+    expect(next.dirty).toBe(false)
+  })
+
+  it('keeps a referenced bootstrap section and repairs a missing server temporary section', () => {
+    const base = createEmptyProjectState()
+    const customId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'custom',
+    )!
+    const temporaryId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'temporary',
+    )!
+    const withAsset = researchDeskReducer(base, {
+      assets: [makeAsset('f1', 'alpha', { sectionId: customId })],
+      type: 'ingestFileAssets',
+    })
+
+    const next = researchDeskReducer(withAsset, {
+      hiddenServerIds: [],
+      serverHasTemporarySection: false,
+      serverIds: ['unrelated-server-section'],
+      type: 'pruneLocalBootstrapFileSections',
+    })
+
+    expect(next.fileLibrarySectionOrder).toContain(customId)
+    expect(next.fileLibrarySectionOrder).toContain(temporaryId)
+  })
+
+  it('turns a renamed prepared section into durable user data', () => {
+    const base = createEmptyProjectState()
+    const sectionId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'custom',
+    )!
+
+    const renamed = researchDeskReducer(base, {
+      sectionId,
+      title: 'Mein eigener Bestand',
+      type: 'renameFileLibrarySection',
+    })
+    const next = researchDeskReducer(renamed, {
+      hiddenServerIds: [sectionId],
+      serverHasTemporarySection: true,
+      serverIds: ['server-temp', sectionId],
+      type: 'pruneLocalBootstrapFileSections',
+    })
+
+    expect(next.fileLibrarySections[sectionId]).toMatchObject({
+      isBootstrapPlaceholder: false,
+      semanticRole: 'custom',
+      title: 'Mein eigener Bestand',
+    })
+  })
+
+  it('drops projected historical duplicates from local state without deleting server data', () => {
+    const base = createEmptyProjectState()
+    const createdAt = '2026-01-01T00:00:00.000Z'
+    const duplicate = {
+      createdAt,
+      id: 'historical-duplicate',
+      kind: 'custom' as const,
+      title: 'Bibliothek',
+      updatedAt: createdAt,
+    }
+    const hydrated = researchDeskReducer(base, {
+      sections: [duplicate],
+      type: 'upsertServerAssetSections',
+    })
+
+    const next = researchDeskReducer(hydrated, {
+      hiddenServerIds: [duplicate.id],
+      serverHasTemporarySection: true,
+      serverIds: [duplicate.id, 'server-canonical'],
+      type: 'pruneLocalBootstrapFileSections',
+    })
+
+    expect(next.fileLibrarySections[duplicate.id]).toBeUndefined()
+    expect(next.fileLibrarySectionOrder).not.toContain(duplicate.id)
+  })
+
+  it('never hides a projected server duplicate that local data references', () => {
+    const base = createEmptyProjectState()
+    const createdAt = '2026-01-01T00:00:00.000Z'
+    const duplicate = {
+      createdAt,
+      id: 'historical-in-use',
+      kind: 'custom' as const,
+      title: 'Bibliothek',
+      updatedAt: createdAt,
+    }
+    const hydrated = researchDeskReducer(base, {
+      sections: [duplicate],
+      type: 'upsertServerAssetSections',
+    })
+    const withLocalAsset = researchDeskReducer(hydrated, {
+      assets: [makeAsset('local-file', 'local', { sectionId: duplicate.id })],
+      type: 'ingestFileAssets',
+    })
+
+    const next = researchDeskReducer(withLocalAsset, {
+      hiddenServerIds: [duplicate.id],
+      serverHasTemporarySection: true,
+      serverIds: [duplicate.id, 'server-canonical'],
+      type: 'pruneLocalBootstrapFileSections',
+    })
+
+    expect(next.fileLibrarySections[duplicate.id]).toEqual(duplicate)
+  })
+
   it('ingests assets into the store and order', () => {
     const next = researchDeskReducer(createEmptyProjectState(), {
       assets: [makeAsset('f1', 'alpha')],
@@ -1179,6 +1543,60 @@ describe('file-asset reducer actions', () => {
     expect(next.fileAssetOrder).toContain('f1')
     expect(next.fileAssets.f1.label).toBe('alpha')
     expect(next.dirty).toBe(true)
+  })
+
+  it('converges server-owned upload state even when local metadata is newer', () => {
+    const local = makeAsset('f1', 'local-newer', {
+      extractedText: 'keep local body',
+      updatedAt: '2026-02-01T00:00:00.000Z',
+      uploadError: null,
+      uploadPending: true,
+    })
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [local],
+      type: 'ingestFileAssets',
+    })
+    const incoming = makeAsset('f1', 'stale-server-label', {
+      extractedText: '',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      uploadError: 'Der Upload wurde nicht abgeschlossen.',
+      uploadPending: false,
+    })
+
+    const next = researchDeskReducer(seeded, {
+      assets: [incoming],
+      type: 'upsertServerAssetMetadata',
+    })
+
+    expect(next.fileAssets.f1.label).toBe('local-newer')
+    expect(next.fileAssets.f1.extractedText).toBe('keep local body')
+    expect(next.fileAssets.f1.uploadPending).toBe(false)
+    expect(next.fileAssets.f1.uploadError).toBe('Der Upload wurde nicht abgeschlossen.')
+  })
+
+  it('keeps canonical prepared content separate from the editable body', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', {
+        extractedText: 'client body',
+        preparedContentHash: 'sha256:old',
+        preparedText: 'old canonical body',
+      })],
+      type: 'ingestFileAssets',
+    })
+    const loaded = researchDeskReducer(seeded, {
+      assetId: 'f1',
+      extractedText: 'editable server body',
+      preparedAt: '2026-02-01T00:00:00.000Z',
+      preparedContentHash: 'sha256:new',
+      preparedParserId: 'markitdown',
+      preparedText: 'new canonical body',
+      type: 'setServerAssetBody',
+    })
+
+    expect(loaded.fileAssets.f1.extractedText).toBe('editable server body')
+    expect(loaded.fileAssets.f1.preparedText).toBe('new canonical body')
+    expect(loaded.fileAssets.f1.preparedContentHash).toBe('sha256:new')
+    expect(loaded.dirty).toBe(seeded.dirty)
   })
 
   it('renames an asset label', () => {
@@ -1230,6 +1648,210 @@ describe('file-asset reducer actions', () => {
     expect(cleared.fileAssets.f1.parsePending).toBe(false)
   })
 
+  it('toggles the transient upload-pending flag without marking the project dirty', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', { uploadPending: true })],
+      type: 'ingestFileAssets',
+    })
+    const clean = { ...seeded, dirty: false }
+    const cleared = researchDeskReducer(clean, { assetId: 'f1', pending: false, type: 'setFileAssetUploadPending' })
+    expect(cleared.fileAssets.f1.uploadPending).toBe(false)
+    expect(cleared.dirty).toBe(false) // transient, never synced
+  })
+
+  it('re-entering upload-pending clears a previous upload error (retry)', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', { uploadError: 'kaputt', uploadPending: false })],
+      type: 'ingestFileAssets',
+    })
+    const clean = { ...seeded, dirty: false }
+    const retrying = researchDeskReducer(clean, { assetId: 'f1', pending: true, type: 'setFileAssetUploadPending' })
+    expect(retrying.fileAssets.f1.uploadPending).toBe(true)
+    expect(retrying.fileAssets.f1.uploadError).toBeNull()
+    expect(retrying.dirty).toBe(false)
+  })
+
+  it('adopts a durable queued upload without inventing a completed file', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', {
+        uploadPending: true,
+        uploadStatus: 'awaiting_upload',
+      })],
+      type: 'ingestFileAssets',
+    })
+    const next = researchDeskReducer({ ...seeded, dirty: false }, {
+      assetId: 'f1',
+      error: 'storage unavailable',
+      operationId: 'up_1',
+      serverFileId: null,
+      status: 'retrying',
+      type: 'adoptFileAssetUploadLifecycle',
+    })
+
+    expect(next.fileAssets.f1).toMatchObject({
+      uploadOperationId: 'up_1',
+      uploadPending: true,
+      uploadStatus: 'retrying',
+    })
+    expect(next.fileAssets.f1.serverFileId ?? null).toBeNull()
+    expect(next.dirty).toBe(false)
+  })
+
+  it('publishes the server file only when the durable lifecycle reaches ready', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', {
+        uploadOperationId: 'up_1',
+        uploadPending: true,
+        uploadStatus: 'finalizing',
+      })],
+      type: 'ingestFileAssets',
+    })
+    const next = researchDeskReducer({ ...seeded, dirty: false }, {
+      assetId: 'f1',
+      error: null,
+      operationId: 'up_1',
+      serverFileId: 'fl_1',
+      status: 'ready',
+      type: 'adoptFileAssetUploadLifecycle',
+    })
+
+    expect(next.fileAssets.f1).toMatchObject({
+      serverFileId: 'fl_1',
+      uploadPending: false,
+      uploadStatus: 'ready',
+    })
+    expect(next.dirty).toBe(true)
+  })
+
+  it('completing an upload persists serverFileId and settles the transient state', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', { uploadPending: true })],
+      type: 'ingestFileAssets',
+    })
+    const clean = { ...seeded, dirty: false }
+    const next = researchDeskReducer(clean, {
+      assetId: 'f1',
+      serverFileId: 'fl_new',
+      type: 'completeFileAssetUpload',
+    })
+    expect(next.fileAssets.f1.serverFileId).toBe('fl_new')
+    expect(next.fileAssets.f1.uploadPending).toBe(false)
+    expect(next.fileAssets.f1.uploadError).toBeNull()
+    expect(next.dirty).toBe(true) // serverFileId is persisted data
+    expect(next.fileAssets.f1.updatedAt).not.toBe(seeded.fileAssets.f1.updatedAt)
+  })
+
+  it('a failed upload keeps a transient error badge and a persisted warning', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', { uploadPending: true })],
+      type: 'ingestFileAssets',
+    })
+    const clean = { ...seeded, dirty: false }
+    const next = researchDeskReducer(clean, {
+      assetId: 'f1',
+      message: 'Server-Upload fehlgeschlagen (503) — Datei bleibt lokal.',
+      type: 'failFileAssetUpload',
+    })
+    expect(next.fileAssets.f1.uploadPending).toBe(false)
+    expect(next.fileAssets.f1.uploadError).toContain('fehlgeschlagen')
+    expect(next.fileAssets.f1.parseWarning).toContain('fehlgeschlagen')
+    expect(next.dirty).toBe(true) // the warning is persisted
+    // Repeating the failure never stacks the same warning twice.
+    const again = researchDeskReducer(next, {
+      assetId: 'f1',
+      message: 'Server-Upload fehlgeschlagen (503) — Datei bleibt lokal.',
+      type: 'failFileAssetUpload',
+    })
+    expect(again.fileAssets.f1.parseWarning).toBe(next.fileAssets.f1.parseWarning)
+  })
+
+  it('a successful retry retracts the persisted upload-failure warning', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', { parseWarning: 'Nur ein Teil wurde verarbeitet.', uploadPending: true })],
+      type: 'ingestFileAssets',
+    })
+    const failed = researchDeskReducer(seeded, {
+      assetId: 'f1',
+      message: 'Server-Upload fehlgeschlagen (503) — Datei bleibt lokal.',
+      type: 'failFileAssetUpload',
+    })
+    expect(failed.fileAssets.f1.parseWarning).toContain('fehlgeschlagen')
+    const retried = researchDeskReducer(failed, {
+      assetId: 'f1',
+      serverFileId: 'fl_retry',
+      type: 'completeFileAssetUpload',
+    })
+    // The "Datei bleibt lokal" claim is retracted; unrelated warnings stay.
+    expect(retried.fileAssets.f1.parseWarning).toBe('Nur ein Teil wurde verarbeitet.')
+    expect(retried.fileAssets.f1.serverFileId).toBe('fl_retry')
+  })
+
+  it('settles a deferred client parse onto a placeholder row', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', { extractedText: '', parsePending: true })],
+      type: 'ingestFileAssets',
+    })
+    const next = researchDeskReducer(seeded, {
+      assetId: 'f1',
+      clearParsePending: true,
+      extractedText: 'client text',
+      pageCount: 3,
+      parseStatus: 'parsed',
+      parseWarning: null,
+      textTruncated: false,
+      type: 'applyFileAssetClientParse',
+    })
+    expect(next.fileAssets.f1.extractedText).toBe('client text')
+    expect(next.fileAssets.f1.pageCount).toBe(3)
+    expect(next.fileAssets.f1.parserId).toBe('client')
+    expect(next.fileAssets.f1.parsePending).toBe(false)
+    expect(next.dirty).toBe(true)
+  })
+
+  it('keeps the parsing badge when the server parse still owns the settle', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', { extractedText: '', parsePending: true })],
+      type: 'ingestFileAssets',
+    })
+    const next = researchDeskReducer(seeded, {
+      assetId: 'f1',
+      clearParsePending: false,
+      extractedText: 'client text',
+      pageCount: null,
+      parseStatus: 'parsed',
+      parseWarning: null,
+      textTruncated: false,
+      type: 'applyFileAssetClientParse',
+    })
+    expect(next.fileAssets.f1.parsePending).toBe(true)
+  })
+
+  it('a settled client parse never downgrades a landed server parse', () => {
+    const seeded = researchDeskReducer(createEmptyProjectState(), {
+      assets: [makeAsset('f1', 'alpha', {
+        extractedText: 'markitdown text',
+        pageCount: null,
+        parserId: 'markitdown',
+      })],
+      type: 'ingestFileAssets',
+    })
+    const next = researchDeskReducer(seeded, {
+      assetId: 'f1',
+      clearParsePending: true,
+      extractedText: 'stale client text',
+      pageCount: 7,
+      parseStatus: 'partial',
+      parseWarning: 'client warn',
+      textTruncated: true,
+      type: 'applyFileAssetClientParse',
+    })
+    // Only the page count backfills; text/status/provenance stay server-owned.
+    expect(next.fileAssets.f1.extractedText).toBe('markitdown text')
+    expect(next.fileAssets.f1.parserId).toBe('markitdown')
+    expect(next.fileAssets.f1.parseStatus).toBe('parsed')
+    expect(next.fileAssets.f1.pageCount).toBe(7)
+  })
+
   it('never blanks a good client parse when the server text is empty', () => {
     const seeded = researchDeskReducer(createEmptyProjectState(), {
       assets: [makeAsset('f1', 'alpha', { parserId: 'client', extractedText: 'keep me' })],
@@ -1242,6 +1864,66 @@ describe('file-asset reducer actions', () => {
     })
     expect(next.fileAssets.f1.extractedText).toBe('keep me')
     expect(next.fileAssets.f1.parserId).toBe('client')
+  })
+
+  it('deletes a batch of assets in one state update, cleaning refs and index members', () => {
+    const base = createEmptyProjectState()
+    const seeded = researchDeskReducer(base, {
+      assets: [makeAsset('f1', 'alpha'), makeAsset('f2', 'beta'), makeAsset('f3', 'gamma')],
+      type: 'ingestFileAssets',
+    })
+    const withIndex = researchDeskReducer(seeded, {
+      fileIds: ['f1', 'f2'],
+      model: 'text-embedding-3-small',
+      title: 'Idx',
+      type: 'createVectorIndex',
+    })
+    const withRef = {
+      ...withIndex,
+      ui: {
+        ...withIndex.ui,
+        pendingChatAttachmentRefs: [
+          { fileId: 'f1', kind: 'file-asset' as const },
+          { fileId: 'f3', kind: 'file-asset' as const },
+        ],
+      },
+    }
+    const next = researchDeskReducer(withRef, { fileIds: ['f1', 'f2', 'missing'], type: 'deleteFileAssets' })
+    expect(next.fileAssets.f1).toBeUndefined()
+    expect(next.fileAssets.f2).toBeUndefined()
+    expect(next.fileAssets.f3).toBeDefined()
+    expect(next.fileAssetOrder).toEqual(['f3'])
+    expect(next.ui.pendingChatAttachmentRefs).toEqual([{ fileId: 'f3', kind: 'file-asset' }])
+    const index = Object.values(next.vectorIndexes)[0]
+    expect(index.members).toEqual([])
+    // Batch of zero existing ids is a no-op with identical state.
+    expect(researchDeskReducer(next, { fileIds: ['missing'], type: 'deleteFileAssets' })).toBe(next)
+  })
+
+  it('moves a batch of assets in one state update, skipping already-placed files', () => {
+    const base = createEmptyProjectState()
+    const librarySectionId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'custom',
+    )!
+    const seeded = researchDeskReducer(base, {
+      assets: [makeAsset('f1', 'alpha'), makeAsset('f2', 'beta')],
+      type: 'ingestFileAssets',
+    })
+    const next = researchDeskReducer(seeded, {
+      fileIds: ['f1', 'f2'],
+      groupId: null,
+      sectionId: librarySectionId,
+      type: 'moveFileAssets',
+    })
+    expect(next.fileAssets.f1.sectionId).toBe(librarySectionId)
+    expect(next.fileAssets.f2.sectionId).toBe(librarySectionId)
+    // Moving them again to the same place changes nothing.
+    expect(researchDeskReducer(next, {
+      fileIds: ['f1', 'f2'],
+      groupId: null,
+      sectionId: librarySectionId,
+      type: 'moveFileAssets',
+    })).toBe(next)
   })
 
   it('moves an asset into an existing section group', () => {
@@ -1345,6 +2027,67 @@ describe('file-group reducer actions', () => {
     expect(next.fileGroups[groupId]).toBeUndefined()
     expect(next.fileAssets.f1.groupId).toBeNull()
   })
+
+  it('keeps a server group and its children visible until its exact deletion operation completes', () => {
+    const base = createEmptyProjectState()
+    const librarySectionId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.kind === 'custom',
+    )!
+    const created = researchDeskReducer(base, {
+      sectionId: librarySectionId,
+      title: 'Group',
+      type: 'createFileGroup',
+    })
+    const groupId = created.fileGroupOrder[0]
+    const synced = researchDeskReducer(created, {
+      groupId,
+      type: 'markFileGroupServerSynced',
+    })
+    const withAsset = researchDeskReducer(synced, {
+      assets: [makeAsset('f1', 'alpha', { groupId, sectionId: librarySectionId })],
+      type: 'ingestFileAssets',
+    })
+
+    const deleting = researchDeskReducer(withAsset, {
+      error: null,
+      groupId,
+      operationId: 'del_group',
+      stage: 'metadata_removed',
+      status: 'running',
+      type: 'setFileGroupDeletionState',
+    })
+    expect(deleting.fileGroups[groupId]).toMatchObject({
+      deletionOperationId: 'del_group',
+      lifecycleStatus: 'deleting',
+    })
+    expect(deleting.fileAssets.f1.groupId).toBe(groupId)
+
+    const failed = researchDeskReducer(deleting, {
+      error: 'database unavailable',
+      groupId,
+      operationId: 'del_group',
+      stage: 'delete_failed',
+      status: 'delete_failed',
+      type: 'setFileGroupDeletionState',
+    })
+    expect(failed.fileGroups[groupId]).toMatchObject({
+      deletionError: 'database unavailable',
+      lifecycleStatus: 'delete_failed',
+    })
+    expect(researchDeskReducer(failed, {
+      groupId,
+      operationId: 'del_other',
+      type: 'completeFileGroupDeletion',
+    })).toBe(failed)
+
+    const completed = researchDeskReducer(failed, {
+      groupId,
+      operationId: 'del_group',
+      type: 'completeFileGroupDeletion',
+    })
+    expect(completed.fileGroups[groupId]).toBeUndefined()
+    expect(completed.fileAssets.f1.groupId).toBeNull()
+  })
 })
 
 describe('legacy resource identity migration', () => {
@@ -1394,6 +2137,48 @@ describe('legacy resource identity migration', () => {
     expect(migrated.fileLibrarySectionOrder).toContain('file-section-new')
   })
 
+  it('rekeys bootstrap children without overwriting an observed canonical row', () => {
+    const base = createEmptyProjectState()
+    const bootstrapId = base.fileLibrarySectionOrder.find(
+      (id) => base.fileLibrarySections[id]?.semanticRole === 'library',
+    )!
+    const canonicalId = 'server-canonical-library'
+    const canonical = {
+      createdAt: '2026-01-01T00:00:00.000Z',
+      id: canonicalId,
+      kind: 'custom' as const,
+      semanticRole: 'library' as const,
+      serverSynced: true,
+      title: 'Server canonical',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }
+    const seeded = {
+      ...base,
+      fileAssetOrder: ['fa-bootstrap'],
+      fileAssets: {
+        'fa-bootstrap': makeAsset('fa-bootstrap', 'source', {
+          sectionId: bootstrapId,
+        }),
+      },
+      fileLibrarySectionOrder: [canonicalId, ...base.fileLibrarySectionOrder],
+      fileLibrarySections: {
+        ...base.fileLibrarySections,
+        [canonicalId]: canonical,
+      },
+    }
+
+    const migrated = researchDeskReducer(seeded, {
+      replacements: { [bootstrapId]: canonicalId },
+      type: 'rekeyFileLibrarySectionIds',
+    })
+
+    expect(migrated.fileLibrarySections[canonicalId]).toEqual(canonical)
+    expect(migrated.fileAssets['fa-bootstrap'].sectionId).toBe(canonicalId)
+    expect(
+      migrated.fileLibrarySectionOrder.filter((id) => id === canonicalId),
+    ).toHaveLength(1)
+  })
+
   it('rekeys a knowledge session and every item, membership, selection, and pin', () => {
     const base = createEmptyProjectState()
     const originalId = base.selectedKnowledgeSessionId!
@@ -1428,6 +2213,26 @@ describe('legacy resource identity migration', () => {
     expect(migrated.selectedKnowledgeSessionId).toBe('ks-new')
     expect(migrated.ui.pinnedExplorer.knowledgeSessionIds).toEqual(['ks-new'])
     expect(migrated.dirty).toBe(true)
+  })
+})
+
+describe('chat exchange ordering', () => {
+  it('places the assistant after the user without relying on message ids', () => {
+    const next = researchDeskReducer(createEmptyProjectState(), {
+      assistantMessageId: 'a-before-u-lexically',
+      contentMarkdown: 'Question',
+      createdAt: '2026-01-03T00:00:00.000Z',
+      threadId: 'thread-order',
+      type: 'startChatExchange',
+      userMessageId: 'z-user',
+    })
+
+    const [userMessage, assistantMessage] =
+      next.chatThreads['thread-order'].messages
+    expect(userMessage.role).toBe('user')
+    expect(userMessage.createdAt).toBe('2026-01-03T00:00:00.000Z')
+    expect(assistantMessage.role).toBe('assistant')
+    expect(assistantMessage.createdAt > userMessage.createdAt).toBe(true)
   })
 })
 
@@ -1604,6 +2409,192 @@ describe('vector index reducer actions', () => {
     expect(researchDeskReducer(state, { indexId: id, type: 'completeVectorIndexReindex' })).toBe(state)
   })
 
+  it('adopts a cancelled run\'s partial result so the next run resumes', () => {
+    let state = researchDeskReducer(withAssets('a', 'b', 'c'), { fileIds: ['a', 'b', 'c'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, { indexId: id, jobId: 'j1', source: 'build', totalDocuments: 3, type: 'startVectorIndexReindex' })
+    state = researchDeskReducer(state, {
+      embeddedFileIds: ['a'],
+      indexId: id,
+      result: 'cancelled',
+      serverCollectionId: 'kc_partial',
+      serverCollectionModel: 'text-embedding-3-large',
+      serverDocumentIds: { a: 'kd_a' },
+      type: 'completeVectorIndexReindex',
+    })
+    const index = state.vectorIndexes[id]
+    // What embedded is kept AND the collection is adopted — without the id the
+    // next run would build a second collection instead of resuming.
+    expect(index.serverCollectionId).toBe('kc_partial')
+    expect(index.members.find((member) => member.fileId === 'a')?.state).toBe('embedded')
+    expect(index.members.find((member) => member.fileId === 'a')?.serverDocumentId).toBe('kd_a')
+    expect(index.members.filter((member) => member.state === 'pending')).toHaveLength(2)
+    expect(index.status).toBe('stale')
+    expect(index.history?.[0]).toMatchObject({ documents: 1, result: 'cancelled' })
+    expect(state.indexingJobs[id]).toBeUndefined()
+  })
+
+  it('adopts confirmed first-build work without terminating a paused run', () => {
+    let state = researchDeskReducer(
+      withAssets('a', 'b', 'c'),
+      { fileIds: ['a', 'b', 'c'], title: 'X', type: 'createVectorIndex' },
+    )
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, {
+      indexId: id,
+      jobId: 'build-1',
+      source: 'build',
+      totalDocuments: 3,
+      type: 'startVectorIndexReindex',
+    })
+    state = researchDeskReducer(state, {
+      embeddedFileIds: ['a'],
+      indexId: id,
+      serverCollectionId: 'kc-partial',
+      serverCollectionModel: 'text-embedding-3-small',
+      serverDocumentIds: { a: 'kd-a', b: 'kd-b' },
+      skippedFileIds: [],
+      type: 'adoptVectorIndexPartialResult',
+    })
+
+    expect(state.vectorIndexes[id]).toMatchObject({
+      serverCollectionId: 'kc-partial',
+      status: 'indexing',
+    })
+    expect(state.vectorIndexes[id].members).toEqual([
+      { fileId: 'a', serverDocumentId: 'kd-a', state: 'embedded' },
+      { fileId: 'b', serverDocumentId: 'kd-b', state: 'pending' },
+      { fileId: 'c', state: 'pending' },
+    ])
+    expect(state.vectorIndexes[id].history ?? []).toHaveLength(0)
+    expect(state.indexingJobs[id].jobId).toBe('build-1')
+  })
+
+  it('only members actually in flight read as running', () => {
+    let state = researchDeskReducer(withAssets('a', 'b', 'c'), { fileIds: ['a', 'b', 'c'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, { indexId: id, jobId: 'j1', runningFileIds: [], source: 'build', totalDocuments: 3, type: 'startVectorIndexReindex' })
+    expect(state.indexingJobs[id].runningFileIds).toEqual([])
+    // The pool picked up two members; the third is still queued.
+    state = researchDeskReducer(state, {
+      completedDocuments: 0,
+      indexId: id,
+      runningFileIds: ['a', 'b'],
+      totalDocuments: 3,
+      type: 'markVectorIndexProgress',
+    })
+    expect(state.indexingJobs[id].runningFileIds).toEqual(['a', 'b'])
+    // 'a' finished, so it stops reading as running.
+    state = researchDeskReducer(state, {
+      completedDocuments: 1,
+      embedded: true,
+      fileId: 'a',
+      indexId: id,
+      runningFileIds: ['b'],
+      totalDocuments: 3,
+      type: 'markVectorIndexProgress',
+    })
+    expect(state.indexingJobs[id].runningFileIds).toEqual(['b'])
+  })
+
+  it('tracks queued and running server phases independently for each member', () => {
+    let state = researchDeskReducer(withAssets('a', 'b', 'c'), { fileIds: ['a', 'b', 'c'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, {
+      indexId: id,
+      jobId: 'j1',
+      queuedFileIds: ['a', 'b', 'c'],
+      runningFileIds: [],
+      source: 'build',
+      totalDocuments: 3,
+      type: 'startVectorIndexReindex',
+    })
+    expect(state.indexingJobs[id].memberProgress).toEqual({
+      a: { status: 'queued' },
+      b: { status: 'queued' },
+      c: { status: 'queued' },
+    })
+
+    state = researchDeskReducer(state, {
+      currentBatch: 7,
+      fileId: 'a',
+      indexId: id,
+      phase: 'contextualization',
+      status: 'running',
+      totalBatches: 18,
+      type: 'markVectorIndexMemberProgress',
+    })
+    expect(state.indexingJobs[id].memberProgress?.a).toEqual({
+      currentBatch: 7,
+      phase: 'contextualization',
+      queuePosition: undefined,
+      status: 'running',
+      totalBatches: 18,
+    })
+    expect(state.indexingJobs[id].memberProgress?.b).toEqual({ status: 'queued' })
+  })
+
+  it('keeps the current member projection when the same durable job reattaches', () => {
+    let state = researchDeskReducer(withAssets('a', 'b'), { fileIds: ['a', 'b'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, {
+      indexId: id,
+      jobId: 'j1',
+      queuedFileIds: ['a', 'b'],
+      source: 'server',
+      totalDocuments: 2,
+      type: 'startVectorIndexReindex',
+    })
+    state = researchDeskReducer(state, {
+      currentBatch: 8,
+      fileId: 'a',
+      indexId: id,
+      phase: 'contextualization',
+      status: 'running',
+      totalBatches: 43,
+      type: 'markVectorIndexMemberProgress',
+    })
+    const startedAt = state.indexingJobs[id].startedAt
+
+    state = researchDeskReducer(state, {
+      indexId: id,
+      jobId: 'j1',
+      queuedFileIds: ['a', 'b'],
+      source: 'server',
+      status: 'running',
+      totalDocuments: 2,
+      type: 'startVectorIndexReindex',
+    })
+
+    expect(state.indexingJobs[id].startedAt).toBe(startedAt)
+    expect(state.indexingJobs[id].memberProgress?.a).toEqual({
+      currentBatch: 8,
+      phase: 'contextualization',
+      queuePosition: undefined,
+      status: 'running',
+      totalBatches: 43,
+    })
+    expect(state.indexingJobs[id].memberProgress?.b).toEqual({ status: 'queued' })
+  })
+
+  it('a progress event without an outcome never sorts a member anywhere', () => {
+    let state = researchDeskReducer(withAssets('a', 'b'), { fileIds: ['a', 'b'], title: 'X', type: 'createVectorIndex' })
+    const id = state.vectorIndexOrder[0]
+    state = researchDeskReducer(state, { indexId: id, jobId: 'j1', source: 'build', totalDocuments: 2, type: 'startVectorIndexReindex' })
+    // "Document 1 of 2 started" — a title, not a result.
+    state = researchDeskReducer(state, {
+      completedDocuments: 0,
+      currentDocumentTitle: 'Vertrag.pdf',
+      indexId: id,
+      totalDocuments: 2,
+      type: 'markVectorIndexProgress',
+    })
+    const live = state.indexingJobs[id]
+    expect(live.currentDocumentTitle).toBe('Vertrag.pdf')
+    expect(live.embeddedFileIds ?? []).toEqual([])
+    expect(live.skippedFileIds ?? []).toEqual([])
+  })
+
   it('marks no-text members terminal skipped and reads ready (not perpetually stale)', () => {
     let state = researchDeskReducer(withAssets('a', 'b'), { fileIds: ['a', 'b'], title: 'X', type: 'createVectorIndex' })
     const id = state.vectorIndexOrder[0]
@@ -1706,6 +2697,27 @@ describe('vector index reducer actions', () => {
     expect(members.find((member) => member.fileId === 'b')?.serverDocumentId).toBe('kd_b')
   })
 
+  it('persists a source-reconciled legacy member id without removing the member', () => {
+    let state = researchDeskReducer(
+      withAssets('a'),
+      { fileIds: ['a'], title: 'X', type: 'createVectorIndex' },
+    )
+    const id = state.vectorIndexOrder[0]
+
+    state = researchDeskReducer(state, {
+      fileId: 'a',
+      indexId: id,
+      serverDocumentId: 'kd_reconciled',
+      type: 'reconcileVectorIndexMemberDocument',
+    })
+
+    expect(state.vectorIndexes[id].members).toEqual([{
+      fileId: 'a',
+      serverDocumentId: 'kd_reconciled',
+      state: 'pending',
+    }])
+  })
+
   it('removing the last member returns the index to ready', () => {
     let state = researchDeskReducer(withAssets('a'), { fileIds: ['a'], title: 'X', type: 'createVectorIndex' })
     const id = state.vectorIndexOrder[0]
@@ -1755,16 +2767,20 @@ describe('vector index reducer actions', () => {
     state = researchDeskReducer(state, {
       indexId: id,
       message: 'embedding backend down',
+      serverCollectionId: 'kc_cleanup_pending',
+      serverCollectionModel: 'text-embedding-3-small',
       type: 'markVectorIndexError',
     })
     expect(state.vectorIndexes[id].status).toBe('error')
     expect(state.vectorIndexes[id].lastError).toBe('embedding backend down')
+    expect(state.vectorIndexes[id].serverCollectionId).toBe('kc_cleanup_pending')
+    expect(state.vectorIndexes[id].serverCollectionModel).toBe('text-embedding-3-small')
 
     state = researchDeskReducer(state, { indexId: id, jobId: 'j3', source: 'server', totalDocuments: 1, type: 'startVectorIndexReindex' })
     expect(state.vectorIndexes[id].status).toBe('indexing')
     expect(state.vectorIndexes[id].lastError).toBeNull()
     state = researchDeskReducer(state, { indexId: id, type: 'completeVectorIndexReindex' })
-    expect(state.vectorIndexes[id].serverCollectionId).toBe('kc_live')
+    expect(state.vectorIndexes[id].serverCollectionId).toBe('kc_cleanup_pending')
   })
 
   it('deleting a file drops it from every index membership', () => {
@@ -1773,6 +2789,67 @@ describe('vector index reducer actions', () => {
     state = researchDeskReducer(state, { fileId: 'a', type: 'deleteFileAsset' })
     expect(state.fileAssets.a).toBeUndefined()
     expect(state.vectorIndexes[id].members.map((member) => member.fileId)).toEqual(['b'])
+  })
+
+  it('applies terminal aggregate deletion only to the exact owned lifecycle', () => {
+    const seeded = withAssets('a')
+    seeded.fileAssets.a = { ...seeded.fileAssets.a, serverSynced: true }
+
+    const unownedTerminal = researchDeskReducer(seeded, {
+      fileIds: ['a'],
+      operationId: 'del-old',
+      type: 'completeFileAssetDeletion',
+    })
+    expect(unownedTerminal).toBe(seeded)
+
+    const deleting = researchDeskReducer(seeded, {
+      error: null,
+      fileIds: ['a'],
+      operationId: 'del-current',
+      stage: 'search_detached',
+      status: 'running',
+      type: 'setFileAssetDeletionState',
+    })
+    expect(deleting.fileAssets.a).toMatchObject({
+      deletionOperationId: 'del-current',
+      lifecycleStatus: 'deleting',
+    })
+    expect(researchDeskReducer(deleting, {
+      fileIds: ['a'],
+      operationId: 'del-old',
+      type: 'completeFileAssetDeletion',
+    })).toBe(deleting)
+
+    const completed = researchDeskReducer(deleting, {
+      fileIds: ['a'],
+      operationId: 'del-current',
+      type: 'completeFileAssetDeletion',
+    })
+    expect(completed.fileAssets.a).toBeUndefined()
+  })
+
+  it('does not let an old deletion receipt capture a local-only replacement', () => {
+    const replacement = withAssets('a')
+    replacement.fileAssets.a = {
+      ...replacement.fileAssets.a,
+      createdAt: '2026-01-03T00:00:00.000Z',
+      serverSynced: false,
+    }
+
+    const projected = researchDeskReducer(replacement, {
+      error: null,
+      fileIds: ['a'],
+      operationId: 'del-old',
+      stage: 'deleted',
+      status: 'running',
+      type: 'setFileAssetDeletionState',
+    })
+    expect(projected).toBe(replacement)
+    expect(researchDeskReducer(projected, {
+      fileIds: ['a'],
+      operationId: 'del-old',
+      type: 'completeFileAssetDeletion',
+    })).toBe(replacement)
   })
 
   it('deleting a custom section removes its assets and their index memberships', () => {
@@ -1785,6 +2862,43 @@ describe('vector index reducer actions', () => {
     expect(state.fileLibrarySections[sectionId]).toBeUndefined()
     expect(state.fileAssets.a).toBeUndefined()
     expect(state.vectorIndexes[id].members).toHaveLength(0)
+  })
+
+  it('keeps an empty section deletion addressable until its exact operation completes', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      sectionId: '',
+      title: 'Custom',
+      type: 'createFileLibrarySection',
+    })
+    const sectionId = state.fileLibrarySectionOrder[state.fileLibrarySectionOrder.length - 1]
+    state.fileLibrarySections[sectionId] = {
+      ...state.fileLibrarySections[sectionId],
+      serverSynced: true,
+    }
+    state = researchDeskReducer(state, {
+      error: null,
+      operationId: 'del-section',
+      sectionId,
+      stage: 'queued',
+      status: 'queued',
+      type: 'setFileLibrarySectionDeletionState',
+    })
+    expect(state.fileLibrarySections[sectionId]).toMatchObject({
+      deletionOperationId: 'del-section',
+      lifecycleStatus: 'deleting',
+    })
+    expect(researchDeskReducer(state, {
+      operationId: 'del-stale',
+      sectionId,
+      type: 'completeFileLibrarySectionDeletion',
+    })).toBe(state)
+
+    state = researchDeskReducer(state, {
+      operationId: 'del-section',
+      sectionId,
+      type: 'completeFileLibrarySectionDeletion',
+    })
+    expect(state.fileLibrarySections[sectionId]).toBeUndefined()
   })
 
   it('refuses to delete the temporary section', () => {
@@ -1895,6 +3009,67 @@ describe('live indexing-job lifecycle', () => {
     expect(running.indexingJobs[id].queuePosition).toBeNull()
   })
 
+  it('keeps a paused server job checkpointed until explicit resume or supersession', () => {
+    const { id, state } = withIndex('a', 'b')
+    const started = researchDeskReducer(state, {
+      indexId: id,
+      jobId: 'j1',
+      source: 'server',
+      totalDocuments: 2,
+      type: 'startVectorIndexReindex',
+    })
+    const clean = { ...started, dirty: false }
+    const paused = researchDeskReducer(clean, {
+      completedDocuments: 1,
+      currentBatch: 7,
+      indexId: id,
+      message: 'Provider timeout',
+      phase: 'contextualize',
+      status: 'paused_dependency',
+      totalBatches: 18,
+      totalDocuments: 2,
+      type: 'markVectorIndexPaused',
+    })
+
+    expect(paused.dirty).toBe(false)
+    expect(paused.vectorIndexes[id].status).toBe('indexing')
+    expect(paused.vectorIndexes[id].history ?? []).toHaveLength(0)
+    expect(paused.indexingJobs[id]).toMatchObject({
+      completedDocuments: 1,
+      currentBatch: 7,
+      pauseMessage: 'Provider timeout',
+      phase: 'contextualize',
+      status: 'paused_dependency',
+      totalBatches: 18,
+    })
+    expect(paused.indexingJobs[id].memberProgress?.a).toMatchObject({
+      currentBatch: 7,
+      phase: 'contextualize',
+      status: 'paused_dependency',
+      totalBatches: 18,
+    })
+
+    const resumed = researchDeskReducer(paused, {
+      indexId: id,
+      totalDocuments: 2,
+      type: 'markVectorIndexResumed',
+    })
+    expect(resumed.indexingJobs[id]).toMatchObject({ status: 'running' })
+    expect(resumed.indexingJobs[id].pauseMessage).toBeUndefined()
+    expect(resumed.indexingJobs[id].currentBatch).toBeUndefined()
+    expect(resumed.indexingJobs[id].memberProgress?.a).toMatchObject({
+      status: 'running',
+    })
+
+    const superseded = researchDeskReducer(resumed, {
+      indexId: id,
+      type: 'markVectorIndexSuperseded',
+    })
+    expect(superseded.indexingJobs[id]).toBeUndefined()
+    expect(superseded.vectorIndexes[id].status).toBe('stale')
+    expect(superseded.vectorIndexes[id].history ?? []).toHaveLength(0)
+  })
+
   it('completion records an ok history entry and clears the live job', () => {
     const { id, state } = withIndex('a', 'b')
     let next = researchDeskReducer(state, { indexId: id, jobId: 'j1', source: 'server', totalDocuments: 2, type: 'startVectorIndexReindex' })
@@ -1959,7 +3134,7 @@ describe('editor document revision = server base (A2 CAS contract)', () => {
     // revision is the last-synced server base and stays put across local
     // edits; only updatedAt moves so the debounced autosave fires. The save
     // sends base+1 and the store CAS is against the base — a per-edit bump
-    // would be the old, race-prone counter that P1 exploited.
+    // would be the old, race-prone counter.
     const renamed = researchDeskReducer(base, {
       documentId: 'doc-1',
       title: 'Neuer Titel',
@@ -2248,7 +3423,7 @@ describe('agent plan stale re-flag (plan tab on-open fetch)', () => {
   })
 })
 
-describe('gate-tray root fixes (P6): approvals reconcile + exclusive membership', () => {
+describe('gate-tray approvals reconcile with exclusive membership', () => {
   const agentSummary = (
     overrides: Partial<ResearchRunSummary> = {},
   ): ResearchRunSummary => ({
@@ -2342,6 +3517,111 @@ describe('gate-tray root fixes (P6): approvals reconcile + exclusive membership'
     expect(state.agentRuns['r-gate'].clarifications[0].status).toBe('answered')
   })
 
+  it('retains an in-flight answer publication across a stale artifact-list response', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: agentSummary({ status: 'running' }),
+      type: 'upsertAgentRunSummary',
+    })
+    const run = state.agentRuns['r-gate']
+    state = {
+      ...state,
+      agentRuns: {
+        ...state.agentRuns,
+        'r-gate': {
+          ...run,
+          artifactOrder: ['answer-r-gate'],
+          artifacts: {
+            ...run.artifacts,
+            'answer-r-gate': {
+              artifactId: 'answer-r-gate',
+              kind: 'answer',
+              title: 'Antwort',
+              status: 'writing',
+              revision: 0,
+              updatedBy: 'agent',
+              refsCount: 0,
+              createdAt: 1_700_000_000,
+              updatedAt: 1_700_000_000,
+              contentMarkdown: '**Zwischenstand**',
+              publicationId: 'publication-r-gate',
+              publicationOffset: 18,
+            },
+          },
+        },
+      },
+    }
+
+    state = researchDeskReducer(state, {
+      artifacts: [],
+      runId: 'r-gate',
+      type: 'setAgentRunArtifacts',
+    })
+
+    expect(state.agentRuns['r-gate'].artifactOrder).toEqual(['answer-r-gate'])
+    expect(state.agentRuns['r-gate'].artifacts['answer-r-gate']).toMatchObject({
+      contentMarkdown: '**Zwischenstand**',
+      publicationId: 'publication-r-gate',
+      status: 'writing',
+    })
+  })
+
+  it('retains a fetched evidence payload across a metadata-list refresh', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: agentSummary({ status: 'completed' }),
+      type: 'upsertAgentRunSummary',
+    })
+    const meta = {
+      artifact_id: 'artifact-evidence',
+      created_at: 1_700_000_000,
+      kind: 'evidence_bundle' as const,
+      refs_count: 1,
+      revision: 2,
+      run_id: 'r-gate',
+      session_id: null,
+      status: 'ready' as const,
+      title: 'Evidence',
+      updated_at: 1_700_000_100,
+      updated_by: 'agent' as const,
+    }
+    state = researchDeskReducer(state, {
+      artifact: {
+        ...meta,
+        content_markdown: '',
+        payload: {
+          schema_version: 1,
+          web_search_ledger: {
+            kind: 'web_search_ledger',
+            schema_version: 1,
+            searches: {
+              'query-1': { provider_answer: 'Grounded answer', query_id: 'query-1' },
+            },
+          },
+        },
+        refs: [{ label: 'W1', query_id: 'query-1' }],
+        revisions: [],
+      },
+      runId: 'r-gate',
+      type: 'setAgentRunArtifactDetail',
+    })
+    state = researchDeskReducer(state, {
+      artifacts: [meta],
+      runId: 'r-gate',
+      type: 'setAgentRunArtifacts',
+    })
+
+    expect(state.agentRuns['r-gate'].artifacts['artifact-evidence'].payload)
+      .toEqual({
+        schema_version: 1,
+        web_search_ledger: {
+          kind: 'web_search_ledger',
+          schema_version: 1,
+          searches: {
+            'query-1': { provider_answer: 'Grounded answer', query_id: 'query-1' },
+          },
+        },
+      })
+  })
+
   it('sweeps a run out of its phantom session once the real session hydrates', () => {
     // First sighting without session_id: phantom session keyed by runId.
     let state = researchDeskReducer(createEmptyProjectState(), {
@@ -2415,6 +3695,25 @@ describe('agent session selection mirrors into persisted ui intent', () => {
 })
 
 describe('agent session source-policy hydration', () => {
+  it('atomically selects a newly confirmed server session', () => {
+    const base = createEmptyProjectState()
+    const next = researchDeskReducer(base, {
+      groups: [],
+      selectSessionId: 's-confirmed',
+      sessions: [{
+        id: 's-confirmed',
+        title: 'Confirmed',
+        group_id: null,
+        created_at: Date.parse('2026-07-10T10:00:00.000Z') / 1000,
+        updated_at: Date.parse('2026-07-10T10:00:00.000Z') / 1000,
+      }],
+      type: 'upsertServerAgentSessions',
+    })
+
+    expect(next.selectedAgentSessionId).toBe('s-confirmed')
+    expect(next.ui.selectedAgentSessionId).toBe('s-confirmed')
+  })
+
   it('does not reset local policy when a metadata-only list row omits items_json', () => {
     const base = createEmptyProjectState()
     const withSession = researchDeskReducer(base, {
@@ -2444,6 +3743,144 @@ describe('agent session source-policy hydration', () => {
       web: 'disabled',
       knowledge: 'available',
     })
+  })
+})
+
+describe('durable session deletion projection', () => {
+  it('keeps an Agent session visible and moves selection while deletion runs', () => {
+    let state = createEmptyProjectState()
+    state = researchDeskReducer(state, {
+      session: {
+        id: 'as-delete',
+        title: 'Delete me',
+        groupId: null,
+        createdAt: '2026-07-10T10:00:00.000Z',
+        updatedAt: '2026-07-10T10:00:00.000Z',
+        runIds: [],
+        sourcePolicy: { web: 'available', knowledge: 'available' },
+      },
+      type: 'createAgentSession',
+    })
+    const deleting = researchDeskReducer(state, {
+      deletion: {
+        error: null,
+        operationId: 'del_agent',
+        stage: 'queued',
+        status: 'deleting',
+      },
+      sessionId: 'as-delete',
+      type: 'setAgentSessionDeletionState',
+    })
+
+    expect(deleting.agentSessions['as-delete'].deletion?.operationId).toBe('del_agent')
+    expect(deleting.selectedAgentSessionId).not.toBe('as-delete')
+    expect(researchDeskReducer(deleting, {
+      sessionId: 'as-delete',
+      type: 'selectAgentSession',
+    })).toBe(deleting)
+  })
+
+  it('lets a server tombstone override a newer local Knowledge session', () => {
+    const base = createEmptyProjectState()
+    const local = makeKnowledgeSession('ks-delete', 'Local', {
+      updatedAt: '2026-07-10T11:00:00.000Z',
+    })
+    const withLocal = researchDeskReducer(base, {
+      session: local,
+      type: 'createKnowledgeSession',
+    })
+    const projected = researchDeskReducer(withLocal, {
+      memberships: { 'ks-delete': null },
+      sessions: [{
+        ...local,
+        deletion: {
+          error: 'dependency unavailable',
+          operationId: 'del_knowledge',
+          stage: 'delete_failed',
+          status: 'delete_failed',
+        },
+        updatedAt: '2026-07-10T10:00:00.000Z',
+      }],
+      type: 'upsertServerKnowledgeSessions',
+    })
+
+    expect(projected.knowledgeSessions['ks-delete'].deletion).toEqual({
+      error: 'dependency unavailable',
+      operationId: 'del_knowledge',
+      stage: 'delete_failed',
+      status: 'delete_failed',
+    })
+    expect(projected.selectedKnowledgeSessionId).not.toBe('ks-delete')
+  })
+
+  it('rejects late Agent run hydration after terminal aggregate deletion', () => {
+    const root = makeRunSummary({
+      kind: 'agent',
+      mode: 'workspace_agent',
+      run_id: 'r-gate',
+      session_id: 's-gate',
+    })
+    const child = makeRunSummary({
+      kind: 'agent_child',
+      mode: 'workspace_agent',
+      parent_run_id: root.run_id,
+      root_run_id: root.run_id,
+      run_id: 'r-gate-child',
+      session_id: undefined,
+    })
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: root,
+      type: 'upsertAgentRunSummary',
+    })
+    state = researchDeskReducer(state, {
+      summary: child,
+      type: 'upsertAgentRunSummary',
+    })
+    expect(state.agentSessions['r-gate-child']).toBeDefined()
+
+    state = researchDeskReducer(state, {
+      operationId: 'del_agent_terminal',
+      sessionId: 's-gate',
+      type: 'deleteAgentSession',
+    })
+    expect(state.agentRuns['r-gate']).toBeUndefined()
+    expect(state.agentRuns['r-gate-child']).toBeUndefined()
+    expect(state.agentSessions['r-gate-child']).toBeUndefined()
+
+    const afterRootReplay = researchDeskReducer(state, {
+      summary: root,
+      type: 'upsertAgentRunSummary',
+    })
+    const afterChildReplay = researchDeskReducer(afterRootReplay, {
+      summary: child,
+      type: 'upsertAgentRunSummary',
+    })
+    expect(afterChildReplay).toBe(afterRootReplay)
+    expect(afterChildReplay.agentSessions['s-gate']).toBeUndefined()
+  })
+
+  it('rejects stale Knowledge session and item hydration after completion', () => {
+    const session = makeKnowledgeSession('ks-terminal', 'Deleted')
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      session,
+      type: 'createKnowledgeSession',
+    })
+    state = researchDeskReducer(state, {
+      operationId: 'del_knowledge_terminal',
+      sessionId: session.id,
+      type: 'deleteKnowledgeSession',
+    })
+    const replayed = researchDeskReducer(state, {
+      memberships: { [session.id]: null },
+      sessions: [session],
+      type: 'upsertServerKnowledgeSessions',
+    })
+    expect(replayed.knowledgeSessions[session.id]).toBeUndefined()
+    expect(researchDeskReducer(replayed, {
+      items: [],
+      sessionId: session.id,
+      type: 'setServerKnowledgeSessionItems',
+    })).toBe(replayed)
   })
 })
 
@@ -2478,5 +3915,336 @@ describe('agent model selection actions (R3)', () => {
     // The AGENT selection never touches the chat fields.
     expect(state.ui.selectedChatModel).toBeNull()
     expect(state.ui.selectedChatModelTier).toBeNull()
+  })
+})
+
+describe('agent model stickiness (session-scoped)', () => {
+  const makeSession = (id: string) => ({
+    id,
+    title: id,
+    groupId: null,
+    createdAt: '2026-08-07T10:00:00.000Z',
+    updatedAt: '2026-08-07T10:00:00.000Z',
+    runIds: [] as string[],
+    sourcePolicy: { web: 'available' as const, knowledge: 'available' as const },
+  })
+
+  function withSession() {
+    return researchDeskReducer(createEmptyProjectState(), {
+      session: makeSession('sess-a'),
+      type: 'createAgentSession',
+    })
+  }
+
+  it('writes a user pick onto the active session', () => {
+    let state = withSession()
+    state = researchDeskReducer(state, { tier: 'fast', type: 'setSelectedAgentModelTier' })
+    expect(state.agentSessions['sess-a'].modelSelection).toEqual({
+      effort: null,
+      model: null,
+      tier: 'fast',
+    })
+    expect(state.ui.selectedAgentModelTier).toBe('fast')
+  })
+
+  it('restores the session pick when switching back', () => {
+    let state = withSession()
+    state = researchDeskReducer(state, { tier: 'fast', type: 'setSelectedAgentModelTier' })
+    state = researchDeskReducer(state, {
+      session: makeSession('sess-b'),
+      type: 'createAgentSession',
+    })
+    // A fresh session carries no pick, so the preference can seed it.
+    expect(state.ui.selectedAgentModelTier).toBeNull()
+
+    state = researchDeskReducer(state, { sessionId: 'sess-a', type: 'selectAgentSession' })
+    expect(state.ui.selectedAgentModelTier).toBe('fast')
+  })
+
+  it('does not bump updatedAt when the pick is unchanged', () => {
+    let state = withSession()
+    state = researchDeskReducer(state, { tier: 'fast', type: 'setSelectedAgentModelTier' })
+    const stamp = state.agentSessions['sess-a'].updatedAt
+    state = researchDeskReducer(state, { tier: 'fast', type: 'setSelectedAgentModelTier' })
+    expect(state.agentSessions['sess-a'].updatedAt).toBe(stamp)
+  })
+
+  it('clearing everything removes the stored pick instead of pinning nulls', () => {
+    // The picker's Auto row means "follow my default" — with a pinned
+    // null-triple the preference could never seed again.
+    let state = withSession()
+    state = researchDeskReducer(state, { tier: 'fast', type: 'setSelectedAgentModelTier' })
+    state = researchDeskReducer(state, { tier: null, type: 'setSelectedAgentModelTier' })
+    expect(state.agentSessions['sess-a'].modelSelection).toBeUndefined()
+  })
+
+  it('never lets an agent pick reach the chat fields', () => {
+    let state = withSession()
+    state = researchDeskReducer(state, { tier: 'fast', type: 'setSelectedAgentModelTier' })
+    expect(state.ui.selectedChatModelTier).toBeNull()
+    expect(state.ui.selectedChatModel).toBeNull()
+  })
+
+  it('keeps working before any session exists', () => {
+    let state = createEmptyProjectState()
+    state = researchDeskReducer(state, { tier: 'high', type: 'setSelectedAgentModelTier' })
+    expect(state.ui.selectedAgentModelTier).toBe('high')
+  })
+})
+
+describe('agent preference seeding never masquerades as a pick', () => {
+  it('touches only the working value, never the session', () => {
+    // Writing the seed into the session bumps updatedAt, makes the local copy
+    // look newer than the server row, and blocks the stored pick from ever
+    // loading — the root cause of the first failed attempt.
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      session: {
+        id: 'sess-seed',
+        title: 'S',
+        groupId: null,
+        createdAt: '2026-08-07T10:00:00.000Z',
+        updatedAt: '2026-08-07T10:00:00.000Z',
+        runIds: [],
+        sourcePolicy: { web: 'available', knowledge: 'available' },
+      },
+      type: 'createAgentSession',
+    })
+    const stamp = state.agentSessions['sess-seed'].updatedAt
+    const dirtyBefore = state.dirty
+    state = researchDeskReducer(state, {
+      tier: 'high',
+      type: 'seedAgentModelTierFromPreference',
+    })
+    expect(state.ui.selectedAgentModelTier).toBe('high')
+    expect(state.agentSessions['sess-seed'].modelSelection).toBeUndefined()
+    expect(state.agentSessions['sess-seed'].updatedAt).toBe(stamp)
+    expect(state.dirty).toBe(dirtyBefore)
+  })
+
+  it('yields to a pick the user already made', () => {
+    let state = createEmptyProjectState()
+    state = researchDeskReducer(state, { tier: 'fast', type: 'setSelectedAgentModelTier' })
+    state = researchDeskReducer(state, {
+      tier: 'high',
+      type: 'seedAgentModelTierFromPreference',
+    })
+    expect(state.ui.selectedAgentModelTier).toBe('fast')
+  })
+})
+
+describe('agent model stickiness survives the server hydrate', () => {
+  const wire = (id: string, itemsJson?: string) => ({
+    id,
+    title: 'Server',
+    group_id: null,
+    created_at: 1_700_000_000,
+    updated_at: 1_800_000_500,
+    ...(itemsJson === undefined ? {} : { items_json: itemsJson }),
+  })
+  const withPick = JSON.stringify({
+    source_policy: { web: 'available', knowledge: 'available' },
+    model_selection: { model: 'gpt-5.4-nano', tier: null, effort: null },
+  })
+
+  it('restores the stored pick and marks the detail as hydrated', () => {
+    const state = researchDeskReducer(createEmptyProjectState(), {
+      groups: [],
+      sessions: [wire('sess-srv', withPick)],
+      type: 'upsertServerAgentSessions',
+    })
+    expect(state.agentSessions['sess-srv'].modelSelection).toEqual({
+      effort: null,
+      model: 'gpt-5.4-nano',
+      tier: null,
+    })
+    expect(state.agentSessions['sess-srv'].metadataHydrated).toBe(true)
+  })
+
+  it('a metadata-only list row neither hydrates nor clears the local pick', () => {
+    // The list deliberately omits items_json. Treating that as "no pick"
+    // would wipe the local value on every background refresh.
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      groups: [],
+      sessions: [wire('sess-srv', withPick)],
+      type: 'upsertServerAgentSessions',
+    })
+    state = researchDeskReducer(state, {
+      groups: [],
+      sessions: [{ ...wire('sess-srv'), updated_at: 1_800_000_900 }],
+      type: 'upsertServerAgentSessions',
+    })
+    expect(state.agentSessions['sess-srv'].modelSelection).toEqual({
+      effort: null,
+      model: 'gpt-5.4-nano',
+      tier: null,
+    })
+  })
+
+  it('fills an untouched working value for the selected session', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      groups: [],
+      selectSessionId: 'sess-srv',
+      sessions: [wire('sess-srv', withPick)],
+      type: 'upsertServerAgentSessions',
+    })
+    expect(state.ui.selectedAgentModel).toBe('gpt-5.4-nano')
+
+    // And the late DETAIL of an already-selected session fills it too.
+    state = researchDeskReducer(createEmptyProjectState(), {
+      groups: [],
+      selectSessionId: 'sess-srv',
+      sessions: [wire('sess-srv')],
+      type: 'upsertServerAgentSessions',
+    })
+    expect(state.ui.selectedAgentModel).toBeNull()
+    state = researchDeskReducer(state, {
+      groups: [],
+      sessions: [wire('sess-srv', withPick)],
+      type: 'upsertServerAgentSessions',
+    })
+    expect(state.ui.selectedAgentModel).toBe('gpt-5.4-nano')
+  })
+
+  it('never overwrites a pick made while the detail was in flight', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      groups: [],
+      selectSessionId: 'sess-srv',
+      sessions: [wire('sess-srv')],
+      type: 'upsertServerAgentSessions',
+    })
+    state = researchDeskReducer(state, { tier: 'mid', type: 'setSelectedAgentModelTier' })
+    state = researchDeskReducer(state, {
+      groups: [],
+      sessions: [{ ...wire('sess-srv', withPick), updated_at: 1_900_000_000 }],
+      type: 'upsertServerAgentSessions',
+    })
+    expect(state.ui.selectedAgentModelTier).toBe('mid')
+  })
+})
+
+describe('chat thread model stickiness (thread-scoped)', () => {
+  function withThread() {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      preview: 'Bereit.',
+      title: 'A',
+      type: 'createChatThread',
+    })
+    // createChatThread selects the new thread; activeView starts as 'chat'?
+    // The empty state's activeView is whatever seedProject sets — force chat
+    // so the write-through gate is open like in the real surface.
+    state = { ...state, ui: { ...state.ui, activeView: 'chat' as const } }
+    return state
+  }
+
+  it('writes a user pick onto the active thread and bumps updatedAt', () => {
+    let state = withThread()
+    const threadId = state.ui.selectedChatThreadId as string
+    const stamp = state.chatThreads[threadId].updatedAt
+    state = researchDeskReducer(state, { model: 'gpt-5.4-nano', type: 'setSelectedChatModel' })
+    expect(state.chatThreads[threadId].modelSelection).toEqual({
+      effort: null,
+      model: 'gpt-5.4-nano',
+      tier: null,
+    })
+    expect(state.chatThreads[threadId].updatedAt >= stamp).toBe(true)
+    // Unchanged pick must not bump again (autosave would loop).
+    const bumped = state.chatThreads[threadId].updatedAt
+    state = researchDeskReducer(state, { model: 'gpt-5.4-nano', type: 'setSelectedChatModel' })
+    expect(state.chatThreads[threadId].updatedAt).toBe(bumped)
+  })
+
+  it('an editor-view pick never touches the thread (until stage 3 decouples)', () => {
+    let state = withThread()
+    const threadId = state.ui.selectedChatThreadId as string
+    state = { ...state, ui: { ...state.ui, activeView: 'editor' as const } }
+    state = researchDeskReducer(state, { model: 'claude-opus-4-8', type: 'setSelectedChatModel' })
+    expect(state.chatThreads[threadId].modelSelection).toBeUndefined()
+    expect(state.ui.selectedChatModel).toBe('claude-opus-4-8')
+  })
+
+  it('restores the thread pick when switching back', () => {
+    let state = withThread()
+    const threadA = state.ui.selectedChatThreadId as string
+    state = researchDeskReducer(state, { tier: 'fast', type: 'setSelectedChatModelTier' })
+    state = researchDeskReducer(state, {
+      preview: 'Bereit.',
+      title: 'B',
+      type: 'createChatThread',
+    })
+    expect(state.ui.selectedChatModelTier).toBeNull()
+    state = researchDeskReducer(state, { threadId: threadA, type: 'selectChatThread' })
+    expect(state.ui.selectedChatModelTier).toBe('fast')
+  })
+
+  it('seeding stays ui-only and yields to a pick', () => {
+    let state = withThread()
+    const threadId = state.ui.selectedChatThreadId as string
+    const stamp = state.chatThreads[threadId].updatedAt
+    state = researchDeskReducer(state, { tier: 'high', type: 'seedChatModelTierFromPreference' })
+    expect(state.ui.selectedChatModelTier).toBe('high')
+    expect(state.chatThreads[threadId].modelSelection).toBeUndefined()
+    expect(state.chatThreads[threadId].updatedAt).toBe(stamp)
+    state = researchDeskReducer(state, { tier: 'fast', type: 'setSelectedChatModelTier' })
+    state = researchDeskReducer(state, { tier: 'high', type: 'seedChatModelTierFromPreference' })
+    expect(state.ui.selectedChatModelTier).toBe('fast')
+  })
+
+  it('hydrate restores the stored pick and fills an untouched ui', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      append: false,
+      memberships: {},
+      threads: [{
+        createdAt: '2026-08-07T10:00:00.000Z',
+        id: 'ct_srv',
+        messages: [],
+        modelSelection: { model: null, tier: 'fast', effort: null },
+        preview: '',
+        source: 'api' as const,
+        title: 'Srv',
+        updatedAt: '2026-08-07T10:00:00.000Z',
+      }],
+      type: 'upsertServerChatThreads',
+    })
+    expect(state.chatThreads['ct_srv'].modelSelection).toEqual({
+      model: null, tier: 'fast', effort: null,
+    })
+    // A NEWER server row replaces the stored pick — the merge must copy the
+    // field, not keep the stale local one.
+    state = researchDeskReducer(state, {
+      append: false,
+      memberships: {},
+      threads: [{
+        createdAt: '2026-08-07T10:00:00.000Z',
+        id: 'ct_srv',
+        messages: [],
+        modelSelection: { model: null, tier: 'high', effort: null },
+        preview: '',
+        source: 'api' as const,
+        title: 'Srv',
+        updatedAt: '2026-08-07T10:00:01.000Z',
+      }],
+      type: 'upsertServerChatThreads',
+    })
+    expect(state.chatThreads['ct_srv'].modelSelection).toEqual({
+      model: null, tier: 'high', effort: null,
+    })
+    // Untouched ui of the selected thread fills from the arriving row.
+    state = { ...state, ui: { ...state.ui, selectedChatThreadId: 'ct_srv' } }
+    state = researchDeskReducer(state, {
+      append: false,
+      memberships: {},
+      threads: [{
+        createdAt: '2026-08-07T10:00:00.000Z',
+        id: 'ct_srv',
+        messages: [],
+        modelSelection: { model: null, tier: 'high', effort: null },
+        preview: '',
+        source: 'api' as const,
+        title: 'Srv',
+        updatedAt: '2026-08-07T10:00:02.000Z',
+      }],
+      type: 'upsertServerChatThreads',
+    })
+    expect(state.ui.selectedChatModelTier).toBe('high')
   })
 })

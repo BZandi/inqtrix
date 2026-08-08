@@ -1,5 +1,20 @@
 import { cn } from '@/lib/utils'
 
+const graphemeSegmenter = typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  : null
+
+/** Return one user-perceived character without splitting a UTF-16 surrogate.
+ * Modern target browsers use Unicode grapheme segmentation so emoji modifiers,
+ * joiners, and combining marks stay intact. The fallback remains code-point
+ * safe for runtimes without Intl.Segmenter. */
+function firstGrapheme(value: string): string {
+  if (graphemeSegmenter) {
+    for (const { segment } of graphemeSegmenter.segment(value)) return segment
+  }
+  return Array.from(value)[0] ?? ''
+}
+
 /** Derive up to two uppercase initials from a display name or email.
  * Exported for the unit tests; the fallback chain is name words ->
  * email local part -> "?" so the avatar never renders empty. */
@@ -7,12 +22,12 @@ export function initialsFor(displayName: string | null, email: string | null): s
   const name = (displayName ?? '').trim()
   if (name) {
     const words = name.split(/\s+/).filter(Boolean)
-    const first = words[0]?.[0] ?? ''
-    const second = words.length > 1 ? words[words.length - 1][0] : ''
+    const first = firstGrapheme(words[0] ?? '')
+    const second = words.length > 1 ? firstGrapheme(words[words.length - 1]) : ''
     return `${first}${second}`.toUpperCase() || '?'
   }
   const local = (email ?? '').split('@')[0]?.trim()
-  if (local) return local[0].toUpperCase()
+  if (local) return firstGrapheme(local).toUpperCase()
   return '?'
 }
 
@@ -26,7 +41,7 @@ type InitialsAvatarProps = {
 /** Round initials badge for the signed-in identity.
  * Control primitive: owns its raw text sizes per DESIGN.md section 4
  * (feature code must not use ad-hoc pixel sizes). Brand tones are the
- * sanctioned identity colour (P2). */
+ * sanctioned identity colour from the design contract. */
 export function InitialsAvatar({ displayName, email, size = 'md', className }: InitialsAvatarProps) {
   return (
     <span

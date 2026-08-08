@@ -15,6 +15,7 @@ import {
   Moon,
   Palette,
   Scale,
+  ScrollText,
   Search,
   Server,
   Settings,
@@ -31,7 +32,13 @@ import {
   type LucideIcon,
 } from '@/components/icons'
 import { motion } from 'motion/react'
-import { type FormEvent, useEffect, useState, type ReactNode } from 'react'
+import {
+  type FormEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
 import {
   changePassword,
   hasHttpStatus,
@@ -48,6 +55,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useAgentMemory } from '@/features/agent/useAgentMemory'
+import type { ModelTierPreference } from '@/features/researchRuns/types'
 import {
   agentMemoryModeLabel,
   pendingAgentMemoryCandidates,
@@ -55,6 +63,7 @@ import {
 } from '@/features/agent/memoryModel'
 import { isPasswordAcceptable } from '@/features/auth/passwordPolicy'
 import { AccessTokensPanel } from '@/features/admin/AccessTokensPanel'
+import { AdminAuditSection } from '@/features/admin/AdminAuditSection'
 import { SystemStatusPanel } from '@/features/admin/SystemStatusPanel'
 import { AdminWorkspacesPanel } from '@/features/admin/AdminWorkspacesPanel'
 import { UsersPanel } from '@/features/admin/UsersPanel'
@@ -140,6 +149,7 @@ type SettingsWorkspaceProps = {
 
 type SettingsSectionId =
   | 'access-tokens'
+  | 'admin-audit'
   | 'admin-system'
   | 'admin-users'
   | 'admin-workspaces'
@@ -151,6 +161,13 @@ type SettingsSectionId =
   | 'quotas'
   | 'security'
   | 'sharing'
+
+export function shouldReloadPatTokensOnSectionChange(
+  previousSection: SettingsSectionId,
+  activeSection: SettingsSectionId,
+): boolean {
+  return previousSection !== 'access-tokens' && activeSection === 'access-tokens'
+}
 
 type SettingsNavItem = {
   /** Optional count chip (e.g. pending share invitations); hidden when 0. */
@@ -169,6 +186,7 @@ type SettingsNavGroup = {
 }
 
 const ADMIN_DATA_SECTION_IDS = new Set<SettingsSectionId>([
+  'admin-audit',
   'admin-system',
   'admin-users',
   'admin-workspaces',
@@ -238,9 +256,17 @@ export default function SettingsWorkspace({
   })
   const patTokens = usePatTokens({ demo: isDemoMode, enabled: tokensAvailable })
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('preferences')
+  const previousActiveSection = useRef(activeSection)
   useEffect(() => {
     if (requestedSection) setActiveSection(requestedSection)
   }, [requestedSection])
+  useEffect(() => {
+    const previousSection = previousActiveSection.current
+    previousActiveSection.current = activeSection
+    if (shouldReloadPatTokensOnSectionChange(previousSection, activeSection)) {
+      void patTokens.reload()
+    }
+  }, [activeSection, patTokens.reload])
   const modeOptions: Array<{
     icon: LucideIcon
     label: string
@@ -451,6 +477,12 @@ export default function SettingsWorkspace({
                       icon: Server,
                       id: 'admin-system' as const,
                       label: t.adminSystem.navLabel,
+                    },
+                    {
+                      description: t.adminSystem.auditNavDescription,
+                      icon: ScrollText,
+                      id: 'admin-audit' as const,
+                      label: t.adminSystem.auditNavLabel,
                     },
                   ]
                 : []),
@@ -795,7 +827,7 @@ function SettingsPanel({
   apiError: string | null
   apiHealth: InqtrixHealth | null
   apiKey: string
-  authMode?: AuthMode
+  authMode: AuthMode
   authSession?: {
     status: string
     user: {
@@ -897,6 +929,7 @@ function SettingsPanel({
             apiBaseUrl={apiBaseUrl}
             apiError={apiError}
             apiHealth={apiHealth}
+            authMode={authMode}
             hasMultiStackSelection={hasMultiStackSelection}
             onStackChange={onStackChange}
             selectedStack={selectedStack}
@@ -929,6 +962,15 @@ function SettingsPanel({
             runtime={adminSystemRuntime.state.runtime}
             runtimeError={adminSystemRuntime.state.error}
             runtimeStatus={adminSystemRuntime.state.status}
+          />
+        ) : activeItem.id === 'admin-audit' ? (
+          <AdminAuditSection
+            demo={isDemoMode}
+            enabled={isAdminRole(authSession?.user?.role) || isDemoMode}
+            traceUiConfigured={
+              adminSystemRuntime.state.runtime?.observability
+                ?.ui_link_configured ?? false
+            }
           />
         ) : activeItem.id === 'quotas' ? (
           <QuotaAdminPanel admin={quotaAdmin} />
@@ -973,6 +1015,16 @@ function PreferencesPanel({
   onDemoModeChange: (enabled: boolean) => void
 }) {
   const { locale, setLocale, t } = useLocale()
+  const { agentModelTier, chatModelTier, setAgentModelTier, setChatModelTier } = useTheme()
+  // Two rows, never one. An agent run fans out over several thinking nodes
+  // while a chat answer is a single call, so a chat pick must not raise agent
+  // spend — the same split the composer state keeps.
+  const modelTierOptions: Array<{ label: string; value: ModelTierPreference }> = [
+    { label: t.settings.modelTierServerDefault, value: '' },
+    { label: t.settings.modelTierHigh, value: 'high' },
+    { label: t.settings.modelTierMid, value: 'mid' },
+    { label: t.settings.modelTierFast, value: 'fast' },
+  ]
 
   return (
     <SettingsSection>
@@ -1009,6 +1061,30 @@ function PreferencesPanel({
             { label: 'EN', value: 'en' },
           ]}
           value={locale}
+        />
+      </SettingsRow>
+      <SettingsRow
+        description={t.settings.chatModelTierDescription}
+        title={t.settings.chatModelTier}
+      >
+        <SettingsSegmented
+          ariaLabel={t.settings.chatModelTier}
+          onChange={setChatModelTier}
+          options={modelTierOptions}
+          value={chatModelTier}
+          wrap
+        />
+      </SettingsRow>
+      <SettingsRow
+        description={t.settings.agentModelTierDescription}
+        title={t.settings.agentModelTier}
+      >
+        <SettingsSegmented
+          ariaLabel={t.settings.agentModelTier}
+          onChange={setAgentModelTier}
+          options={modelTierOptions}
+          value={agentModelTier}
+          wrap
         />
       </SettingsRow>
       <SettingsRow
@@ -1797,6 +1873,7 @@ function ConnectionPanel({
   apiBaseUrl,
   apiError,
   apiHealth,
+  authMode,
   hasMultiStackSelection,
   onStackChange,
   selectedStack,
@@ -1807,6 +1884,7 @@ function ConnectionPanel({
   apiBaseUrl: string
   apiError: string | null
   apiHealth: InqtrixHealth | null
+  authMode: AuthMode
   hasMultiStackSelection: boolean
   onStackChange: (stack: string) => void
   selectedStack: string
@@ -1843,7 +1921,16 @@ function ConnectionPanel({
               tone={apiHealth?.status === 'ok' ? 'success' : 'neutral'}
             />
             {apiHealth?.auth_required ? (
-              <StatusBadge label={t.settings.authRequired} tone="warning" />
+              <StatusBadge
+                label={
+                  authMode === 'apikey'
+                    ? t.settings.authRequired
+                    : isCookieSessionMode(authMode)
+                      ? t.settings.sessionAuthEnabled
+                      : t.settings.authenticationRequired
+                }
+                tone={isCookieSessionMode(authMode) ? 'neutral' : 'warning'}
+              />
             ) : null}
             {apiHealth ? <StatusBadge label={stackModeLabel} tone="neutral" /> : null}
           </div>

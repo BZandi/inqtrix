@@ -145,7 +145,13 @@ function sourceProject(): ProjectState {
         folderId: 'folder-1',
         id: 'document-1',
         metadataRevision: 7,
+        recovery: {
+          capturedAt: NOW,
+          originalDocumentId: 'deleted-document',
+          reason: 'remote_deleted',
+        },
         revision: 8,
+        serverSynced: true,
         source: 'pasted',
         title: 'Document',
         updatedAt: NOW,
@@ -169,8 +175,13 @@ function sourceProject(): ProjectState {
         pageCount: 1,
         parseStatus: 'parsed',
         parseWarning: null,
+        deletionError: 'retry',
+        deletionOperationId: 'del-source',
+        deletionStage: 'delete_failed',
+        lifecycleStatus: 'delete_failed',
         sectionId,
         serverFileId: 'fl-source',
+        serverSynced: true,
         sizeBytes: 4,
         textTruncated: false,
         title: 'File',
@@ -273,10 +284,19 @@ describe('detachProjectResourceGraph', () => {
     expect(assetA.groupId).toBe(groupA.id)
     expect(groupA.sectionId).toBe(assetA.sectionId)
     expect(assetA.serverFileId).toBeNull()
+    expect(assetA).toMatchObject({
+      deletionError: null,
+      deletionOperationId: null,
+      deletionStage: null,
+      lifecycleStatus: 'active',
+      serverSynced: false,
+    })
     expect(documentA.folderId).toBe(cloneA.editorFolderOrder[0])
     expect(documentA).toMatchObject({ contentMode: 'markdown', revision: 0 })
     expect(documentA).not.toHaveProperty('access')
     expect(documentA).not.toHaveProperty('collaboration')
+    expect(documentA).not.toHaveProperty('recovery')
+    expect(documentA).not.toHaveProperty('serverSynced')
     expect(commentA.documentId).toBe(documentA.id)
     expect(indexA.members).toEqual([{ fileId: assetA.id, state: 'pending' }])
     expect(indexA).toMatchObject({

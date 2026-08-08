@@ -18,7 +18,7 @@ Domain-specific terms that appear throughout the codebase and the docs. Terms ar
 
 **Claim (raw)** — Structured atomic statement extracted from a search result and attached to its `EvidenceRecord.claims[]` row (the primary truth in `state["evidence_ledger"]`). The raw claim list is derived per round by `derive_claim_ledger_from_evidence()` as a local variable in `search()`, **not** persisted on `AgentState`. After consolidation, the resulting `consolidated_claims` is the one persisted claim view. See [Claims](../scoring-and-stopping/claims.md).
 
-**Claim status** — One of `verified`, `contested`, or `unverified`. Determined by support/contradict counts, source tier, and the `needs_primary` flag. See [Claims](../scoring-and-stopping/claims.md).
+**Claim status** — One of `verified`, `contested`, or `unverified`. Determined from provider-grounded supports, source tiers, contradictions, and the `needs_primary` flag. An unknown tier never removes evidence. See [Claims](../scoring-and-stopping/claims.md).
 
 **Competing events** — Multiple conflicting explanations of the same event in the collected context (e.g. two different dates for the same policy vote). Detected by the evaluate LLM; can cap confidence to `confidence_stop - 1` when confidence is already at or above the stop threshold and events are newly detected. See [Stop criteria](../scoring-and-stopping/stop-criteria.md).
 
@@ -56,11 +56,11 @@ Domain-specific terms that appear throughout the codebase and the docs. Terms ar
 
 **Plateau stop** — Stop heuristic that triggers when confidence has been stable at ≥ 6 across two or more rounds and competing events are unchanged. See [Stop criteria](../scoring-and-stopping/stop-criteria.md).
 
-**Primary-need / `needs_primary`** — Flag on a claim that asks for stronger evidence, usually a primary-tier source or independent non-low cross-check. If not satisfied, the claim stays `unverified`. See [Claims](../scoring-and-stopping/claims.md).
+**Primary-need / `needs_primary`** — Evidence-depth flag on a factual claim that drives primary-source and corroboration checks. It does not discard the provider answer. See [Claims](../scoring-and-stopping/claims.md).
 
 **Progress event** — Short human-readable message emitted by `emit_progress(...)` at node boundaries. Surfaced via `agent.stream(...)` and SSE on the HTTP endpoint. See [Progress events](../observability/progress-events.md).
 
-**EvidenceOverview** — The single rendered Markdown view of the EvidenceLedger that the answer composer reads. Produced by `render_evidence_ledger_overview()` from `evidence_ledger`; carries `markdown`, `allowed_urls` (visible source-block citation allowlist), `label_urls` (visible `E# -> URL` map), `label_by_evidence_id` (EvidenceRecord ids projected to URL-canonical labels), and `rendered_record_count` / `omitted_record_count` for budget visibility. Replaces the legacy `PromptEvidenceUnit` / `ReportEvidenceBundle` channels. See [Evidence pipeline](../architecture/evidence-pipeline.md#rendering-evidenceledger-markdown) and [Answer composition](../architecture/answer-composition.md).
+**EvidenceOverview** — The single rendered Markdown view of the EvidenceLedger that the answer composer reads. Produced by `render_evidence_ledger_overview()` from `evidence_ledger`; carries `markdown`, `allowed_urls` (visible source-block citation allowlist), `label_urls` (visible `E# -> URL` map), `label_by_evidence_id` (EvidenceRecord ids projected to URL-canonical labels), and `rendered_record_count` / `omitted_record_count` for budget visibility. Replaces the legacy `PromptEvidenceUnit` / `ReportEvidenceBundle` channels. See [Evidence pipeline](../architecture/evidence-pipeline.md#rendering-evidenceledger--markdown) and [Answer composition](../architecture/answer-composition.md).
 
 **ProviderContext** — Runtime `@dataclass` containing the active `LLMProvider` and `SearchProvider`. Built before the graph runs and injected into every node. See [Architecture overview](../architecture/overview.md).
 
@@ -68,7 +68,7 @@ Domain-specific terms that appear throughout the codebase and the docs. Terms ar
 
 **Report profile** — Enum `compact` or `deep`. Controls evidence context density, claim breadth, and answer length without changing provider wiring. See [Report profiles](../configuration/report-profiles.md).
 
-**Verification basis** — Per-consolidated-claim label that records *why* a claim is verified or unverified. Possible values: `verified_cross_checked`, `verified_primary`, `verified_quality_source`, `contested`, `missing_primary_source`, `weak_evidence`. Computed deterministically by `DefaultClaimConsolidator.consolidate()`; projected back onto each `EvidenceRecord.claims[n]` by `project_claim_verification_to_evidence()` so the ledger is self-describing. See [Claims](../scoring-and-stopping/claims.md#status-determination).
+**Verification basis** — Per-consolidated-claim label that records *why* a claim is verified or unverified. Possible values: `verified_cross_checked`, `verified_primary`, `verified_quality_source`, `contested`, `missing_primary_source`, and `weak_evidence`. Computed deterministically by `DefaultClaimConsolidator.consolidate()` from provider-grounded source records and projected back onto each `EvidenceRecord.claims[n]`. See [Claims](../scoring-and-stopping/claims.md#status-determination).
 
 **Risk score** — Deterministic regex-based integer 0–10 computed from the question text. Values ≥ `HIGH_RISK_SCORE_THRESHOLD` (default 4) flag the question as `high_risk`. This is an observability signal only (forensic events, `/health`, follow-up preservation); it does not change model selection — use the model tiers or a per-node model override for a stronger model. See [Nodes](../architecture/nodes.md).
 

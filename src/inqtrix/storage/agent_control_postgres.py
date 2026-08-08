@@ -31,6 +31,7 @@ from inqtrix.agents.control_ports import (
     ArtifactLocked,
     ArtifactBatchRevision,
     ArtifactNotFound,
+    ArtifactPublicationFenced,
     ArtifactRecord,
     ArtifactRevisionConflict,
     ArtifactRevisionRecord,
@@ -63,7 +64,7 @@ from inqtrix.storage.resource_access import lock_resource_access
 from inqtrix.storage.runs_orm import runs
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 _ARTIFACT_META_COLUMNS = (
     run_artifacts.c.artifact_id,
@@ -91,9 +92,11 @@ class PostgresAgentControlStore(BaseSessionStore):
         engine: "AsyncEngine",
         app_role: str,
         restrict_to_workspace_members: bool = False,
+        sharing_enabled: bool = True,
     ) -> None:
         super().__init__(engine=engine, app_role=app_role)
         self._restrict_to_workspace_members = restrict_to_workspace_members
+        self._sharing_enabled = sharing_enabled
 
     async def _lock_runtime_authority(
         self, session: "AsyncSession", run_id: str
@@ -124,6 +127,7 @@ class PostgresAgentControlStore(BaseSessionStore):
             owner_column=runs.c.created_by_user_id,
             minimum=SharePermission.EDIT,
             restrict_to_workspace_members=self._restrict_to_workspace_members,
+            sharing_enabled=self._sharing_enabled,
         )
         if access is None:
             raise AuthorizationRevoked("run execution authority was revoked")
@@ -531,9 +535,40 @@ class PostgresAgentControlStore(BaseSessionStore):
         updated_by: str,
         artifact_id: str | None = None,
         expected_revision: int | None = None,
+        expected_run_attempt: int | None = None,
     ) -> ArtifactRecord:
         async with self._session() as session:
             await self._lock_runtime_authority(session, run_id)
+            if expected_run_attempt is not None:
+                run_fence = (
+                    await session.execute(
+                        select(
+                            runs.c.status,
+                            runs.c.attempt,
+                            runs.c.cancel_requested,
+                        )
+                        .where(runs.c.run_id == run_id)
+                        .with_for_update()
+                    )
+                ).first()
+                current_status = str(run_fence[0]) if run_fence else "missing"
+                current_attempt = int(run_fence[1]) if run_fence else None
+                cancel_requested = bool(run_fence[2]) if run_fence else False
+                if (
+                    run_fence is None
+                    or current_status != "running"
+                    or cancel_requested
+                    or current_attempt != expected_run_attempt
+                ):
+                    raise ArtifactPublicationFenced(
+                        expected_attempt=expected_run_attempt,
+                        current_attempt=current_attempt,
+                        status=(
+                            "cancel_requested"
+                            if cancel_requested
+                            else current_status
+                        ),
+                    )
             existing = await _find_upsert_target(
                 session,
                 artifact_id=artifact_id,

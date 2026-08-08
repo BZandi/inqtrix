@@ -46,6 +46,10 @@ class GroundedSource:
         origin: Lineage marker for where the URL came from, e.g.
             ``"search_results"``, ``"url_citation"``, ``"markdown_link"``,
             or ``"answer_url_fallback"``.
+        annotation_start: Optional provider-native start offset of the answer
+            text associated with this citation.
+        annotation_end: Optional provider-native exclusive end offset. These
+            offsets describe the provider answer, not the linked webpage.
     """
 
     url: str
@@ -55,6 +59,8 @@ class GroundedSource:
     last_updated: str = ""
     rank: int = 0
     origin: str = ""
+    annotation_start: int | None = None
+    annotation_end: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

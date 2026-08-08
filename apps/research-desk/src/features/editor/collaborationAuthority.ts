@@ -8,7 +8,7 @@ export type CollaborationDocumentIdentity = {
 }
 
 export type CollaborationLiveAuthority = {
-  access: 'edit' | 'suggest' | 'view' | null
+  access: 'comment' | 'edit' | 'suggest' | 'view' | null
   blockingFailure: string | null
   canEdit: boolean
   connectionStatus: EditorCollaborationConnectionStatus
@@ -172,6 +172,13 @@ function collaborationUnavailableMessage(
     return locale === 'de'
       ? 'Die Kollaboration wird neu verbunden. Schreibaktionen sind vorübergehend nicht verfügbar.'
       : 'Collaboration is reconnecting. Editing actions are temporarily unavailable.'
+  }
+  if (connectionStatus === 'origin_rejected') {
+    return locale === 'de'
+      ? 'Der Kollaborationsserver hat die Adresse dieser Seite abgelehnt. Sie stimmt '
+        + 'nicht mit der konfigurierten öffentlichen Adresse überein.'
+      : 'The collaboration server rejected this page address. It does not match the '
+        + 'configured public address of the server.'
   }
   if (connectionStatus === 'access_revoked') {
     return locale === 'de'

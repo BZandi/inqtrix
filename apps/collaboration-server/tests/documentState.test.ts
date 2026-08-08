@@ -11,12 +11,69 @@ import {
 import * as Y from 'yjs'
 
 import type { LoadedDocumentState } from '../src/contracts'
-import { hashBytes, reconstructDocument } from '../src/documentState'
+import {
+  hashBytes,
+  reconstructDocument,
+  reconstructValidatedDocument,
+  sameBytes,
+} from '../src/documentState'
 import { documentState, markdownDocument } from './helpers'
 
 const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
 
+describe('sameBytes', () => {
+  // This comparison guards cache reuse against a stale authoritative
+  // state, so its semantics are a safety contract. The implementation
+  // may get faster; what it answers may not change.
+  it('accepts only byte-for-byte identical buffers', () => {
+    expect(sameBytes(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 3]))).toBe(true)
+    expect(sameBytes(new Uint8Array([]), new Uint8Array([]))).toBe(true)
+  })
+
+  it('rejects a difference in any position, including the last byte', () => {
+    expect(sameBytes(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 4]))).toBe(false)
+    expect(sameBytes(new Uint8Array([9, 2, 3]), new Uint8Array([1, 2, 3]))).toBe(false)
+  })
+
+  it('rejects differing lengths even when one is a prefix of the other', () => {
+    // A prefix must never pass: a truncated state that happens to match
+    // the start of the authoritative one is exactly the case this guard
+    // exists for.
+    expect(sameBytes(new Uint8Array([1, 2]), new Uint8Array([1, 2, 3]))).toBe(false)
+    expect(sameBytes(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2]))).toBe(false)
+  })
+
+  it('compares content, not the backing buffer offset', () => {
+    // Yjs hands out views into pooled ArrayBuffers. Comparing the
+    // underlying buffer instead of the view would silently report
+    // equality for two different states that share one allocation.
+    const backing = new Uint8Array([7, 1, 2, 3, 9])
+    const view = backing.subarray(1, 4)
+
+    expect(sameBytes(view, new Uint8Array([1, 2, 3]))).toBe(true)
+    expect(sameBytes(view, new Uint8Array([7, 1, 2]))).toBe(false)
+  })
+})
+
 describe('document reconstruction', () => {
+  it('returns one reusable immutable validation of the reconstructed state', async () => {
+    const expected = markdownDocument('Reusable state')
+    const state = await documentState('ed_test', expected)
+
+    const validated = await reconstructValidatedDocument(state, {
+      documentId: 'ed_test',
+      generation: 1,
+      schemaVersion: 2,
+    }, 1024 * 1024)
+
+    expect(hashBytes(validated.encodedState)).toBe(validated.stateHash)
+    expect(validated.canonicalJson).toEqual(editorYDocToJson(validated.document))
+    expect(Object.isFrozen(validated.canonicalJson)).toBe(true)
+    expect(Object.isFrozen(validated.canonicalJson.content)).toBe(true)
+    validated.document.destroy()
+    expected.destroy()
+  })
+
   it('keeps the legacy single-snapshot response compatible', async () => {
     const expected = markdownDocument('Legacy snapshot')
     const state = await documentState('ed_test', expected)
@@ -24,7 +81,7 @@ describe('document reconstruction', () => {
     const reconstructed = await reconstructDocument(state, {
       documentId: 'ed_test',
       generation: 1,
-      schemaVersion: 1,
+      schemaVersion: 2,
     }, 1024 * 1024)
 
     expect(markdown(reconstructed)).toBe('Legacy snapshot')
@@ -54,7 +111,7 @@ describe('document reconstruction', () => {
       generation: 1,
       persistedSequence: 1,
       schemaHash: await getEditorSchemaFingerprint(),
-      schemaVersion: 1,
+      schemaVersion: 2,
       snapshot: {
         coveredSequence: 1,
         stateHash: hashBytes(corrupt),
@@ -87,7 +144,7 @@ describe('document reconstruction', () => {
     const reconstructed = await reconstructDocument(state, {
       documentId: 'ed_test',
       generation: 1,
-      schemaVersion: 1,
+      schemaVersion: 2,
     }, 1024 * 1024, { onCandidateRejected: rejected })
 
     expect(markdown(reconstructed)).toBe('Hello!')
@@ -108,7 +165,7 @@ describe('document reconstruction', () => {
     const reconstructed = await reconstructDocument(fixture.state, {
       documentId: 'ed_test',
       generation: 1,
-      schemaVersion: 1,
+      schemaVersion: 2,
     }, 1024 * 1024, { onCandidateRejected: rejected })
 
     expect(markdown(reconstructed)).toBe('Hello!!')
@@ -135,7 +192,7 @@ describe('document reconstruction', () => {
       await expect(reconstructDocument(fixture.state, {
         documentId: 'ed_test',
         generation: 1,
-        schemaVersion: 1,
+        schemaVersion: 2,
       }, 1024 * 1024)).rejects.toThrowError('internal_consistency')
       fixture.destroy()
     },
@@ -165,7 +222,7 @@ async function candidateFixture(): Promise<{
     generation: 1,
     persistedSequence: 2,
     schemaHash: await getEditorSchemaFingerprint(),
-    schemaVersion: 1,
+    schemaVersion: 2,
     snapshot: newest,
     snapshotCandidates: [
       {

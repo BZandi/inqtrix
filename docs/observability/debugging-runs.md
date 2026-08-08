@@ -4,6 +4,11 @@
 
 The checklist operators reach for when a run misbehaves. Every entry links to the underlying mechanism. If a symptom is not covered here, look at [Iteration log](iteration-log.md) first — it records almost every decision the agent makes.
 
+Two recording surfaces exist and they answer different questions: the **log**
+records what the agent decided, the **trace** records what it exchanged with
+the providers. [Tracing legend](tracing-legend.md) documents what the trace
+contains.
+
 ## Step zero: enable the file log
 
 All debugging flows below assume logs are on disk. The minimum setup:
@@ -15,13 +20,65 @@ export INQTRIX_LOG_LEVEL=INFO
 
 For the HTTP server, the example webserver scripts additionally mirror uvicorn output into the same file via `build_uvicorn_log_config(...)` (see [Logging](logging.md)). Without the file sink, `grep`-based post-mortem is not possible.
 
-For full source-to-claim-to-answer reconstruction, enable forensic events:
+For full source-to-claim-to-answer reconstruction, enable forensic depth —
+and give it somewhere to land:
 
 ```bash
 export INQTRIX_LOG_ENABLED=true
 export INQTRIX_LOG_LEVEL=DEBUG
 export OBSERVABILITY_PROFILE=forensic
+export INQTRIX_TRACING=file          # or otlp, see below
 ```
+
+`OBSERVABILITY_PROFILE` decides HOW DEEP the recording goes;
+`INQTRIX_TRACING` decides WHERE it goes. Forensic depth with tracing `off` or
+`local`, or with a sample rate below `1.0`, records only part of what you
+asked for — the process warns about both combinations at startup. Prompts,
+raw provider responses and per-source search records exist only on the trace,
+never in the log.
+
+## Step zero (alternative): follow one run in a trace
+
+With `INQTRIX_TRACING=file` every run spools as OTLP-JSON under `logs/traces/`
+and can be replayed into a trace backend later
+(`python -m inqtrix.observability.replay <dir> --endpoint <url>`). With
+`INQTRIX_TRACING=otlp` runs appear live in Langfuse.
+
+Either way the drill-down path is the same:
+
+1. Find the run in **Settings → Admin → Audit**: filter by actor, action
+   (`run.completed` / `run.failed`) and the date range. The row carries the
+   mode, duration, token sums, `run_id` and `trace_id`.
+2. Open the row's drawer for the durable step list — this works with NO trace
+   backend at all, because it reads the run's own persisted events.
+3. **Export trace JSON** for the full waterfall (source: Langfuse when
+   connected, otherwise the file spool), or **Open in Langfuse** for the
+   interactive view. Both need only the trace id the row already shows.
+4. `grep` the JSON logs for the same `run_id` or `trace_id` — every log line
+   inside a run carries both, so the log and the trace join without guessing.
+
+What the waterfall answers that the log cannot: which prompt produced which
+response, where a cap truncated an answer section (`limit_hit`), which sources
+a claim came from, how long each provider call took, and where a retry chain
+started.
+
+## Symptom: "The report is wrong and I need to see what actually happened"
+
+Reach for the trace, not the log: the log records decisions, the trace records
+the conversation with the provider. Follow the four steps in *Step zero
+(alternative)* above. Typical findings and where they show:
+
+- an answer section cut short → `limit_hit` plus the truncation event on the
+  `answer` step
+- a search that returned nothing usable → the `web_search` span carries the
+  query and, under forensic, the raw per-source records
+- an unexpected model or parameter → the `gen_ai.request.*` attributes on the
+  call span
+- a step that failed while the run still "succeeded" → the span carries status
+  ERROR with the stable failure code
+
+If the trace is missing entirely, check that a recording sink is configured
+(see *Step zero*) — forensic depth without a sink is the usual cause.
 
 ## Symptom: "My run finds no sources"
 
@@ -85,6 +142,7 @@ The default answer prompt is German. There is no public `AgentConfig` field for 
 ## Related docs
 
 - [Logging](logging.md)
+- [Tracing legend](tracing-legend.md)
 - [Iteration log](iteration-log.md)
 - [Run events](run-events.md)
 - [Timeouts and errors](timeouts-and-errors.md)

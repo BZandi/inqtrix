@@ -16,8 +16,22 @@ from inqtrix.exceptions import AgentPolicyDenied
 
 log = logging.getLogger("inqtrix")
 
-WEB_TOOL_NAMES = frozenset({"web_instant", "run_web_research"})
-"""Kernel tool names that contact the public web."""
+WEB_TOOL_NAMES = frozenset(
+    {
+        "web_instant",
+        "run_web_research",
+        "delegate_batch",
+    }
+)
+"""Kernel tool names that contact the public web.
+
+``delegate_batch`` sits here for tool-use-counter parity: rehydration
+counts one web use per ToolMessage NAME, so the live batch records
+exactly ONE web use per batch (never per child). Side effect, accepted
+and deliberate: ``source_policy.web=disabled`` removes the whole batch
+tool — research assignments would be denied per-assignment anyway, and
+a deep_mission-only batch degrades to the still-available single
+``run_deep_mission`` tool."""
 
 KNOWLEDGE_TOOL_NAMES = frozenset(
     {"search_project_knowledge", "read_project_document"}
@@ -32,7 +46,15 @@ KNOWLEDGE_TASK_KINDS = frozenset({"rag_query", "file_analysis"})
 
 _ALL_TASK_KINDS = WEB_TASK_KINDS | KNOWLEDGE_TASK_KINDS | {"synthesis"}
 _KNOWLEDGE_ONLY_TOOLS = frozenset(
-    {"ask_user", "search_project_knowledge", "read_project_document"}
+    {
+        "ask_user",
+        "search_project_knowledge",
+        "read_project_document",
+        # Read-only, no web exposure — and the recovery pointer of the
+        # context-archive offload ("Volltext im Lauf-Archiv:
+        # read_canvas(...)") must stay callable in this directive too.
+        "read_canvas",
+    }
 )
 
 
@@ -154,6 +176,7 @@ def execution_payload(
     source_policy: SourcePolicy,
     consent_reason: str,
     tool_use_counts: dict[str, int] | None = None,
+    limits: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Canonical run/snapshot execution projection for Agent Desk.
 
@@ -178,6 +201,10 @@ def execution_payload(
             "web": max(0, int(counts.get("web", 0) or 0)),
             "knowledge": max(0, int(counts.get("knowledge", 0) or 0)),
         },
+        # Server-authored limit facts only. The model never writes this
+        # block; absent limits remain an explicit empty object for older or
+        # non-agent callers instead of being guessed by the UI.
+        "limits": dict(limits or {}),
     }
 
 

@@ -29,16 +29,17 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from collections import deque
 from dataclasses import dataclass
 from queue import Empty, Queue, SimpleQueue
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     and_,
+    case,
     delete,
     event,
     exists,
+    false,
     func,
     insert,
     literal,
@@ -50,10 +51,12 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
-from inqtrix.auth.permissions import AuditEntry, SharePermission
+from inqtrix.auth.log_redaction import log_authorization_denial
+from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.execution_failures import terminate_native_run
+from inqtrix.observability.propagation import inject_traceparent
 from inqtrix.runs.durable_store import (
     DEFAULT_TENANT,
     DurableJobStoreBase,
@@ -68,6 +71,8 @@ from inqtrix.runs.shared import (
     build_child_progress_payload,
     build_run_summary,
     expand_run_event,
+    run_elapsed_seconds,
+    run_segment_id,
     should_project_child_event,
 )
 from inqtrix.runtime_logging import new_run_id
@@ -85,7 +90,18 @@ from inqtrix.server.runs import (
     RunWork,
 )
 from inqtrix.storage.runs_orm import run_events, runs
+from inqtrix.storage.agent_control_orm import (
+    run_approvals,
+    run_artifacts,
+    run_clarifications,
+    run_plan_tasks,
+    run_plans,
+)
+from inqtrix.storage.agent_sessions_orm import agent_sessions
+from inqtrix.storage.agent_memory_orm import agent_feedback, agent_memory_candidates
 from inqtrix.storage.identity_orm import resource_shares, workspace_members
+from inqtrix.storage.knowledge_sessions_orm import knowledge_sessions
+from inqtrix.services.audit_service import build_audit_entry
 from inqtrix.storage.resource_access import (
     append_resource_effects,
     lock_active_users,
@@ -120,6 +136,56 @@ _TERMINAL_EVENT_TYPES = frozenset(
 _CLEANUP_HANDOFF_KEY = "inqtrix_run_cleanup_handoffs"
 
 
+def _elapsed_sql(start_column: Any, now: float) -> Any:
+    """Non-negative SQL duration from a nullable interval anchor."""
+    return func.greatest(
+        literal(0.0), literal(now) - func.coalesce(start_column, literal(now))
+    )
+
+
+def _terminal_timing_values(now: float) -> dict[str, Any]:
+    """Close whichever runtime interval is open before terminalization."""
+    return {
+        "active_seconds": runs.c.active_seconds
+        + case(
+            (
+                runs.c.status == RunStatus.RUNNING.value,
+                _elapsed_sql(runs.c.active_started_at, now),
+            ),
+            else_=literal(0.0),
+        ),
+        "waiting_seconds": runs.c.waiting_seconds
+        + case(
+            (
+                runs.c.status.in_(_WAITING_VALUES),
+                _elapsed_sql(runs.c.waiting_since, now),
+            ),
+            else_=literal(0.0),
+        ),
+        "queued_seconds": runs.c.queued_seconds
+        + case(
+            (
+                runs.c.status == RunStatus.QUEUED.value,
+                _elapsed_sql(runs.c.queued_since, now),
+            ),
+            else_=literal(0.0),
+        ),
+        "active_started_at": None,
+        "waiting_since": None,
+        "queued_since": None,
+    }
+
+
+def _resume_reason_value(status: str) -> str:
+    if status == RunStatus.WAITING_FOR_APPROVAL.value:
+        return "approval"
+    if status == RunStatus.WAITING_FOR_INPUT.value:
+        return "input"
+    if status == RunStatus.WAITING_FOR_CHILDREN.value:
+        return "children"
+    return "resume"
+
+
 @dataclass(frozen=True)
 class _RowView:
     """Flat view of one ``runs`` row for the shared summary builder."""
@@ -134,6 +200,14 @@ class _RowView:
     created_at: float
     started_at: float | None
     finished_at: float | None
+    segment_count: int
+    current_segment_id: str | None
+    queued_since: float | None
+    active_started_at: float | None
+    active_seconds: float
+    waiting_seconds: float
+    queued_seconds: float
+    waiting_since: float | None
     snapshot: dict[str, Any]
     error: dict[str, Any] | None
     kind: str = "standard"
@@ -226,7 +300,9 @@ class PostgresRunStore(DurableJobStoreBase):
         waiting_ttl_seconds: float = 7 * 24 * 3600.0,
         max_concurrent_per_user: int | None = None,
         restrict_to_workspace_members: bool = False,
+        sharing_enabled: bool = True,
         recover_orphans: bool | None = None,
+        audit_service_starts: bool = True,
     ) -> None:
         # Validate BEFORE super().__init__ spawns the background loop
         # thread and adopts the engine — a config error must not leak
@@ -246,13 +322,13 @@ class PostgresRunStore(DurableJobStoreBase):
             max_concurrent=max_concurrent,
             recover_orphans=recover_orphans,
         )
-        self._dispatch_queue = (
-            dispatch_queue if dispatch_queue is not None else queue
-        )
+        self._dispatch_queue = dispatch_queue if dispatch_queue is not None else queue
         self._max_queue_size = max_queue_size
         self._completed_ttl_seconds = completed_ttl_seconds
         self._audit = audit
+        self._audit_service_starts = bool(audit_service_starts)
         self._waiting_ttl_seconds = float(waiting_ttl_seconds)
+        self._sharing_enabled = sharing_enabled
         self._max_concurrent_per_user = max_concurrent_per_user
         self._restrict_to_workspace_members = restrict_to_workspace_members
         # TTL-swept waiting run ids, handed over from the cleanup
@@ -266,6 +342,12 @@ class PostgresRunStore(DurableJobStoreBase):
         # post-commit, the sync mutators perform the actual dispatch in
         # _dispatch_woken_parents() — never from the store loop.
         self._parents_to_wake: SimpleQueue[str] = SimpleQueue()
+        # Coroutine -> sync-mutator handoff for the parent-failure child
+        # cascade (a coroutine must NEVER take self._lock — the
+        # documented deadlock class): _terminal_db(FAILED) enqueues
+        # (root_id, cascaded_child_ids), the calling mutator drains and
+        # projects the cancellations into local work handles.
+        self._failed_cascades: SimpleQueue[tuple[str, tuple[str, ...]]] = SimpleQueue()
 
     def _release_swept_locals(self) -> None:
         """Apply post-commit handoffs produced by lazy cleanup.
@@ -313,9 +395,7 @@ class PostgresRunStore(DurableJobStoreBase):
 
         @event.listens_for(sync_session, "after_commit", once=True)
         def _publish(committed_session: Any) -> None:
-            committed = committed_session.info.pop(
-                _CLEANUP_HANDOFF_KEY, {}
-            )
+            committed = committed_session.info.pop(_CLEANUP_HANDOFF_KEY, {})
             for run_id in committed.get("swept", ()):
                 self._swept_waiting.put(run_id)
             for parent_id in committed.get("parents", ()):
@@ -323,6 +403,11 @@ class PostgresRunStore(DurableJobStoreBase):
 
     def _dispatch_woken_parents(self) -> None:
         """Dispatch parents whose last child's terminal write woke them.
+
+        Also drains the parent-failure child cascade first — every
+        terminal-landing sync mutator passes through here, making it the
+        ONE chokepoint where committed cascades project into local
+        handles.
 
         The DB rows already flipped ``waiting_for_children -> queued``
         inside the child's terminal transaction (or the park-time
@@ -338,6 +423,7 @@ class PostgresRunStore(DurableJobStoreBase):
         parked) is logged loudly: it cannot resume in-process and ends
         via the waiting/stuck lifecycle, never silently.
         """
+        self._drain_failed_cascades()
         while True:
             try:
                 parent_id = self._parents_to_wake.get_nowait()
@@ -408,6 +494,10 @@ class PostgresRunStore(DurableJobStoreBase):
                 cluster-wide via the database).
         """
         durable_payload = dict(request_payload or {})
+        # Carry the submitter's trace context in the run row (W3C
+        # traceparent): the queue message stays (run_id, tenant_id), the
+        # worker extracts from the row — one trace across the boundary.
+        inject_traceparent(durable_payload)
         if origin_key:
             body = dict(durable_payload.get("body") or {})
             body["origin_key"] = origin_key
@@ -437,9 +527,7 @@ class PostgresRunStore(DurableJobStoreBase):
         run_id = summary["run_id"]
         if self._dispatch_queue is not None:
             try:
-                self._dispatch_queue.enqueue(
-                    run_id=run_id, tenant_id=DEFAULT_TENANT
-                )
+                self._dispatch_queue.enqueue(run_id=run_id, tenant_id=DEFAULT_TENANT)
             except Exception:  # noqa: BLE001 — row is committed; visible
                 # The run row is the source of truth: the worker
                 # reconciler re-dispatches stale queued rows, so a
@@ -519,9 +607,7 @@ class PostgresRunStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> dict[str, Any]:
         """Return a public summary for *run_id*."""
-        summary = self._call(
-            self._summary_db(run_id, workspace_id, visible_to)
-        )
+        summary = self._call(self._summary_db(run_id, workspace_id, visible_to))
         self._release_swept_locals()
         return summary
 
@@ -532,9 +618,7 @@ class PostgresRunStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> list[dict[str, Any]]:
         """Return public summaries, newest first (unbounded)."""
-        summaries = self._call(
-            self._list_db(workspace_id, visible_to)
-        )
+        summaries = self._call(self._list_db(workspace_id, visible_to))
         self._release_swept_locals()
         return summaries
 
@@ -545,17 +629,498 @@ class PostgresRunStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> list[dict[str, Any]]:
         """Visible summaries of one agent session, oldest first (K1)."""
-        summaries = self._call(
-            self._list_session_runs_db(session_id, visible_to)
-        )
+        summaries = self._call(self._list_session_runs_db(session_id, visible_to))
         self._release_swept_locals()
         return summaries
 
-    def session_owners(
-        self, session_id: str
-    ) -> set[tuple[str | None, str | None]]:
+    def session_owners(self, session_id: str) -> set[tuple[str | None, str | None]]:
         """Return every recorded owner identity for ``session_id``."""
         return self._call(self._session_owners_db(session_id))
+
+    def delete_agent_session_aggregate(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> None:
+        """Remove the fenced run lineage and every run-owned child row."""
+
+        self._delete_session_aggregate(
+            session_id,
+            session_kind="agent",
+            tenant_id=tenant_id,
+            requester_user_id=requester_user_id,
+            workspace_id=workspace_id,
+            run_ids=run_ids,
+        )
+
+    def delete_knowledge_session_aggregate(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> None:
+        """Remove the fenced Knowledge runs and every run-owned child row."""
+
+        self._delete_session_aggregate(
+            session_id,
+            session_kind="knowledge",
+            tenant_id=tenant_id,
+            requester_user_id=requester_user_id,
+            workspace_id=workspace_id,
+            run_ids=run_ids,
+        )
+
+    def _delete_session_aggregate(
+        self,
+        session_id: str,
+        *,
+        session_kind: str,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> None:
+        with self._lock:
+            for run_id in run_ids:
+                local = self._local.get(run_id)
+                if local is not None:
+                    local.cancel_event.set()
+        self._call(
+            self._delete_session_aggregate_db(
+                session_id,
+                session_kind=session_kind,
+                tenant_id=tenant_id,
+                requester_user_id=requester_user_id,
+                workspace_id=workspace_id,
+                run_ids=run_ids,
+            )
+        )
+        self._release_swept_locals()
+
+    def prepare_agent_session_aggregate_deletion(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> None:
+        """Request cancellation and prove no worker can still checkpoint.
+
+        Running work receives a durable cancel request and this attempt stops
+        visibly. A retry may remove checkpoints only after every run reached a
+        terminal state, preventing a late worker checkpoint from surviving the
+        session deletion.
+        """
+
+        self._prepare_session_aggregate_deletion(
+            session_id,
+            session_kind="agent",
+            tenant_id=tenant_id,
+            requester_user_id=requester_user_id,
+            workspace_id=workspace_id,
+            run_ids=run_ids,
+        )
+
+    def prepare_knowledge_session_aggregate_deletion(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> None:
+        """Fence saved Knowledge runs before their session is removed."""
+
+        self._prepare_session_aggregate_deletion(
+            session_id,
+            session_kind="knowledge",
+            tenant_id=tenant_id,
+            requester_user_id=requester_user_id,
+            workspace_id=workspace_id,
+            run_ids=run_ids,
+        )
+
+    def _prepare_session_aggregate_deletion(
+        self,
+        session_id: str,
+        *,
+        session_kind: str,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> None:
+        remaining = self._call(
+            self._prepare_session_aggregate_deletion_db(
+                session_id,
+                session_kind=session_kind,
+                tenant_id=tenant_id,
+                requester_user_id=requester_user_id,
+                workspace_id=workspace_id,
+                run_ids=run_ids,
+            )
+        )
+        with self._lock:
+            for run_id in run_ids:
+                local = self._local.get(run_id)
+                if local is not None:
+                    local.cancel_event.set()
+        if remaining:
+            raise RuntimeError(
+                f"{session_kind} session runs are still stopping; "
+                "retry deletion after they finish"
+            )
+
+    async def _prepare_session_aggregate_deletion_db(
+        self,
+        session_id: str,
+        *,
+        session_kind: str,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        expected = tuple(dict.fromkeys(run_ids))
+        if not expected:
+            return ()
+        async with self._session(tenant_id) as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(
+                            runs.c.run_id,
+                            runs.c.session_id,
+                            runs.c.root_run_id,
+                            runs.c.mode,
+                            runs.c.kind,
+                            runs.c.created_by_tenant_id,
+                            runs.c.created_by_user_id,
+                            runs.c.workspace_id,
+                            runs.c.status,
+                        )
+                        .where(
+                            runs.c.tenant_id == tenant_id,
+                            runs.c.run_id.in_(expected),
+                        )
+                        .order_by(runs.c.created_at, runs.c.run_id)
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            session_roots = {
+                str(row["run_id"]) for row in rows if row["session_id"] == session_id
+            }
+            for row in rows:
+                if (
+                    row["created_by_tenant_id"] not in (None, tenant_id)
+                    or row["created_by_user_id"] != requester_user_id
+                    or row["workspace_id"] != workspace_id
+                ):
+                    raise RuntimeError(
+                        f"{session_kind} session contains a run outside its owner scope"
+                    )
+                if session_kind == "agent":
+                    if (
+                        row["session_id"] != session_id
+                        and row["root_run_id"] not in session_roots
+                    ):
+                        raise RuntimeError(
+                            "agent session contains an unrelated run lineage"
+                        )
+                elif (
+                    row["session_id"] != session_id
+                    or row["mode"] != "knowledge"
+                    or row["kind"] != "standard"
+                ):
+                    raise RuntimeError(
+                        "knowledge session contains an unrelated run"
+                    )
+                if row["status"] not in _TERMINAL_VALUES:
+                    await self._cancel_row_db(
+                        session,
+                        str(row["run_id"]),
+                        tenant_id,
+                        str(row["status"]),
+                        cascade_reason="session_deleting",
+                    )
+            remaining = tuple(
+                (
+                    await session.execute(
+                        select(runs.c.run_id).where(
+                            runs.c.tenant_id == tenant_id,
+                            runs.c.run_id.in_(expected),
+                            runs.c.status.not_in(_TERMINAL_VALUES),
+                        )
+                    )
+                ).scalars()
+            )
+            return remaining
+
+    async def _delete_session_aggregate_db(
+        self,
+        session_id: str,
+        *,
+        session_kind: str,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> None:
+        expected = tuple(dict.fromkeys(run_ids))
+        async with self._session(tenant_id) as session:
+            current_session_ids = set(
+                (
+                    await session.execute(
+                        select(runs.c.run_id).where(
+                            runs.c.tenant_id == tenant_id,
+                            runs.c.session_id == session_id,
+                        )
+                    )
+                ).scalars()
+            )
+            if not current_session_ids.issubset(set(expected)):
+                raise RuntimeError(
+                    f"{session_kind} session gained a run after its deletion fence"
+                )
+            rows = (
+                (
+                    await session.execute(
+                        select(
+                            runs.c.run_id,
+                            runs.c.session_id,
+                            runs.c.root_run_id,
+                            runs.c.mode,
+                            runs.c.kind,
+                            runs.c.created_by_tenant_id,
+                            runs.c.created_by_user_id,
+                            runs.c.workspace_id,
+                            runs.c.status,
+                        ).where(runs.c.run_id.in_(expected))
+                    )
+                )
+                .mappings()
+                .all()
+                if expected
+                else []
+            )
+            for row in rows:
+                if (
+                    row["created_by_tenant_id"] not in (None, tenant_id)
+                    or row["created_by_user_id"] != requester_user_id
+                    or row["workspace_id"] != workspace_id
+                ):
+                    raise RuntimeError(
+                        f"{session_kind} session contains a run outside its owner scope"
+                    )
+                if session_kind == "agent":
+                    if (
+                        row["session_id"] != session_id
+                        and row["root_run_id"] not in current_session_ids
+                    ):
+                        raise RuntimeError(
+                            "agent session contains an unrelated run lineage"
+                        )
+                elif (
+                    row["session_id"] != session_id
+                    or row["mode"] != "knowledge"
+                    or row["kind"] != "standard"
+                ):
+                    raise RuntimeError(
+                        "knowledge session contains an unrelated run"
+                    )
+                if row["status"] not in _TERMINAL_VALUES:
+                    raise RuntimeError(
+                        f"{session_kind} session run is still active "
+                        "after its deletion fence"
+                    )
+            present_ids = tuple(row["run_id"] for row in rows)
+            if not present_ids:
+                return
+            await session.execute(
+                delete(agent_memory_candidates).where(
+                    agent_memory_candidates.c.tenant_id == tenant_id,
+                    agent_memory_candidates.c.user_id == requester_user_id,
+                    agent_memory_candidates.c.source_run_id.in_(present_ids),
+                )
+            )
+            await session.execute(
+                delete(agent_feedback).where(
+                    agent_feedback.c.tenant_id == tenant_id,
+                    agent_feedback.c.user_id == requester_user_id,
+                    agent_feedback.c.run_id.in_(present_ids),
+                )
+            )
+            for row in rows:
+                run_id = str(row["run_id"])
+                recipients = await revoke_resource_shares(
+                    session,
+                    tenant_id=tenant_id,
+                    resource_type="run",
+                    resource_id=run_id,
+                    revoked_by_user_id=requester_user_id,
+                )
+                await append_resource_effects(
+                    session,
+                    tenant_id=tenant_id,
+                    actor_user_id=requester_user_id,
+                    owner_user_id=row["created_by_user_id"],
+                    action="run.deleted",
+                    resource_type="run",
+                    resource_id=run_id,
+                    scope="runs",
+                    additional_targets=recipients,
+                )
+            await session.execute(
+                delete(runs).where(
+                    runs.c.tenant_id == tenant_id,
+                    runs.c.run_id.in_(present_ids),
+                )
+            )
+
+    def agent_session_residuals(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> dict[str, int]:
+        return self._session_aggregate_residuals(
+            session_id,
+            tenant_id=tenant_id,
+            requester_user_id=requester_user_id,
+            workspace_id=workspace_id,
+            run_ids=run_ids,
+        )
+
+    def knowledge_session_residuals(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> dict[str, int]:
+        return self._session_aggregate_residuals(
+            session_id,
+            tenant_id=tenant_id,
+            requester_user_id=requester_user_id,
+            workspace_id=workspace_id,
+            run_ids=run_ids,
+        )
+
+    def _session_aggregate_residuals(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        workspace_id: str | None,
+        run_ids: tuple[str, ...],
+    ) -> dict[str, int]:
+        del workspace_id
+        return self._call(
+            self._session_aggregate_residuals_db(
+                session_id,
+                tenant_id=tenant_id,
+                requester_user_id=requester_user_id,
+                run_ids=run_ids,
+            )
+        )
+
+    async def _session_aggregate_residuals_db(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        requester_user_id: uuid.UUID | None,
+        run_ids: tuple[str, ...],
+    ) -> dict[str, int]:
+        ids = tuple(dict.fromkeys(run_ids))
+        async with self._session(tenant_id) as session:
+
+            async def count(table, condition) -> int:
+                return int(
+                    await session.scalar(
+                        select(func.count()).select_from(table).where(condition)
+                    )
+                    or 0
+                )
+
+            false_condition = false()
+            run_condition = runs.c.run_id.in_(ids) if ids else false_condition
+            controls = (
+                ("events", run_events, run_events.c.run_id),
+                ("plans", run_plans, run_plans.c.run_id),
+                ("tasks", run_plan_tasks, run_plan_tasks.c.run_id),
+                ("approvals", run_approvals, run_approvals.c.run_id),
+                ("clarifications", run_clarifications, run_clarifications.c.run_id),
+            )
+            residuals = {
+                "runs": await count(
+                    runs,
+                    or_(runs.c.session_id == session_id, run_condition),
+                ),
+                "artifacts": await count(
+                    run_artifacts,
+                    or_(
+                        run_artifacts.c.session_id == session_id,
+                        run_artifacts.c.run_id.in_(ids) if ids else false_condition,
+                    ),
+                ),
+                "memory_candidates": await count(
+                    agent_memory_candidates,
+                    and_(
+                        agent_memory_candidates.c.tenant_id == tenant_id,
+                        agent_memory_candidates.c.user_id == requester_user_id,
+                        (
+                            agent_memory_candidates.c.source_run_id.in_(ids)
+                            if ids
+                            else false_condition
+                        ),
+                    ),
+                ),
+                "feedback": await count(
+                    agent_feedback,
+                    and_(
+                        agent_feedback.c.tenant_id == tenant_id,
+                        agent_feedback.c.user_id == requester_user_id,
+                        agent_feedback.c.run_id.in_(ids) if ids else false_condition,
+                    ),
+                ),
+                "shares": await count(
+                    resource_shares,
+                    and_(
+                        resource_shares.c.tenant_id == tenant_id,
+                        resource_shares.c.resource_type == "run",
+                        (
+                            resource_shares.c.resource_id.in_(ids)
+                            if ids
+                            else false_condition
+                        ),
+                    ),
+                ),
+            }
+            for name, table, column in controls:
+                residuals[name] = await count(
+                    table, column.in_(ids) if ids else false_condition
+                )
+            return residuals
 
     async def _session_owners_db(
         self, session_id: str
@@ -582,9 +1147,7 @@ class PostgresRunStore(DurableJobStoreBase):
             query = self._apply_run_visibility(
                 select(runs)
                 .where(runs.c.session_id == session_id)
-                .order_by(
-                    runs.c.created_at.asc(), runs.c.run_id.asc()
-                ),
+                .order_by(runs.c.created_at.asc(), runs.c.run_id.asc()),
                 None,
                 visible_to,
             )
@@ -624,11 +1187,7 @@ class PostgresRunStore(DurableJobStoreBase):
         materialised whole on every poll. Keyed on the existing
         ``ix_runs_tenant_created_id`` (created_at, run_id) index.
         """
-        result = self._call(
-            self._list_page_db(
-                workspace_id, visible_to, limit, after
-            )
-        )
+        result = self._call(self._list_page_db(workspace_id, visible_to, limit, after))
         self._release_swept_locals()
         return result
 
@@ -668,19 +1227,53 @@ class PostgresRunStore(DurableJobStoreBase):
         """The run's creator regardless of visibility (share layer)."""
         return self._call(self._owner_user_id_db(run_id))
 
+    def events_snapshot(
+        self, run_id: str, *, after: int = 0
+    ) -> list[dict[str, Any]]:
+        """Durable event rows for the admin run drawer (visibility-free).
+
+        Authorization happens at the instance-admin boundary before this
+        lookup (``owner_user_id`` precedent). Row shape matches the
+        owner SSE replay: ``{type, run_id, sequence, created_at, data}``.
+        """
+        return self._events_after(run_id, DEFAULT_TENANT, int(after))
+
+    def trace_id(self, run_id: str) -> str | None:
+        """Latest ``inqtrix.run.trace`` event's trace id (admin surface).
+
+        Not visibility-gated — authorization happens at the instance-
+        admin boundary before this lookup (``owner_user_id`` precedent).
+        Targeted query: long runs carry thousands of event rows and this
+        needs exactly one of them.
+        """
+        return self._call(self._trace_id_db(run_id))
+
+    async def _trace_id_db(self, run_id: str) -> str | None:
+        async with self._session(DEFAULT_TENANT) as session:
+            rows = await session.execute(
+                select(run_events.c.data)
+                .where(
+                    run_events.c.run_id == run_id,
+                    run_events.c.type == "inqtrix.run.trace",
+                )
+                .order_by(run_events.c.sequence.desc())
+                .limit(1)
+            )
+            row = rows.first()
+        if row is None:
+            return None
+        value = str((row[0] or {}).get("trace_id") or "")
+        return value or None
+
     def execution_request_body(self, run_id: str) -> dict[str, Any]:
         """Return the run's persisted execution body without exposing it."""
         return self._call(self._execution_request_body_db(run_id))
 
-    async def _execution_request_body_db(
-        self, run_id: str
-    ) -> dict[str, Any]:
+    async def _execution_request_body_db(self, run_id: str) -> dict[str, Any]:
         async with self._session(DEFAULT_TENANT) as session:
             row = (
                 await session.execute(
-                    select(runs.c.request_payload).where(
-                        runs.c.run_id == run_id
-                    )
+                    select(runs.c.request_payload).where(runs.c.run_id == run_id)
                 )
             ).first()
         if row is None:
@@ -713,6 +1306,11 @@ class PostgresRunStore(DurableJobStoreBase):
             role="member",
             scopes=frozenset(scopes or ()),
         )
+
+    def total_elapsed_seconds(self, run_id: str) -> float:
+        """Return worker-visible wall time from the internal run row."""
+
+        return self._call(self._total_elapsed_seconds_db(run_id))
 
     def check_execution_authority(self, run_id: str) -> None:
         """Assert the persisted actor still has live edit access."""
@@ -771,10 +1369,10 @@ class PostgresRunStore(DurableJobStoreBase):
                 raise RunNotFound(run_id)
             seen.add(current_id)
             row = (
-                await session.execute(
-                    select(runs).where(runs.c.run_id == current_id)
-                )
-            ).mappings().first()
+                (await session.execute(select(runs).where(runs.c.run_id == current_id)))
+                .mappings()
+                .first()
+            )
             if row is None:
                 raise RunNotFound(run_id)
             snapshot = dict(row)
@@ -803,12 +1401,16 @@ class PostgresRunStore(DurableJobStoreBase):
         locked_path: list[dict[str, Any]] = []
         for expected in reversed(chain):
             locked = (
-                await session.execute(
-                    select(runs)
-                    .where(runs.c.run_id == expected["run_id"])
-                    .with_for_update()
+                (
+                    await session.execute(
+                        select(runs)
+                        .where(runs.c.run_id == expected["run_id"])
+                        .with_for_update()
+                    )
                 )
-            ).mappings().first()
+                .mappings()
+                .first()
+            )
             if locked is None:
                 raise RunNotFound(run_id)
             locked_row = dict(locked)
@@ -853,6 +1455,7 @@ class PostgresRunStore(DurableJobStoreBase):
             owner_column=runs.c.created_by_user_id,
             minimum=SharePermission.EDIT,
             restrict_to_workspace_members=self._restrict_to_workspace_members,
+            sharing_enabled=self._sharing_enabled,
         )
 
         target, root, locked_path = await self._lock_probed_run_path_db(
@@ -866,8 +1469,7 @@ class PostgresRunStore(DurableJobStoreBase):
         )
         authority_consistent = (
             authority_consistent
-            and root["execution_actor_user_id"]
-            == root_probe["execution_actor_user_id"]
+            and root["execution_actor_user_id"] == root_probe["execution_actor_user_id"]
         )
         if not authority_consistent:
             access = None
@@ -891,11 +1493,13 @@ class PostgresRunStore(DurableJobStoreBase):
         run_id: str,
     ) -> list[dict[str, Any]]:
         """Lock one already lineage-locked subtree in root-to-leaf order."""
-        descendants = select(
-            runs.c.run_id,
-            literal(0).label("depth"),
-        ).where(runs.c.run_id == run_id).cte(
-            "locked_run_subtree", recursive=True
+        descendants = (
+            select(
+                runs.c.run_id,
+                literal(0).label("depth"),
+            )
+            .where(runs.c.run_id == run_id)
+            .cte("locked_run_subtree", recursive=True)
         )
         descendants = descendants.union_all(
             select(
@@ -923,9 +1527,7 @@ class PostgresRunStore(DurableJobStoreBase):
 
     async def _check_execution_authority_db(self, run_id: str) -> None:
         async with self._session(DEFAULT_TENANT) as session:
-            _target, _root, access = await self._lock_execution_path_db(
-                session, run_id
-            )
+            _target, _root, access = await self._lock_execution_path_db(session, run_id)
             if access is None:
                 raise RunNotFound(run_id)
 
@@ -933,9 +1535,7 @@ class PostgresRunStore(DurableJobStoreBase):
         async with self._session("default") as session:
             row = (
                 await session.execute(
-                    select(runs.c.created_by_user_id).where(
-                        runs.c.run_id == run_id
-                    )
+                    select(runs.c.created_by_user_id).where(runs.c.run_id == run_id)
                 )
             ).first()
         return row[0] if row is not None else None
@@ -974,27 +1574,30 @@ class PostgresRunStore(DurableJobStoreBase):
                 owner_column=runs.c.created_by_user_id,
                 minimum=SharePermission.EDIT,
                 restrict_to_workspace_members=self._restrict_to_workspace_members,
+                sharing_enabled=self._sharing_enabled,
                 owner_only=True,
             )
             if access is None:
-                log.warning(
-                    "authz denied: run %s delete refused for user_id=%s",
-                    run_id,
-                    requester_user_id or "",
+                log_authorization_denial(
+                    log,
+                    action="delete",
+                    principal_kind=None,
+                    actor_user_id=requester_user_id,
+                    tenant_id=DEFAULT_TENANT,
+                    resource_type="run",
+                    resource_id=run_id,
                 )
                 raise RunNotFound(run_id)
             row = (
-                await session.execute(
-                    select(runs).where(runs.c.run_id == run_id)
-                )
-            ).mappings().first()
+                (await session.execute(select(runs).where(runs.c.run_id == run_id)))
+                .mappings()
+                .first()
+            )
             if row is None:
                 raise RunNotFound(run_id)
             if not _workspace_matches_row(row, workspace_id):
                 raise RunNotFound(run_id)
-            if row["status"] not in {
-                status.value for status in TERMINAL_RUN_STATUSES
-            }:
+            if row["status"] not in {status.value for status in TERMINAL_RUN_STATUSES}:
                 raise RunActive(run_id)
             recipients = await revoke_resource_shares(
                 session,
@@ -1024,9 +1627,7 @@ class PostgresRunStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> dict[str, Any]:
         """Return the stored result payload for a completed run."""
-        result = self._call(
-            self._result_db(run_id, workspace_id, visible_to)
-        )
+        result = self._call(self._result_db(run_id, workspace_id, visible_to))
         self._release_swept_locals()
         return result
 
@@ -1097,6 +1698,22 @@ class PostgresRunStore(DurableJobStoreBase):
                 affected_ids,
             )
         return result
+
+    def _drain_failed_cascades(self) -> None:
+        """Project committed parent-failure cascades into local handles.
+
+        Sync-mutator half of the ``_failed_cascades`` handoff: the
+        coroutine only enqueues (it must never take ``self._lock``);
+        every mutator that can land a FAILED terminal drains here.
+        """
+        while True:
+            try:
+                root_id, children = self._failed_cascades.get_nowait()
+            except Empty:
+                return
+            self._apply_cancelled_locals(
+                root_id, RunStatus.FAILED.value, (root_id, *children)
+            )
 
     def _apply_cancelled_locals(
         self,
@@ -1192,11 +1809,7 @@ class PostgresRunStore(DurableJobStoreBase):
         superseded attempt are dropped with a visible log instead of
         interleaving with the superseding attempt's stream.
         """
-        self._call(
-            self._emit_db(
-                run_id, event_type, payload or {}, fence_attempt
-            )
-        )
+        self._call(self._emit_db(run_id, event_type, payload or {}, fence_attempt))
 
     def complete(
         self,
@@ -1333,9 +1946,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 local.parked = True
                 local.park_in_flight = True
         try:
-            parked = self._call(
-                self._mark_waiting_db(run_id, waiting, fence_attempt)
-            )
+            parked = self._call(self._mark_waiting_db(run_id, waiting, fence_attempt))
         except BaseException:
             with self._lock:
                 local = self._local.get(run_id)
@@ -1401,8 +2012,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 current_status = self._call(self._status_db(run_id))
                 if current_status not in _WAITING_VALUES:
                     raise RunActive(
-                        f"run {run_id} is not waiting "
-                        f"(status {current_status})"
+                        f"run {run_id} is not waiting " f"(status {current_status})"
                     )
                 raise RunActive(
                     f"run {run_id} has no retained work to resume "
@@ -1419,9 +2029,7 @@ class PostgresRunStore(DurableJobStoreBase):
         self._release_swept_locals()
         if self._dispatch_queue is not None:
             try:
-                self._dispatch_queue.enqueue(
-                    run_id=run_id, tenant_id=DEFAULT_TENANT
-                )
+                self._dispatch_queue.enqueue(run_id=run_id, tenant_id=DEFAULT_TENANT)
             except Exception:  # noqa: BLE001 — row committed; reconciler heals
                 log.warning(
                     "Resume-Dispatch fuer Run %s konnte nicht gesendet "
@@ -1485,9 +2093,7 @@ class PostgresRunStore(DurableJobStoreBase):
             self._claim_db(run_id, tenant_id, allow_takeover=allow_takeover)
         )
 
-    def cancel_requested_runs(
-        self, run_ids: dict[str, str]
-    ) -> set[str]:
+    def cancel_requested_runs(self, run_ids: dict[str, str]) -> set[str]:
         """Subset of ``run_ids`` (id -> tenant) with a pending cancel."""
         return self._call(self._cancel_requested_db(run_ids))
 
@@ -1515,6 +2121,38 @@ class PostgresRunStore(DurableJobStoreBase):
 
     def _make_handle(self, run_id: str, cancel_event) -> RunHandle:
         return RunHandle(self, run_id, cancel_event)
+
+    def _enter_execution_telemetry(
+        self, stack, entity_id: str, claimed
+    ) -> None:
+        """Root span + log context for durable NO-QUEUE executions.
+
+        Parity with the worker loop and the in-memory store: this is the
+        third execution boundary — without it, postgres-without-workers
+        runs would trace headless and their failures could never mark a
+        run span (terminate_native_run marks the CURRENT span).
+        """
+        from inqtrix.observability.context import (
+            bind_log_context,
+            reset_log_context,
+        )
+        from inqtrix.observability.otel import run_execute_span
+
+        stack.enter_context(
+            run_execute_span(
+                run_id=entity_id,
+                tenant_id=str(
+                    getattr(claimed, "tenant_id", "") or DEFAULT_TENANT
+                ),
+                attempt=int(getattr(claimed, "attempt", 1) or 1),
+                payload=getattr(claimed, "request_payload", None),
+            )
+        )
+        tokens = bind_log_context(
+            run_id=entity_id,
+            tenant=str(getattr(claimed, "tenant_id", "") or DEFAULT_TENANT),
+        )
+        stack.callback(reset_log_context, tokens)
 
     def _terminate_work_exception(
         self, handle: RunHandle, entity_id: str, exc: BaseException
@@ -1547,9 +2185,7 @@ class PostgresRunStore(DurableJobStoreBase):
     def _events_after(
         self, run_id: str, tenant_id: str, after_sequence: int
     ) -> list[dict[str, Any]]:
-        return self._call(
-            self._events_after_db(run_id, tenant_id, after_sequence)
-        )
+        return self._call(self._events_after_db(run_id, tenant_id, after_sequence))
 
     # -- async database operations ----------------------------------------- #
 
@@ -1574,14 +2210,9 @@ class PostgresRunStore(DurableJobStoreBase):
                 session, parent_run_id
             )
         except RunNotFound as exc:
-            raise RunParentInactive(
-                "agent child parent or root is missing"
-            ) from exc
+            raise RunParentInactive("agent child parent or root is missing") from exc
         requested_actor_user_id = fields.get("execution_actor_user_id")
-        if (
-            access is None
-            or requested_actor_user_id != root["execution_actor_user_id"]
-        ):
+        if access is None or requested_actor_user_id != root["execution_actor_user_id"]:
             raise AuthorizationRevoked(
                 "agent child admission lost root execution authority"
             )
@@ -1630,15 +2261,14 @@ class PostgresRunStore(DurableJobStoreBase):
             or str(root["status"]) in inactive
             or bool(root["cancel_requested"])
         ):
-            raise RunParentInactive(
-                "agent child parent or root is no longer active"
-            )
+            raise RunParentInactive("agent child parent or root is no longer active")
         fields["root_run_id"] = canonical_root_id
         fields["created_by_user_id"] = root["created_by_user_id"]
         fields["created_by_tenant_id"] = root["created_by_tenant_id"]
         fields["execution_actor_user_id"] = root["execution_actor_user_id"]
         fields["execution_scopes"] = list(root["execution_scopes"] or ())
         fields["workspace_id"] = root["workspace_id"]
+        fields["session_id"] = root["session_id"]
         return None
 
     async def _submit_db(
@@ -1649,14 +2279,39 @@ class PostgresRunStore(DurableJobStoreBase):
             existing = await self._admit_agent_child_db(session, fields)
             if existing is not None:
                 return existing, False
-            effective_actor_user_id = fields.get("execution_actor_user_id")
-            if (
-                effective_actor_user_id is not None
-                and not await lock_active_users(
-                    session,
-                    tenant_id=tenant_id,
-                    user_ids=(effective_actor_user_id,),
+            session_id = fields.get("session_id")
+            session_table = None
+            if session_id and fields.get("kind") in {"agent", "agent_child"}:
+                session_table = agent_sessions
+            elif (
+                session_id
+                and fields.get("mode") == "knowledge"
+                and fields.get("kind") == "standard"
+            ):
+                session_table = knowledge_sessions
+            if session_table is not None:
+                active_session = await session.scalar(
+                    select(session_table.c.id)
+                    .where(
+                        session_table.c.tenant_id == tenant_id,
+                        session_table.c.id == session_id,
+                        session_table.c.created_by_user_id.is_not_distinct_from(
+                            fields.get("created_by_user_id")
+                        ),
+                        session_table.c.workspace_id.is_not_distinct_from(
+                            fields.get("workspace_id")
+                        ),
+                        session_table.c.lifecycle_status == "active",
+                    )
+                    .with_for_update()
                 )
+                if active_session is None:
+                    raise RunSessionActive(str(session_id))
+            effective_actor_user_id = fields.get("execution_actor_user_id")
+            if effective_actor_user_id is not None and not await lock_active_users(
+                session,
+                tenant_id=tenant_id,
+                user_ids=(effective_actor_user_id,),
             ):
                 raise RunNotFound("inactive submitting user")
             queued = await session.scalar(
@@ -1669,10 +2324,9 @@ class PostgresRunStore(DurableJobStoreBase):
                 .select_from(runs)
                 .where(runs.c.status == RunStatus.RUNNING.value)
             )
-            if (
-                (queued or 0) >= self._max_queue_size
-                and (running or 0) >= self._max_concurrent
-            ):
+            if (queued or 0) >= self._max_queue_size and (
+                running or 0
+            ) >= self._max_concurrent:
                 raise RunQueueFull("native run queue is full")
             if (
                 self._max_concurrent_per_user is not None
@@ -1699,8 +2353,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     select(func.count())
                     .select_from(runs)
                     .where(
-                        runs.c.execution_actor_user_id
-                        == effective_actor_user_id,
+                        runs.c.execution_actor_user_id == effective_actor_user_id,
                         runs.c.kind != "agent",
                         runs.c.status.in_(
                             (
@@ -1711,9 +2364,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     )
                 )
                 if (in_flight or 0) >= self._max_concurrent_per_user:
-                    raise RunPerUserLimit(
-                        "per-user in-flight run cap reached"
-                    )
+                    raise RunPerUserLimit("per-user in-flight run cap reached")
 
             created_at = time.time()
             try:
@@ -1760,7 +2411,17 @@ class PostgresRunStore(DurableJobStoreBase):
                 scope="runs",
             )
             row = await self._row_db(session, run_id)
-            return build_run_summary(row, queue_position=position), True
+            return (
+                build_run_summary(
+                    row,
+                    queue_position=position,
+                    access=_access_annotation(
+                        None,
+                        owner_user_id=fields.get("created_by_user_id"),
+                    ),
+                ),
+                True,
+            )
 
     async def _import_completed_run_db(
         self,
@@ -1831,7 +2492,14 @@ class PostgresRunStore(DurableJobStoreBase):
                     scope="runs",
                 )
             row = await self._row_db(session, run_id)
-            return build_run_summary(row, queue_position=None)
+            return build_run_summary(
+                row,
+                queue_position=None,
+                access=_access_annotation(
+                    None,
+                    owner_user_id=created_by_user_id,
+                ),
+            )
 
     async def _insert_import_with_unique_id(
         self,
@@ -1900,9 +2568,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     request_payload=fields["request_payload"],
                     created_by_user_id=fields["created_by_user_id"],
                     created_by_tenant_id=fields["created_by_tenant_id"],
-                    execution_actor_user_id=fields[
-                        "execution_actor_user_id"
-                    ],
+                    execution_actor_user_id=fields["execution_actor_user_id"],
                     execution_scopes=fields["execution_scopes"],
                     kind=fields["kind"],
                     parent_run_id=fields["parent_run_id"],
@@ -1943,12 +2609,19 @@ class PostgresRunStore(DurableJobStoreBase):
                 raise RunNotFound(run_id)
             return status
 
-    async def _row_db(
-        self, session: "AsyncSession", run_id: str
-    ) -> _RowView:
+    async def _total_elapsed_seconds_db(self, run_id: str) -> float:
+        """Read timing without applying the public owner/share predicate."""
+
+        async with self._session(DEFAULT_TENANT) as session:
+            row = await self._row_db(session, run_id)
+            return float(run_elapsed_seconds(row) or 0.0)
+
+    async def _row_db(self, session: "AsyncSession", run_id: str) -> _RowView:
         row = (
-            await session.execute(select(runs).where(runs.c.run_id == run_id))
-        ).mappings().first()
+            (await session.execute(select(runs).where(runs.c.run_id == run_id)))
+            .mappings()
+            .first()
+        )
         if row is None:
             raise RunNotFound(run_id)
         return _row_view(row)
@@ -1982,21 +2655,26 @@ class PostgresRunStore(DurableJobStoreBase):
         )
         if shared is not None:
             return row, shared
-        log.warning(
-            "authz denied: run %s hidden from user_id=%s tenant=%s",
-            run_id,
-            visible_to.principal.user_id if visible_to else "",
-            visible_to.principal.tenant_id if visible_to else "",
+        principal = visible_to.principal if visible_to is not None else None
+        log_authorization_denial(
+            log,
+            action="read",
+            principal_kind=principal.kind if principal is not None else None,
+            actor_user_id=principal.user_id if principal is not None else None,
+            tenant_id=principal.tenant_id if principal is not None else None,
+            resource_type="run",
+            resource_id=run_id,
         )
         if self._audit is not None and visible_to is not None:
             await self._audit.record(
-                AuditEntry(
+                build_audit_entry(
                     tenant_id=visible_to.principal.tenant_id,
                     actor_user_id=visible_to.principal.user_id,
                     action="authz.denied",
                     resource_type="run",
                     resource_id=run_id,
                     detail={"surface": "runs"},
+                    outcome="denied",
                 )
             )
         raise RunNotFound(run_id)
@@ -2008,17 +2686,14 @@ class PostgresRunStore(DurableJobStoreBase):
     ):
         """Correlated SQL predicate for the continuous workspace boundary."""
         owner_members = workspace_members.alias("run_share_owner_members")
-        recipient_members = workspace_members.alias(
-            "run_share_recipient_members"
-        )
+        recipient_members = workspace_members.alias("run_share_recipient_members")
         return exists(
             select(1)
             .select_from(
                 owner_members.join(
                     recipient_members,
                     and_(
-                        owner_members.c.tenant_id
-                        == recipient_members.c.tenant_id,
+                        owner_members.c.tenant_id == recipient_members.c.tenant_id,
                         owner_members.c.workspace_id
                         == recipient_members.c.workspace_id,
                     ),
@@ -2033,6 +2708,8 @@ class PostgresRunStore(DurableJobStoreBase):
 
     def _share_permission_expr(self, visible_to: "UserContext"):
         """Correlated accepted-share permission for run list queries."""
+        if not self._sharing_enabled:
+            return literal(None, type_=resource_shares.c.permission.type)
         principal = visible_to.principal
         criteria = [
             resource_shares.c.tenant_id == principal.tenant_id,
@@ -2065,7 +2742,8 @@ class PostgresRunStore(DurableJobStoreBase):
     ) -> SharePermission | None:
         """Resolve and optionally lock the live direct share for one run."""
         if (
-            visible_to is None
+            not self._sharing_enabled
+            or visible_to is None
             or visible_to.principal.user_id is None
             or row["created_by_user_id"] is None
         ):
@@ -2130,8 +2808,7 @@ class PostgresRunStore(DurableJobStoreBase):
             shared_permission = self._share_permission_expr(visible_to)
             owned = and_(
                 runs.c.created_by_user_id == visible_to.principal.user_id,
-                runs.c.created_by_tenant_id
-                == visible_to.principal.tenant_id,
+                runs.c.created_by_tenant_id == visible_to.principal.tenant_id,
             )
             if workspace_id is not None:
                 owned = and_(owned, runs.c.workspace_id == workspace_id)
@@ -2139,9 +2816,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 shared_permission.label("_share_permission")
             ).where(or_(owned, shared_permission.isnot(None)))
         query = query.add_columns(
-            literal(
-                None, type_=resource_shares.c.permission.type
-            ).label(
+            literal(None, type_=resource_shares.c.permission.type).label(
                 "_share_permission"
             )
         ).where(runs.c.created_by_user_id.is_(None))
@@ -2191,9 +2866,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 # run_id tiebreaker matches list_page's keyset order, so the
                 # unbounded internal read and the paginated HTTP endpoint agree
                 # on the relative order of runs sharing a created_at epoch.
-                select(runs).order_by(
-                    runs.c.created_at.desc(), runs.c.run_id.desc()
-                ),
+                select(runs).order_by(runs.c.created_at.desc(), runs.c.run_id.desc()),
                 workspace_id,
                 visible_to,
             )
@@ -2256,9 +2929,7 @@ class PostgresRunStore(DurableJobStoreBase):
             window = list(rows[: limit + 1])
             page_rows = window[:limit]
             next_cursor = (
-                encode_cursor(
-                    page_rows[-1]["created_at"], page_rows[-1]["run_id"]
-                )
+                encode_cursor(page_rows[-1]["created_at"], page_rows[-1]["run_id"])
                 if len(window) > limit and page_rows
                 else None
             )
@@ -2371,9 +3042,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 )
                 fresh = await self._row_db(session, child_run_id)
                 child_status = str(fresh.status)
-                cancellations.append(
-                    (child_run_id, child_status, affected_ids)
-                )
+                cancellations.append((child_run_id, child_status, affected_ids))
                 return child_status
 
             result = await control_write(session, _cancel_child)
@@ -2410,8 +3079,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 raise RunNotFound(run_id)
             shared = (
                 SharePermission.EDIT
-                if actor_user_id is not None
-                and actor_user_id != access.owner_user_id
+                if actor_user_id is not None and actor_user_id != access.owner_user_id
                 else None
             )
             # Cascade: an agent run cancels its whole tree — children are
@@ -2419,9 +3087,7 @@ class PostgresRunStore(DurableJobStoreBase):
             # cancel is responsible for them (authorization was the
             # parent's; children inherit, plan rule R7). The per-child
             # wake probe no-ops here: the parent went terminal first.
-            child_rows = (
-                await self._lock_run_subtree_db(session, run_id)
-            )[1:]
+            child_rows = (await self._lock_run_subtree_db(session, run_id))[1:]
             woken = await self._cancel_row_db(
                 session, run_id, row["tenant_id"], row["status"]
             )
@@ -2469,6 +3135,8 @@ class PostgresRunStore(DurableJobStoreBase):
         run_id: str,
         tenant_id: str,
         status: str,
+        *,
+        cascade_reason: str | None = None,
     ) -> str | None:
         """Apply the status-appropriate cancel transition to one row.
 
@@ -2476,6 +3144,10 @@ class PostgresRunStore(DurableJobStoreBase):
         resume); each miss re-reads and degrades to the branch for the
         FRESH status instead of a silent no-op, so no run slips
         through a cancel because it changed state underneath it.
+
+        ``cascade_reason`` overrides the per-state cancel reason on the
+        emitted event (the parent-failure cascade passes ``parent_failed``
+        so an orphan's cancel says WHY); ``None`` keeps the state default.
 
         Returns:
             The parent run id when this cancel terminally ended an
@@ -2488,7 +3160,7 @@ class PostgresRunStore(DurableJobStoreBase):
         """
         if status in _WAITING_VALUES:
             landed, woken_parent = await self._cancel_waiting_row_db(
-                session, run_id, tenant_id
+                session, run_id, tenant_id, cascade_reason=cascade_reason
             )
             if landed:
                 return woken_parent
@@ -2507,6 +3179,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 return None
             status = fresh
         if status == RunStatus.QUEUED.value:
+            now = time.time()
             cancelled = (
                 await session.execute(
                     update(runs)
@@ -2517,7 +3190,8 @@ class PostgresRunStore(DurableJobStoreBase):
                     .values(
                         status=RunStatus.CANCELLED.value,
                         cancel_requested=True,
-                        finished_at=time.time(),
+                        finished_at=now,
+                        **_terminal_timing_values(now),
                     )
                     .returning(
                         runs.c.kind,
@@ -2540,7 +3214,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     event_type="inqtrix.run.cancelled",
                     payload={
                         "status": "cancelled",
-                        "reason": "cancelled_before_start",
+                        "reason": cascade_reason or "cancelled_before_start",
                     },
                     snapshot=dict(cancelled[3] or {}),
                     attempt=int(cancelled[4] or 0) or None,
@@ -2575,7 +3249,7 @@ class PostgresRunStore(DurableJobStoreBase):
                         "inqtrix.run.cancel_requested",
                         {
                             "status": "running",
-                            "reason": "client_requested_cancel",
+                            "reason": (cascade_reason or "client_requested_cancel"),
                         },
                         status=RunStatus.RUNNING.value,
                     )[1],
@@ -2591,16 +3265,38 @@ class PostgresRunStore(DurableJobStoreBase):
                 )
             ).scalar_one_or_none()
             if fresh in _WAITING_VALUES:
+                # The degrade path keeps the cascade attribution: a
+                # parent-failure cancel that lost the RUNNING CAS to a
+                # concurrent park must not flip to the generic
+                # cancelled_while_waiting reason.
                 _landed, woken_parent = await self._cancel_waiting_row_db(
-                    session, run_id, tenant_id
+                    session,
+                    run_id,
+                    tenant_id,
+                    cascade_reason=cascade_reason,
                 )
                 return woken_parent
         return None
 
     async def _cancel_waiting_row_db(
-        self, session: "AsyncSession", run_id: str, tenant_id: str
+        self,
+        session: "AsyncSession",
+        run_id: str,
+        tenant_id: str,
+        *,
+        cascade_reason: str | None = None,
     ) -> tuple[bool, str | None]:
         """Cancel one waiting row immediately (nothing is executing).
+
+        ``cascade_reason`` overrides the emitted cancel reason (the
+        parent-failure cascade passes ``parent_failed``); ``None`` keeps
+        the ``cancelled_while_waiting`` default.
+
+        Attribution channel: the reason lives ON THE EVENTS —
+        ``inqtrix.run.cancel_requested`` and ``inqtrix.run.cancelled``
+        both carry it in their payload, on every path including the
+        RUNNING->parked degrade. Run snapshots deliberately carry no
+        cancel-reason field; consumers read the event stream.
 
         Returns:
             ``(landed, woken_parent)``. ``landed=False`` means the row left
@@ -2608,6 +3304,7 @@ class PostgresRunStore(DurableJobStoreBase):
             the fresh status. A non-null parent id means this was its last
             active child and the post-commit dispatcher must wake it.
         """
+        now = time.time()
         waited = (
             await session.execute(
                 update(runs)
@@ -2618,8 +3315,8 @@ class PostgresRunStore(DurableJobStoreBase):
                 .values(
                     status=RunStatus.CANCELLED.value,
                     cancel_requested=True,
-                    waiting_since=None,
-                    finished_at=time.time(),
+                    finished_at=now,
+                    **_terminal_timing_values(now),
                 )
                 .returning(
                     runs.c.run_id,
@@ -2644,7 +3341,7 @@ class PostgresRunStore(DurableJobStoreBase):
             event_type="inqtrix.run.cancelled",
             payload={
                 "status": "cancelled",
-                "reason": "cancelled_while_waiting",
+                "reason": cascade_reason or "cancelled_while_waiting",
             },
             snapshot=dict(waited[4] or {}),
             attempt=int(waited[5] or 0) or None,
@@ -2667,13 +3364,12 @@ class PostgresRunStore(DurableJobStoreBase):
         woken_parent: str | None = None
         parked = False
         async with self._session(DEFAULT_TENANT) as session:
-            _locked, _root, access = await self._lock_execution_path_db(
-                session, run_id
-            )
+            _locked, _root, access = await self._lock_execution_path_db(session, run_id)
             if access is None:
                 raise AuthorizationRevoked(
                     "run wait discarded after execution authority changed"
                 )
+            now = time.time()
             query = (
                 update(runs)
                 .where(
@@ -2683,7 +3379,12 @@ class PostgresRunStore(DurableJobStoreBase):
                 )
                 .values(
                     status=waiting.value,
-                    waiting_since=time.time(),
+                    waiting_since=now,
+                    active_seconds=(
+                        runs.c.active_seconds
+                        + _elapsed_sql(runs.c.active_started_at, now)
+                    ),
+                    active_started_at=None,
                 )
                 .returning(runs.c.snapshot, runs.c.tenant_id)
             )
@@ -2749,9 +3450,9 @@ class PostgresRunStore(DurableJobStoreBase):
         # fresh read selects it directly.
         current = (
             await session.execute(
-                select(
-                    runs.c.status, runs.c.claimed_by, runs.c.attempt
-                ).where(runs.c.run_id == run_id)
+                select(runs.c.status, runs.c.claimed_by, runs.c.attempt).where(
+                    runs.c.run_id == run_id
+                )
             )
         ).first()
         if current is None:
@@ -2770,12 +3471,11 @@ class PostgresRunStore(DurableJobStoreBase):
             # attempt's execution. A fenced miss on the OWN attempt
             # means cancel_requested blocked the park; that case
             # falls through and resolves as cancel (memory parity).
-            raise RunActive(
-                f"run {run_id} is owned by another worker attempt"
-            )
+            raise RunActive(f"run {run_id} is owned by another worker attempt")
         if current.status == RunStatus.RUNNING.value:
             # RUNNING but cancel_requested: resolve the pending
             # cancel now instead of parking.
+            now = time.time()
             cancelled = (
                 await session.execute(
                     update(runs)
@@ -2785,7 +3485,8 @@ class PostgresRunStore(DurableJobStoreBase):
                     )
                     .values(
                         status=RunStatus.CANCELLED.value,
-                        finished_at=time.time(),
+                        finished_at=now,
+                        **_terminal_timing_values(now),
                     )
                     .returning(
                         runs.c.snapshot,
@@ -2819,9 +3520,7 @@ class PostgresRunStore(DurableJobStoreBase):
             current = await self._row_db(session, run_id)
         # Not RUNNING (terminal or a caller bug) — loud, memory
         # parity: RunNotFound came from _row_db above if missing.
-        raise RunActive(
-            f"run {run_id} cannot wait from status {current.status}"
-        )
+        raise RunActive(f"run {run_id} cannot wait from status {current.status}")
 
     async def _resume_db(
         self,
@@ -2843,23 +3542,34 @@ class PostgresRunStore(DurableJobStoreBase):
                 owner_column=runs.c.created_by_user_id,
                 minimum=SharePermission.EDIT,
                 restrict_to_workspace_members=self._restrict_to_workspace_members,
+                sharing_enabled=self._sharing_enabled,
             )
             if access is None:
                 raise RunNotFound(run_id)
             current = (
-                await session.execute(
-                    select(runs).where(runs.c.run_id == run_id)
-                )
-            ).mappings().first()
+                (await session.execute(select(runs).where(runs.c.run_id == run_id)))
+                .mappings()
+                .first()
+            )
             if current is None:
                 raise RunNotFound(run_id)
             if current["status"] not in _WAITING_VALUES:
                 raise RunActive(
                     f"run {run_id} is not waiting (status {current['status']})"
                 )
+            now = time.time()
+            segment_ordinal = int(current["segment_count"] or 0) + 1
+            segment_id = run_segment_id(run_id, segment_ordinal)
             values: dict[str, Any] = {
                 "status": RunStatus.QUEUED.value,
                 "waiting_since": None,
+                "waiting_seconds": (
+                    runs.c.waiting_seconds + _elapsed_sql(runs.c.waiting_since, now)
+                ),
+                "queued_since": now,
+                "segment_count": segment_ordinal,
+                "current_segment_id": segment_id,
+                "current_segment_reason": _resume_reason_value(str(current["status"])),
             }
             if actor_user_id is not None:
                 values.update(
@@ -2892,6 +3602,8 @@ class PostgresRunStore(DurableJobStoreBase):
                     "status": "queued",
                     "queue_position": position,
                     "resumed": True,
+                    "segment_id": segment_id,
+                    "segment_ordinal": segment_ordinal,
                 },
                 status=RunStatus.QUEUED.value,
             )
@@ -2967,15 +3679,19 @@ class PostgresRunStore(DurableJobStoreBase):
         self, session: "AsyncSession", run_id: str, after_sequence: int
     ) -> list[dict[str, Any]]:
         rows = (
-            await session.execute(
-                select(run_events)
-                .where(
-                    run_events.c.run_id == run_id,
-                    run_events.c.sequence > after_sequence,
+            (
+                await session.execute(
+                    select(run_events)
+                    .where(
+                        run_events.c.run_id == run_id,
+                        run_events.c.sequence > after_sequence,
+                    )
+                    .order_by(run_events.c.sequence)
                 )
-                .order_by(run_events.c.sequence)
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         return [
             {
                 "type": row["type"],
@@ -2995,9 +3711,7 @@ class PostgresRunStore(DurableJobStoreBase):
         fence_attempt: int | None = None,
     ) -> None:
         async with self._session(DEFAULT_TENANT) as session:
-            row, _root, access = await self._lock_execution_path_db(
-                session, run_id
-            )
+            row, _root, access = await self._lock_execution_path_db(session, run_id)
             if access is None:
                 raise AuthorizationRevoked(
                     "run event discarded after execution authority changed"
@@ -3049,9 +3763,7 @@ class PostgresRunStore(DurableJobStoreBase):
                     .where(runs.c.run_id == run_id)
                     .values(snapshot=new_snapshot)
                 )
-            await self._append_events_db(
-                session, run_id, row["tenant_id"], events
-            )
+            await self._append_events_db(session, run_id, row["tenant_id"], events)
             await self._project_child_progress_db(
                 session,
                 child_run_id=run_id,
@@ -3113,9 +3825,7 @@ class PostgresRunStore(DurableJobStoreBase):
         """Append one bounded child projection to its parent event log."""
         body = request_payload.get("body") or {}
         parent_task_id = (
-            str(body.get("parent_task_id") or "")
-            if isinstance(body, dict)
-            else ""
+            str(body.get("parent_task_id") or "") if isinstance(body, dict) else ""
         )
         logical_attempt = (
             int(body.get("parent_task_attempt", 0) or 0)
@@ -3131,10 +3841,12 @@ class PostgresRunStore(DurableJobStoreBase):
             return
         parent = (
             await session.execute(
-                select(runs.c.status, runs.c.tenant_id).where(
+                select(runs.c.status, runs.c.tenant_id)
+                .where(
                     runs.c.run_id == parent_run_id,
                     runs.c.status.notin_(_TERMINAL_VALUES),
-                ).with_for_update()
+                )
+                .with_for_update()
             )
         ).first()
         if parent is None:
@@ -3173,8 +3885,18 @@ class PostgresRunStore(DurableJobStoreBase):
         payload: dict[str, Any],
         snapshot: dict[str, Any],
         attempt: int | None,
+        audit_detail: dict[str, Any] | None = None,
+        audit_correlation: dict[str, str] | None = None,
     ) -> str | None:
-        """Persist one terminal signal, child projection, and parent wake."""
+        """Persist one terminal signal, child projection, and parent wake.
+
+        The terminal audit row (Dienststart-Index) is written HERE, in
+        the same transaction, through the ONE pre-existing
+        ``run.{status}`` effects write — outcome derives from the
+        status, correlation always carries the run id, and the primary
+        execution path passes tokens/duration/trace via the two audit
+        parameters. One row per terminal, never two.
+        """
         await self._append_events_db(
             session,
             run_id,
@@ -3211,6 +3933,14 @@ class PostgresRunStore(DurableJobStoreBase):
                 resource_type="run",
                 resource_id=run_id,
                 scope="runs",
+                outcome=(
+                    "success" if status == "completed" else "failure"
+                ),
+                detail=audit_detail,
+                correlation={
+                    "run_id": run_id,
+                    **(audit_correlation or {}),
+                },
             )
         if kind == "agent_child" and parent_run_id:
             return await self._maybe_wake_parent_db(
@@ -3266,9 +3996,11 @@ class PostgresRunStore(DurableJobStoreBase):
                     "the attempted execution result was discarded.",
                     run_id,
                 )
+            now = time.time()
             values: dict[str, Any] = {
                 "status": status.value,
-                "finished_at": time.time(),
+                "finished_at": now,
+                **_terminal_timing_values(now),
             }
             if result is not None:
                 values["result"] = result
@@ -3290,6 +4022,10 @@ class PostgresRunStore(DurableJobStoreBase):
                     runs.c.parent_run_id,
                     runs.c.request_payload,
                     runs.c.attempt,
+                    runs.c.mode,
+                    runs.c.created_by_user_id,
+                    runs.c.workspace_id,
+                    runs.c.created_at,
                 )
             )
             if exclude_waiting:
@@ -3318,6 +4054,45 @@ class PostgresRunStore(DurableJobStoreBase):
                     )
                 return False
             event_type, payload = event_builder(dict(row[0] or {}))
+            # Dienststart-Index metadata for the terminal audit row
+            # (written inside _record_terminal_run_db, same tx): mode,
+            # duration, token sums, error type, trace id — never
+            # content. Fenced-out/no-op writes never reach this line,
+            # so zombie attempts cannot forge index rows.
+            audit_detail: dict[str, Any] | None = None
+            audit_correlation: dict[str, str] | None = None
+            if self._audit_service_starts:
+                audit_detail = {"mode": str(row[6] or "") or "standard"}
+                if row[9]:
+                    audit_detail["duration_s"] = round(
+                        max(0.0, now - float(row[9])), 2
+                    )
+                usage = (result or {}).get("usage") or {}
+                prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                completion_tokens = int(
+                    usage.get("completion_tokens") or 0
+                )
+                if prompt_tokens or completion_tokens:
+                    audit_detail["prompt_tokens"] = prompt_tokens
+                    audit_detail["completion_tokens"] = completion_tokens
+                if error and error.get("type"):
+                    audit_detail["error_type"] = str(error["type"])
+                trace_rows = await session.execute(
+                    select(run_events.c.data)
+                    .where(
+                        run_events.c.run_id == run_id,
+                        run_events.c.type == "inqtrix.run.trace",
+                    )
+                    .order_by(run_events.c.sequence.desc())
+                    .limit(1)
+                )
+                trace_row = trace_rows.first()
+                if trace_row is not None:
+                    trace_hex = str(
+                        (trace_row[0] or {}).get("trace_id") or ""
+                    )
+                    if trace_hex:
+                        audit_correlation = {"trace_id": trace_hex}
             woken_parent = await self._record_terminal_run_db(
                 session,
                 run_id=run_id,
@@ -3330,7 +4105,37 @@ class PostgresRunStore(DurableJobStoreBase):
                 payload=payload,
                 snapshot=dict(row[0] or {}),
                 attempt=int(row[5] or 0) or None,
+                audit_detail=audit_detail,
+                audit_correlation=audit_correlation,
             )
+            if status is RunStatus.FAILED:
+                # Parent terminal failure cascades to live descendants
+                # (orphans burning quota behind a dead parent) — FENCED:
+                # this branch runs only after the terminal CAS above
+                # landed, so a reclaimed zombie attempt can never cancel
+                # anyone. Same transaction, same subtree lock order as
+                # cancel_tree.
+                child_rows = (await self._lock_run_subtree_db(session, run_id))[1:]
+                cascaded: list[str] = []
+                for child in child_rows:
+                    if child["status"] in _TERMINAL_VALUES:
+                        continue
+                    cascaded.append(child["run_id"])
+                    await self._cancel_row_db(
+                        session,
+                        child["run_id"],
+                        child["tenant_id"],
+                        child["status"],
+                        cascade_reason="parent_failed",
+                    )
+                if cascaded:
+                    log.warning(
+                        "Elternlauf %s fehlgeschlagen — %d laufende "
+                        "Kind-Laeufe abgebrochen (parent_failed).",
+                        run_id,
+                        len(cascaded),
+                    )
+                    self._failed_cascades.put((run_id, tuple(cascaded)))
         if woken_parent:
             # Post-commit handoff: the sync mutators dispatch (queue
             # enqueue / local re-append) — never this loop coroutine.
@@ -3373,11 +4178,11 @@ class PostgresRunStore(DurableJobStoreBase):
         """
         locked = (
             await session.execute(
-                select(runs.c.run_id)
+                select(runs.c.run_id, runs.c.segment_count)
                 .where(runs.c.run_id == parent_run_id)
                 .with_for_update(key_share=True)
             )
-        ).scalar_one_or_none()
+        ).first()
         if locked is None:
             return None
         outstanding = await session.scalar(
@@ -3390,17 +4195,26 @@ class PostgresRunStore(DurableJobStoreBase):
         )
         if outstanding:
             return None
+        now = time.time()
+        segment_ordinal = int(locked[1] or 0) + 1
+        segment_id = run_segment_id(parent_run_id, segment_ordinal)
         row = (
             await session.execute(
                 update(runs)
                 .where(
                     runs.c.run_id == parent_run_id,
-                    runs.c.status
-                    == RunStatus.WAITING_FOR_CHILDREN.value,
+                    runs.c.status == RunStatus.WAITING_FOR_CHILDREN.value,
                 )
                 .values(
                     status=RunStatus.QUEUED.value,
                     waiting_since=None,
+                    waiting_seconds=(
+                        runs.c.waiting_seconds + _elapsed_sql(runs.c.waiting_since, now)
+                    ),
+                    queued_since=now,
+                    segment_count=segment_ordinal,
+                    current_segment_id=segment_id,
+                    current_segment_reason="children",
                 )
                 .returning(runs.c.tenant_id, runs.c.created_at)
             )
@@ -3414,6 +4228,8 @@ class PostgresRunStore(DurableJobStoreBase):
                 "status": "queued",
                 "queue_position": position,
                 "resumed": True,
+                "segment_id": segment_id,
+                "segment_ordinal": segment_ordinal,
             },
             status=RunStatus.QUEUED.value,
         )
@@ -3431,6 +4247,7 @@ class PostgresRunStore(DurableJobStoreBase):
             "message": "Execution authority was revoked",
             "type": AuthorizationRevoked.code,
         }
+        now = time.time()
         row = (
             await session.execute(
                 update(runs)
@@ -3442,7 +4259,8 @@ class PostgresRunStore(DurableJobStoreBase):
                     status=RunStatus.FAILED.value,
                     result=None,
                     error=error,
-                    finished_at=time.time(),
+                    finished_at=now,
+                    **_terminal_timing_values(now),
                 )
                 .returning(
                     runs.c.snapshot,
@@ -3492,99 +4310,150 @@ class PostgresRunStore(DurableJobStoreBase):
                 )
                 row = None
             else:
+                previous_status = str(_locked["status"])
+                now = time.time()
+                initial_start = _locked["started_at"] is None
+                resumed_dispatch = (
+                    previous_status == RunStatus.QUEUED.value and not initial_start
+                )
+                segment_ordinal = int(_locked["segment_count"] or 0)
+                segment_id = _locked["current_segment_id"]
+                segment_reason = _locked["current_segment_reason"]
+                if initial_start:
+                    segment_ordinal += 1
+                    segment_id = run_segment_id(run_id, segment_ordinal)
+                    segment_reason = "initial"
+                elif resumed_dispatch and (
+                    not segment_id or segment_reason == "legacy"
+                ):
+                    segment_ordinal += 1
+                    segment_id = run_segment_id(run_id, segment_ordinal)
+                    segment_reason = "resume"
                 allowed = [RunStatus.QUEUED.value]
                 if allow_takeover:
                     allowed.append(RunStatus.RUNNING.value)
+                values: dict[str, Any] = {
+                    "status": RunStatus.RUNNING.value,
+                    "claimed_by": self._worker_id,
+                    "attempt": runs.c.attempt + 1,
+                    "started_at": _locked["started_at"] or now,
+                    "active_started_at": (
+                        _locked["active_started_at"]
+                        if previous_status == RunStatus.RUNNING.value
+                        and _locked["active_started_at"] is not None
+                        else now
+                    ),
+                    "queued_since": None,
+                    "segment_count": segment_ordinal,
+                    "current_segment_id": segment_id,
+                    "current_segment_reason": segment_reason,
+                }
+                if previous_status == RunStatus.QUEUED.value and not initial_start:
+                    values["queued_seconds"] = runs.c.queued_seconds + _elapsed_sql(
+                        runs.c.queued_since, now
+                    )
                 row = (
-                    await session.execute(
-                        update(runs)
-                        .where(
-                            runs.c.run_id == run_id,
-                            runs.c.status.in_(allowed),
-                        )
-                        .values(
-                            status=RunStatus.RUNNING.value,
-                            claimed_by=self._worker_id,
-                            attempt=runs.c.attempt + 1,
-                            started_at=time.time(),
-                        )
-                        .returning(
-                            runs.c.attempt,
-                            runs.c.request_payload,
-                            runs.c.snapshot,
-                            runs.c.created_by_user_id,
-                            runs.c.created_by_tenant_id,
-                            runs.c.workspace_id,
-                            runs.c.kind,
-                            runs.c.parent_run_id,
-                            runs.c.execution_actor_user_id,
-                            runs.c.execution_scopes,
+                    (
+                        await session.execute(
+                            update(runs)
+                            .where(
+                                runs.c.run_id == run_id,
+                                runs.c.status.in_(allowed),
+                            )
+                            .values(**values)
+                            .returning(
+                                runs.c.attempt,
+                                runs.c.request_payload,
+                                runs.c.snapshot,
+                                runs.c.created_by_user_id,
+                                runs.c.created_by_tenant_id,
+                                runs.c.workspace_id,
+                                runs.c.kind,
+                                runs.c.parent_run_id,
+                                runs.c.execution_actor_user_id,
+                                runs.c.execution_scopes,
+                                runs.c.current_segment_id,
+                                runs.c.segment_count,
+                                runs.c.current_segment_reason,
+                            )
                         )
                     )
-                ).first()
+                    .mappings()
+                    .first()
+                )
             if row is None:
                 claimed = None
             else:
-                await self._append_events_db(
-                    session,
-                    run_id,
-                    tenant_id,
-                    expand_run_event(
-                        "inqtrix.run.started",
-                        {"status": "running", "snapshot": dict(row[2] or {})},
-                        status=RunStatus.RUNNING.value,
-                    )[1],
+                lifecycle_event = (
+                    "inqtrix.run.started"
+                    if initial_start
+                    else "inqtrix.run.resumed" if resumed_dispatch else None
                 )
-                await self._project_child_progress_db(
-                    session,
-                    child_run_id=run_id,
-                    kind=str(row[6] or "standard"),
-                    parent_run_id=row[7],
-                    request_payload=dict(row[1] or {}),
-                    run_status=RunStatus.RUNNING.value,
-                    event_type="inqtrix.run.started",
-                    payload={
+                if lifecycle_event is not None:
+                    lifecycle_payload = {
                         "status": "running",
-                        "snapshot": dict(row[2] or {}),
-                    },
-                    snapshot=dict(row[2] or {}),
-                    attempt=int(row[0]),
-                )
+                        "snapshot": dict(row["snapshot"] or {}),
+                        "segment_id": row["current_segment_id"],
+                        "segment_ordinal": int(row["segment_count"] or 0),
+                        "reason": row["current_segment_reason"],
+                    }
+                    await self._append_events_db(
+                        session,
+                        run_id,
+                        tenant_id,
+                        expand_run_event(
+                            lifecycle_event,
+                            lifecycle_payload,
+                            status=RunStatus.RUNNING.value,
+                        )[1],
+                    )
+                    await self._project_child_progress_db(
+                        session,
+                        child_run_id=run_id,
+                        kind=str(row["kind"] or "standard"),
+                        parent_run_id=row["parent_run_id"],
+                        request_payload=dict(row["request_payload"] or {}),
+                        run_status=RunStatus.RUNNING.value,
+                        event_type=lifecycle_event,
+                        payload=lifecycle_payload,
+                        snapshot=dict(row["snapshot"] or {}),
+                        attempt=int(row["attempt"]),
+                    )
                 claimed = ClaimedRun(
                     run_id=run_id,
                     tenant_id=tenant_id,
-                    attempt=int(row[0]),
-                    request_payload=dict(row[1] or {}),
-                    kind=str(row[6] or "standard"),
-                    created_by_user_id=row[3],
-                    created_by_tenant_id=row[4],
-                    workspace_id=row[5],
-                    execution_actor_user_id=row[8],
-                    execution_scopes=tuple(row[9] or ()),
+                    attempt=int(row["attempt"]),
+                    request_payload=dict(row["request_payload"] or {}),
+                    kind=str(row["kind"] or "standard"),
+                    created_by_user_id=row["created_by_user_id"],
+                    created_by_tenant_id=row["created_by_tenant_id"],
+                    workspace_id=row["workspace_id"],
+                    execution_actor_user_id=row["execution_actor_user_id"],
+                    execution_scopes=tuple(row["execution_scopes"] or ()),
                 )
         if woken_parent:
             self._parents_to_wake.put(woken_parent)
         return claimed
 
-    async def _cancel_requested_db(
-        self, run_ids: dict[str, str]
-    ) -> set[str]:
+    async def _cancel_requested_db(self, run_ids: dict[str, str]) -> set[str]:
         if not run_ids:
             return set()
         async with self._session(DEFAULT_TENANT) as session:
             rows = (
-                await session.execute(
-                    select(runs.c.run_id).where(
-                        runs.c.run_id.in_(list(run_ids)),
-                        runs.c.cancel_requested.is_(True),
+                (
+                    await session.execute(
+                        select(runs.c.run_id).where(
+                            runs.c.run_id.in_(list(run_ids)),
+                            runs.c.cancel_requested.is_(True),
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             return set(rows)
 
-    async def _dispatch_status_db(
-        self, run_id: str, tenant_id: str
-    ) -> str | None:
+    async def _dispatch_status_db(self, run_id: str, tenant_id: str) -> str | None:
         async with self._session(tenant_id) as session:
             return (
                 await session.execute(
@@ -3632,25 +4501,30 @@ class PostgresRunStore(DurableJobStoreBase):
             ((RunStatus.WAITING_FOR_CHILDREN.value,), "children_timeout"),
         ):
             candidate_ids = (
-                await session.execute(
-                    select(runs.c.run_id)
-                    .where(
-                        runs.c.status.in_(statuses),
-                        runs.c.waiting_since.isnot(None),
-                        runs.c.waiting_since
-                        < time.time() - self._waiting_ttl_seconds,
-                    )
-                    .order_by(
-                        func.coalesce(runs.c.root_run_id, runs.c.run_id),
-                        runs.c.run_id,
+                (
+                    await session.execute(
+                        select(runs.c.run_id)
+                        .where(
+                            runs.c.status.in_(statuses),
+                            runs.c.waiting_since.isnot(None),
+                            runs.c.waiting_since
+                            < time.time() - self._waiting_ttl_seconds,
+                        )
+                        .order_by(
+                            func.coalesce(runs.c.root_run_id, runs.c.run_id),
+                            runs.c.run_id,
+                        )
                     )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             for candidate_id in candidate_ids:
                 try:
                     await self._lock_system_run_path_db(session, candidate_id)
                 except RunNotFound:
                     continue
+                now = time.time()
                 swept = (
                     await session.execute(
                         update(runs)
@@ -3664,8 +4538,8 @@ class PostgresRunStore(DurableJobStoreBase):
                         .values(
                             status=RunStatus.CANCELLED.value,
                             cancel_requested=True,
-                            waiting_since=None,
-                            finished_at=time.time(),
+                            finished_at=now,
+                            **_terminal_timing_values(now),
                         )
                         .returning(
                             runs.c.run_id,
@@ -3719,8 +4593,7 @@ class PostgresRunStore(DurableJobStoreBase):
             criteria=(
                 runs.c.status.in_(_TERMINAL_VALUES),
                 runs.c.finished_at.isnot(None),
-                runs.c.finished_at
-                < time.time() - self._completed_ttl_seconds,
+                runs.c.finished_at < time.time() - self._completed_ttl_seconds,
             ),
             action="run.retention_deleted",
         )
@@ -3758,16 +4631,20 @@ class PostgresRunStore(DurableJobStoreBase):
     ) -> list[str]:
         """Delete retention candidates with shares and effects atomically."""
         candidate_ids = (
-            await session.execute(
-                select(runs.c.run_id)
-                .where(*criteria)
-                .order_by(
-                    func.coalesce(runs.c.root_run_id, runs.c.run_id),
-                    runs.c.root_run_id.isnot(None),
-                    runs.c.run_id,
+            (
+                await session.execute(
+                    select(runs.c.run_id)
+                    .where(*criteria)
+                    .order_by(
+                        func.coalesce(runs.c.root_run_id, runs.c.run_id),
+                        runs.c.root_run_id.isnot(None),
+                        runs.c.run_id,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         deleted: list[str] = []
         for candidate_id in candidate_ids:
             try:
@@ -3809,15 +4686,11 @@ class PostgresRunStore(DurableJobStoreBase):
                     scope="runs",
                     additional_targets=recipients,
                 )
-            await session.execute(
-                delete(runs).where(runs.c.run_id == row.run_id)
-            )
+            await session.execute(delete(runs).where(runs.c.run_id == row.run_id))
             deleted.extend(child["run_id"] for child in subtree)
         return deleted
 
-    async def _recover_orphans_db(
-        self, session: "AsyncSession"
-    ) -> list[str]:
+    async def _recover_orphans_db(self, session: "AsyncSession") -> list[str]:
         """Fail queued/running rows left behind by a previous process.
 
         Only meaningful in no-queue mode: in-process execution cannot
@@ -3837,29 +4710,34 @@ class PostgresRunStore(DurableJobStoreBase):
             "type": "server_restarted",
         }
         candidate_ids = (
-            await session.execute(
-                select(runs.c.run_id)
-                .where(
-                    runs.c.status.in_(
-                        (
-                            RunStatus.QUEUED.value,
-                            RunStatus.RUNNING.value,
+            (
+                await session.execute(
+                    select(runs.c.run_id)
+                    .where(
+                        runs.c.status.in_(
+                            (
+                                RunStatus.QUEUED.value,
+                                RunStatus.RUNNING.value,
+                            )
                         )
                     )
-                )
-                .order_by(
-                    func.coalesce(runs.c.root_run_id, runs.c.run_id),
-                    runs.c.root_run_id.isnot(None),
-                    runs.c.run_id,
+                    .order_by(
+                        func.coalesce(runs.c.root_run_id, runs.c.run_id),
+                        runs.c.root_run_id.isnot(None),
+                        runs.c.run_id,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         rows = []
         for candidate_id in candidate_ids:
             try:
                 await self._lock_system_run_path_db(session, candidate_id)
             except RunNotFound:
                 continue
+            now = time.time()
             row = (
                 await session.execute(
                     update(runs)
@@ -3874,8 +4752,9 @@ class PostgresRunStore(DurableJobStoreBase):
                     )
                     .values(
                         status=RunStatus.FAILED.value,
-                        finished_at=time.time(),
+                        finished_at=now,
                         error=error,
+                        **_terminal_timing_values(now),
                     )
                     .returning(
                         runs.c.run_id,
@@ -3894,8 +4773,7 @@ class PostgresRunStore(DurableJobStoreBase):
         for row in rows:
             run_id = row[0]
             log.warning(
-                "Verwaister Run %s nach Neustart als fehlgeschlagen "
-                "markiert.",
+                "Verwaister Run %s nach Neustart als fehlgeschlagen " "markiert.",
                 run_id,
             )
             payload = {
@@ -3920,6 +4798,7 @@ class PostgresRunStore(DurableJobStoreBase):
                 woken_parents.append(woken_parent)
         return woken_parents
 
+
 def _row_view(row: Any) -> _RowView:
     return _RowView(
         run_id=row["run_id"],
@@ -3932,6 +4811,14 @@ def _row_view(row: Any) -> _RowView:
         created_at=row["created_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
+        segment_count=int(row["segment_count"] or 0),
+        current_segment_id=row["current_segment_id"],
+        queued_since=row["queued_since"],
+        active_started_at=row["active_started_at"],
+        active_seconds=float(row["active_seconds"] or 0.0),
+        waiting_seconds=float(row["waiting_seconds"] or 0.0),
+        queued_seconds=float(row["queued_seconds"] or 0.0),
+        waiting_since=row["waiting_since"],
         snapshot=dict(row["snapshot"] or {}),
         error=dict(row["error"]) if row["error"] else None,
         kind=row["kind"] or "standard",
@@ -3940,9 +4827,7 @@ def _row_view(row: Any) -> _RowView:
         session_id=row["session_id"],
         # Persisted inside the replay payload (no column): the child's
         # idempotency key for kernel tool re-execution (M2 step 8).
-        origin_key=((row["request_payload"] or {}).get("body") or {}).get(
-            "origin_key"
-        ),
+        origin_key=((row["request_payload"] or {}).get("body") or {}).get("origin_key"),
         cancel_requested=bool(row["cancel_requested"]),
     )
 

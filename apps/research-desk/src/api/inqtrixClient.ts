@@ -17,6 +17,10 @@ import type {
 } from '@/features/quota/admin'
 import type { QuotaDimensionUsage } from '@/features/quota/model'
 import type {
+  CreatedEditorShareLink,
+  EditorAccessSummary,
+  EditorShareLink,
+  EditorShareLinkPermission,
   OutgoingShare,
   ShareInvitee,
   SharePermissionValue,
@@ -49,7 +53,7 @@ import type {
   KnowledgeCollectionInfo,
   KnowledgeDocumentInfo,
   KnowledgeDocumentText,
-  KnowledgeSearchHit,
+  KnowledgeSearchResponse,
   NodeModelResolution,
   ResearchRunMode,
   ResearchRunEvent,
@@ -63,6 +67,10 @@ export type ClientOptions = {
   /** Resume cursor for fetch-based SSE reconnects. Ignored by ordinary
    * JSON endpoints; event-stream callers send it as `Last-Event-ID`. */
   lastEventId?: string
+  /** Keep a caller-owned recovery flow in control of an expected HTTP 401.
+   * Ordinary authenticated requests still hard-reload on an unexpected
+   * principal loss. */
+  reloadOnUnauthorized?: boolean
   signal?: AbortSignal
   workspaceId?: string
 }
@@ -157,11 +165,20 @@ const CHAT_MODEL_NAME = 'research-agent'
 const EXPECTED_USER_ID_HEADER = 'X-Inqtrix-Expected-User-Id'
 
 let expectedUserIdentity: string | null = null
+let csrfRefreshInFlight: Promise<void> | null = null
+let sessionCsrfToken: string | null = null
 
 /** Bind subsequent cookie-session requests to the SPA's rendered principal.
  * The value is a consistency generation, never an authentication credential. */
 export function setExpectedUserIdentity(userId: string | null) {
-  expectedUserIdentity = userId?.trim() || null
+  const nextIdentity = userId?.trim() || null
+  if (
+    expectedUserIdentity !== null
+    && expectedUserIdentity !== nextIdentity
+  ) {
+    sessionCsrfToken = null
+  }
+  expectedUserIdentity = nextIdentity
 }
 
 export type InqtrixRequestError = Error & {
@@ -263,6 +280,20 @@ export async function listKnowledgeDocuments(
   )
 }
 
+/** Resolve a member persisted before server_document_id via its stable source.
+ * This endpoint is read-only and intentionally returns no extracted text. */
+export async function resolveKnowledgeDocumentBySource(
+  collectionId: string,
+  sourceId: string,
+  options: ClientOptions = {},
+) {
+  const query = new URLSearchParams({ source_id: sourceId })
+  return requestJson<KnowledgeDocumentInfo>(
+    `/v1/knowledge/collections/${collectionId}/documents/by-source?${query}`,
+    options,
+  )
+}
+
 export async function createKnowledgeCollection(
   request: { embeddingModel?: string; name: string },
   options: ClientOptions = {},
@@ -281,10 +312,13 @@ export async function deleteKnowledgeCollection(
   collectionId: string,
   options: ClientOptions = {},
 ) {
-  await request(`/v1/knowledge/collections/${collectionId}`, {
+  return requestJson<ServerDeletionOperation>(
+    `/v1/knowledge/collections/${collectionId}`,
+    {
     ...options,
     method: 'DELETE',
-  })
+    },
+  )
 }
 
 /** Delete a single knowledge document from its collection (Postgres + vectors).
@@ -294,10 +328,13 @@ export async function deleteKnowledgeDocument(
   documentId: string,
   options: ClientOptions = {},
 ) {
-  await request(`/v1/knowledge/documents/${documentId}`, {
+  return requestJson<ServerDeletionOperation>(
+    `/v1/knowledge/documents/${documentId}`,
+    {
     ...options,
     method: 'DELETE',
-  })
+    },
+  )
 }
 
 export type ServerFileInfo = {
@@ -308,33 +345,194 @@ export type ServerFileInfo = {
   sha256: string
   size_bytes: number
   workspace_id: string | null
+  /** Present only on a BOUND upload: the section-bound asset record the
+   * server created together with the file. Its absence after a binding was
+   * requested means the server predates upload binding — the caller falls
+   * back to the regular asset autosave. */
+  asset?: ServerAsset
+}
+
+export type ServerUploadOperationStatus =
+  | 'running'
+  | 'queued'
+  | 'awaiting_bytes'
+  | 'upload_failed'
+  | 'ready'
+
+export type ServerUploadOperationStage =
+  | 'prepared'
+  | 'object_stored'
+  | 'file_registered'
+  | 'asset_bound'
+  | 'parsing'
+  | 'parse_finished'
+  | 'quota_booked'
+  | 'ready'
+
+/** Durable, redacted progress receipt for one bound original-file upload. */
+export type ServerUploadOperation = {
+  asset_id: string
+  attempt: number
+  created_at: number
+  error: { message: string; type: string } | null
+  file_id: string
+  finished_at: number | null
+  operation_id: string
+  requires_bytes: boolean
+  retryable: boolean
+  stage: ServerUploadOperationStage
+  started_at: number | null
+  status: ServerUploadOperationStatus
+}
+
+/** A bound multipart either reaches ready synchronously or is durably queued
+ * for dependency recovery. Both responses carry the same authoritative asset
+ * and operation projections; callers must not infer success from HTTP 2xx. */
+export type ServerBoundFileUpload =
+  | (ServerFileInfo & {
+      asset: ServerAsset
+      upload_operation: ServerUploadOperation
+    })
+  | {
+      asset: ServerAsset
+      object: 'upload_operation'
+      upload_operation: ServerUploadOperation
+    }
+
+/** Wire form fields for a bound upload — the file's target placement,
+ * persisted by the server in the same request as the bytes. Snake_case +
+ * unix-seconds like every asset DTO; conversion from records lives in
+ * features/fileLibrary/assetSync.ts. */
+export type ServerFileUploadBinding = {
+  asset_id: string
+  section_id: string
+  group_id: string | null
+  title: string
+  label: string
+  origin: string
+  created_at: number
+  updated_at: number
+}
+
+/** Persist the stable asset identity before the multipart body is sent. */
+export async function reserveServerFileUpload(
+  file: File,
+  binding: ServerFileUploadBinding,
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerAsset>(
+    `/v1/assets/${binding.asset_id}/upload-reservation`,
+    {
+      ...options,
+      body: {
+        section_id: binding.section_id,
+        group_id: binding.group_id,
+        title: binding.title,
+        label: binding.label,
+        file_name: file.name,
+        mime_type: file.type || 'application/octet-stream',
+        origin: binding.origin,
+        page_count: null,
+        parse_status: 'parsed',
+        parse_warning: null,
+        text_truncated: false,
+        size_bytes: file.size,
+        parser_id: null,
+        created_at: binding.created_at,
+        updated_at: binding.updated_at,
+      },
+      method: 'POST',
+    },
+  )
 }
 
 /**
  * Upload one original file to the server file store (`POST /v1/files`).
  * Multipart: the browser sets the boundary header itself, so this goes
- * through `fetch` directly instead of the JSON helper.
+ * through `fetch` directly instead of the JSON helper. With `binding`, the
+ * request also carries the target placement. Normal project flows call
+ * {@link reserveServerFileUpload} first; this request then finalises that
+ * reservation through a lifecycle CAS.
  */
 export async function uploadServerFile(
   file: File,
   options: ClientOptions = {},
+  binding?: ServerFileUploadBinding,
 ) {
-  const headers = new Headers()
-  if (options.apiKey) headers.set('Authorization', `Bearer ${options.apiKey}`)
-  if (options.workspaceId) headers.set('X-Inqtrix-Workspace-Id', options.workspaceId)
-  attachExpectedUserIdentity(headers)
-  attachCsrfHeader(headers, 'POST')
-  const body = new FormData()
-  body.append('file', file, file.name)
-  const response = await fetch(resolveUrl('/v1/files', options.baseUrl), {
-    method: 'POST',
-    headers,
-    body,
-    signal: options.signal,
-    credentials: 'include',
-  })
-  if (!response.ok) await throwRequestError(response)
-  return (await response.json()) as ServerFileInfo
+  const send = async (csrfRetryAttempted: boolean): Promise<Response> => {
+    const headers = new Headers()
+    if (options.apiKey) headers.set('Authorization', `Bearer ${options.apiKey}`)
+    if (options.workspaceId) headers.set('X-Inqtrix-Workspace-Id', options.workspaceId)
+    attachExpectedUserIdentity(headers)
+    attachCsrfHeader(headers, 'POST')
+    // A FormData body is one-shot from the recovery layer's perspective.
+    // Rebuild it for the sole permitted retry instead of attempting to reuse
+    // a body a browser may already have consumed.
+    const body = new FormData()
+    body.append('file', file, file.name)
+    if (binding) {
+      for (const [key, value] of Object.entries(binding)) {
+        if (value === null || value === undefined) continue
+        body.append(key, String(value))
+      }
+    }
+
+    const response = await fetch(resolveUrl('/v1/files', options.baseUrl), {
+      method: 'POST',
+      headers,
+      body,
+      signal: options.signal,
+      credentials: 'include',
+    })
+    if (response.ok) return response
+
+    const error = await requestError(response)
+    if (canRecoverCsrf({
+      csrfRetryAttempted,
+      error,
+      method: 'POST',
+      options,
+      path: '/v1/files',
+    })) {
+      await refreshSessionCsrf(options)
+      return send(true)
+    }
+    throwParsedRequestError(
+      error,
+      response.status,
+      options.reloadOnUnauthorized !== false,
+    )
+  }
+
+  const response = await send(false)
+  return (await response.json()) as ServerBoundFileUpload
+}
+
+export async function getUploadOperation(
+  operationId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerUploadOperation>(
+    `/v1/uploads/${encodeURIComponent(operationId)}`,
+    options,
+  )
+}
+
+export async function listUploadOperations(options: ClientOptions = {}) {
+  return requestJson<{ data: ServerUploadOperation[]; object: 'list' }>(
+    '/v1/uploads',
+    options,
+  )
+}
+
+export async function retryUploadOperation(
+  operationId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerUploadOperation>(
+    `/v1/uploads/${encodeURIComponent(operationId)}/retry`,
+    { ...options, method: 'POST' },
+  )
 }
 
 export type ServerFileText = {
@@ -410,7 +608,7 @@ export async function searchKnowledge(
   request: { query: string; collectionIds?: string[]; topK?: number },
   options: ClientOptions = {},
 ) {
-  const payload = await requestJson<{ data: KnowledgeSearchHit[] }>(
+  const payload = await requestJson<KnowledgeSearchResponse>(
     '/v1/knowledge/search',
     {
       ...options,
@@ -424,7 +622,10 @@ export async function searchKnowledge(
       method: 'POST',
     },
   )
-  return payload.data
+  return {
+    data: payload.data,
+    warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+  }
 }
 
 /** Full extracted text of one knowledge document (document reader). */
@@ -499,7 +700,7 @@ export async function deletePromptTemplate(
   })
 }
 
-// --- Skills (plan M3): thin wire wrappers over /v1/skills ------------------
+// --- Skills: thin wire wrappers over /v1/skills ----------------------------
 
 /** List the caller's visible skills, newest first. */
 export async function listSkills(options: ClientOptions = {}) {
@@ -582,6 +783,9 @@ export type ServerChatThread = {
   group_id: string | null
   created_at: number
   updated_at: number
+  /** Client-owned JSON carrying the thread's picked model; '' or absent
+   * (older server) means nothing was picked here. */
+  model_selection?: string
 }
 
 /** One chat message as the server stores it. ``metadata`` holds the verbatim
@@ -645,6 +849,8 @@ export async function saveChatThread(
     group_id: string | null
     created_at: number
     updated_at: number
+    /** Whole-row PUT: must ride every save or the server resets it to ''. */
+    model_selection: string
   },
   options: ClientOptions = {},
 ) {
@@ -749,6 +955,10 @@ export type ServerKnowledgeSession = {
   created_at: number
   updated_at: number
   items_json?: string | null
+  lifecycle_status?: 'active' | 'deleting' | 'delete_failed'
+  deletion_operation_id?: string | null
+  deletion_stage?: string | null
+  deletion_error?: string | null
 }
 
 export type ServerKnowledgeSessionGroup = {
@@ -832,10 +1042,12 @@ export async function deleteKnowledgeSession(
   sessionId: string,
   options: ClientOptions = {},
 ) {
-  await request(`/v1/knowledge-sessions/${sessionId}`, {
+  const response = await request(`/v1/knowledge-sessions/${sessionId}`, {
     ...options,
     method: 'DELETE',
   })
+  if (response.status === 204) return null
+  return (await response.json()) as ServerDeletionOperation
 }
 
 // --- Editor-history persistence (M6b project tier) -------------------------
@@ -850,10 +1062,15 @@ export async function deleteKnowledgeSession(
  * heavy body — present on getEditorDocument, ABSENT on the list. */
 export type ServerEditorAccess = {
   mode: 'owner' | 'shared'
+  owner?: {
+    id: string
+    name: string
+  }
   permission: 'edit' | 'suggest' | 'view'
 }
 
 export type ServerEditorCollaboration = {
+  comment_revision?: number
   generation: number
   persisted_sequence: number
   projection_sequence: number
@@ -885,13 +1102,15 @@ export type ServerEditorDocument = {
 export type EditorCollaborationUser = {
   color: string
   id: string
+  kind?: 'guest' | 'user'
+  link_label?: string
   name: string
 }
 
 export type EditorCollaborationSession = {
-  access: 'edit' | 'suggest' | 'view'
+  access: 'comment' | 'edit' | 'suggest' | 'view'
   expires_at: number
-  initial_write_mode: 'edit' | 'suggest' | 'view'
+  initial_write_mode: 'comment' | 'edit' | 'suggest' | 'view'
   lease_token: string
   provider_flush_ms?: number
   protocol_version: number
@@ -906,12 +1125,123 @@ export type EditorCollaborationActivity = {
   actor: { id: string | null; name: string }
   actor_kind: 'assistant' | 'agent' | 'human' | 'system'
   command_id: string | null
+  comment_action?: 'created' | 'message_deleted' | 'message_edited' | 'reopened' | 'replied' | 'resolved'
   created_at: number
   from_sequence: number
+  outcome?: 'accepted' | 'rejected' | null
+  summary?: {
+    edits: Array<{
+      after: string
+      before: string
+      kind: 'deletion' | 'direct' | 'format' | 'insertion' | 'replacement' | 'structure'
+      position: number
+    }>
+    omitted_edit_count: number
+  }
   suggestion_ids: string[]
   to_sequence: number
-  type: 'decision' | 'direct' | 'suggestion' | 'system'
+  type: 'comment' | 'decision' | 'direct' | 'suggestion' | 'system'
+  update_count?: number
 }
+
+export type EditorCollaborationCommentActor = {
+  id: string | null
+  kind?: 'guest' | 'user'
+  link_label?: string | null
+  name: string
+}
+
+export type EditorGuestLinkDescription = {
+  document_title: string
+  expires_at: number
+  label: string
+  password_required: true
+  permission: EditorShareLinkPermission
+}
+
+export type EditorGuestAccessSession = {
+  document: {
+    comment_revision: number
+    content_markdown: string
+    generation: number
+    id: string
+    persisted_sequence: number
+    projection_sequence: number
+    title: string
+  }
+  expires_at: number
+  guest: {
+    display_name: string | null
+    id: string
+    link_label: string
+  }
+  permission: EditorShareLinkPermission
+}
+
+export type EditorCollaborationCommentMessage = {
+  author: EditorCollaborationCommentActor
+  body_markdown: string | null
+  can_delete: boolean
+  can_edit: boolean
+  created_at: number
+  deleted_at: number | null
+  edited_at: number | null
+  id: string
+  mentions: EditorCollaborationCommentActor[]
+  revision: number
+}
+
+export type EditorCollaborationCommentThread = {
+  anchor: Record<string, unknown>
+  author: EditorCollaborationCommentActor
+  can_resolve: boolean
+  created_at: number
+  document_id: string
+  generation: number
+  id: string
+  messages: EditorCollaborationCommentMessage[]
+  quote: string
+  resolved_at: number | null
+  resolved_by: EditorCollaborationCommentActor | null
+  revision: number
+  status: 'open' | 'resolved'
+  updated_at: number
+}
+
+export type EditorCollaborationCommentList = {
+  current_revision?: number
+  data: EditorCollaborationCommentThread[]
+  has_more?: boolean
+  last_read_revision: number
+  object: 'list'
+  participants: EditorCollaborationCommentActor[]
+  revision: number
+}
+
+export type EditorCollaborationCommentMutation = {
+  revision: number
+  thread: EditorCollaborationCommentThread
+}
+
+export type EditorCollaborationCommentCommand = {
+  command_id: string
+  expected_revision: number
+  generation: number
+}
+
+export type EditorCollaborationCommentMessageCommand =
+  EditorCollaborationCommentCommand & {
+    body_markdown: string
+    mention_user_ids: string[]
+  }
+
+export type EditorCollaborationCommentCreateCommand =
+  EditorCollaborationCommentMessageCommand & {
+    anchor: Record<string, unknown>
+    message_id: string
+    quote: string
+    thread_id: string
+  }
 
 export type EditorDocumentMetadataPatch = {
   diff_anchor_markdown?: string | null
@@ -993,6 +1323,55 @@ export type EditorCollaborationSuggestionPublishResponse = {
   suggestion_ids: string[]
 }
 
+export type EditorSuggestionDraftRevisionWire = {
+  change_summary: string[]
+  created_at: number
+  instruction: string | null
+  proposed_text: string
+  source: 'llm_refine' | 'manual_edit'
+  warnings: string[]
+}
+
+export type EditorPrivateSuggestionDraftWire = {
+  anchor_version: 1
+  change_summary: string[]
+  created_at: number
+  evidence: {
+    mode: 'add_sources' | 'fact_check' | 'verify_citations'
+    sources: Array<{ title: string; url: string }>
+  } | null
+  group_id: string
+  patch_id: string
+  proposed_text: string
+  publication_command_id: string
+  revision: number
+  revision_history: EditorSuggestionDraftRevisionWire[]
+  suggestion_id: string
+  updated_at: number
+  warnings: string[]
+}
+
+export type EditorSuggestionDraftCreateWire = {
+  anchor_version: 1
+  change_summary: string[]
+  evidence: EditorPrivateSuggestionDraftWire['evidence']
+  group_id: string
+  patch_id: string
+  proposed_text: string
+  publication_command_id: string
+  suggestion_id: string
+  warnings: string[]
+}
+
+export type EditorSuggestionDraftRevisionRequestWire = {
+  change_summary: string[]
+  evidence?: EditorPrivateSuggestionDraftWire['evidence']
+  instruction?: string
+  proposed_text: string
+  revision_source: 'llm_refine' | 'manual_edit'
+  warnings: string[]
+}
+
 /** One editor folder as the server stores it. */
 export type ServerEditorFolder = {
   id: string
@@ -1009,6 +1388,7 @@ export type ServerEditorComment = {
   anchor: Record<string, unknown>
   kind: string
   status: string
+  suggestion_draft?: EditorPrivateSuggestionDraftWire | null
   evidence_preset: string | null
   created_at: number
   updated_at: number
@@ -1094,7 +1474,181 @@ export async function createEditorCollaborationSession(
 ) {
   return requestJson<EditorCollaborationSession>(
     `/v1/editor/documents/${documentId}/collaboration/session`,
-    { ...options, body: payload, method: 'POST' },
+    {
+      ...options,
+      body: payload,
+      method: 'POST',
+      reloadOnUnauthorized: false,
+    },
+  )
+}
+
+/** Public, account-less guest-link metadata. The raw token is never persisted. */
+export async function describeEditorGuestLink(
+  token: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorGuestLinkDescription>(
+    `/v1/editor/share-links/${encodeURIComponent(token)}`,
+    { ...options, reloadOnUnauthorized: false },
+  )
+}
+
+/** Unlock one guest link and establish its scoped HttpOnly session cookie. */
+export async function unlockEditorGuestLink(
+  token: string,
+  payload: { display_name?: string; password: string },
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorGuestAccessSession>(
+    `/v1/editor/share-links/${encodeURIComponent(token)}:unlock`,
+    {
+      ...options,
+      body: payload,
+      method: 'POST',
+      reloadOnUnauthorized: false,
+    },
+  )
+}
+
+/** Restore a still-valid scoped guest session without touching account auth. */
+export async function getEditorGuestSession(options: ClientOptions = {}) {
+  return requestJson<EditorGuestAccessSession>(
+    '/v1/editor/guest/session',
+    { ...options, reloadOnUnauthorized: false },
+  )
+}
+
+/** Issue or rotate the guest's link-bound collaboration lease. */
+export async function createGuestEditorCollaborationSession(
+  payload: EditorCollaborationSessionRequest & { display_name?: string },
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationSession>(
+    '/v1/editor/guest/collaboration/session',
+    {
+      ...options,
+      body: payload,
+      method: 'POST',
+      reloadOnUnauthorized: false,
+    },
+  )
+}
+
+export async function listGuestEditorCollaborationComments(
+  query: {
+    limit?: number
+    sinceRevision?: number
+    status?: 'all' | 'open' | 'resolved'
+  } = {},
+  options: ClientOptions = {},
+) {
+  const params = new URLSearchParams({
+    limit: String(query.limit ?? 50),
+    since_revision: String(query.sinceRevision ?? 0),
+    status: query.status ?? 'all',
+  })
+  return requestJson<EditorCollaborationCommentList>(
+    `/v1/editor/guest/collaboration/comments?${params.toString()}`,
+    { ...options, reloadOnUnauthorized: false },
+  )
+}
+
+export async function createGuestEditorCollaborationComment(
+  payload: EditorCollaborationCommentCreateCommand,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationCommentMutation>(
+    '/v1/editor/guest/collaboration/comments',
+    {
+      ...options,
+      body: payload,
+      method: 'POST',
+      reloadOnUnauthorized: false,
+    },
+  )
+}
+
+export async function replyToGuestEditorCollaborationComment(
+  threadId: string,
+  payload: EditorCollaborationCommentMessageCommand & { message_id: string },
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationCommentMutation>(
+    `/v1/editor/guest/collaboration/comments/${threadId}/replies`,
+    {
+      ...options,
+      body: payload,
+      method: 'POST',
+      reloadOnUnauthorized: false,
+    },
+  )
+}
+
+export async function updateGuestEditorCollaborationCommentThread(
+  threadId: string,
+  payload: EditorCollaborationCommentCommand & {
+    status: 'open' | 'resolved'
+  },
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationCommentMutation>(
+    `/v1/editor/guest/collaboration/comments/${threadId}`,
+    {
+      ...options,
+      body: payload,
+      method: 'PATCH',
+      reloadOnUnauthorized: false,
+    },
+  )
+}
+
+export async function updateGuestEditorCollaborationCommentMessage(
+  threadId: string,
+  messageId: string,
+  payload: EditorCollaborationCommentMessageCommand,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationCommentMutation>(
+    `/v1/editor/guest/collaboration/comments/${threadId}/messages/${messageId}`,
+    {
+      ...options,
+      body: payload,
+      method: 'PATCH',
+      reloadOnUnauthorized: false,
+    },
+  )
+}
+
+export async function deleteGuestEditorCollaborationCommentMessage(
+  threadId: string,
+  messageId: string,
+  payload: EditorCollaborationCommentCommand,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationCommentMutation>(
+    `/v1/editor/guest/collaboration/comments/${threadId}/messages/${messageId}`,
+    {
+      ...options,
+      body: payload,
+      method: 'DELETE',
+      reloadOnUnauthorized: false,
+    },
+  )
+}
+
+export async function markGuestEditorCollaborationCommentsRead(
+  revision: number,
+  options: ClientOptions = {},
+) {
+  return requestJson<{ last_read_revision: number }>(
+    '/v1/editor/guest/collaboration/comments/read',
+    {
+      ...options,
+      body: { revision },
+      method: 'POST',
+      reloadOnUnauthorized: false,
+    },
   )
 }
 
@@ -1108,6 +1662,107 @@ export async function listEditorCollaborationActivity(
     next_cursor: string | null
     object: 'list'
   }>(`/v1/editor/documents/${documentId}/activity${pageQuery(options)}`, options)
+}
+
+/** Incrementally load durable, document-shared discussion threads. */
+export async function listEditorCollaborationComments(
+  documentId: string,
+  query: {
+    limit?: number
+    sinceRevision?: number
+    status?: 'all' | 'open' | 'resolved'
+  } = {},
+  options: ClientOptions = {},
+) {
+  const params = new URLSearchParams({
+    limit: String(query.limit ?? 100),
+    since_revision: String(query.sinceRevision ?? 0),
+    status: query.status ?? 'all',
+  })
+  return requestJson<EditorCollaborationCommentList>(
+    `/v1/editor/documents/${documentId}/collaboration/comments?${params}`,
+    options,
+  )
+}
+
+/** Create one shared thread anchored in the current Yjs generation. */
+export async function createEditorCollaborationComment(
+  documentId: string,
+  payload: EditorCollaborationCommentCreateCommand,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationCommentMutation>(
+    `/v1/editor/documents/${documentId}/collaboration/comments`,
+    { ...options, body: payload, method: 'POST' },
+  )
+}
+
+/** Add one real-time reply to a shared thread. */
+export async function replyToEditorCollaborationComment(
+  documentId: string,
+  threadId: string,
+  payload: EditorCollaborationCommentMessageCommand & { message_id: string },
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationCommentMutation>(
+    `/v1/editor/documents/${documentId}/collaboration/comments/${threadId}/replies`,
+    { ...options, body: payload, method: 'POST' },
+  )
+}
+
+/** Edit one own shared-comment contribution. */
+export async function updateEditorCollaborationCommentMessage(
+  documentId: string,
+  threadId: string,
+  messageId: string,
+  payload: EditorCollaborationCommentMessageCommand,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationCommentMutation>(
+    `/v1/editor/documents/${documentId}/collaboration/comments/${threadId}/messages/${messageId}`,
+    { ...options, body: payload, method: 'PATCH' },
+  )
+}
+
+/** Delete one own contribution while retaining its audit tombstone. */
+export async function deleteEditorCollaborationCommentMessage(
+  documentId: string,
+  threadId: string,
+  messageId: string,
+  payload: EditorCollaborationCommentCommand,
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationCommentMutation>(
+    `/v1/editor/documents/${documentId}/collaboration/comments/${threadId}/messages/${messageId}`,
+    { ...options, body: payload, method: 'DELETE' },
+  )
+}
+
+/** Resolve or reopen one shared discussion. */
+export async function updateEditorCollaborationCommentThread(
+  documentId: string,
+  threadId: string,
+  payload: EditorCollaborationCommentCommand & {
+    status: 'open' | 'resolved'
+  },
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorCollaborationCommentMutation>(
+    `/v1/editor/documents/${documentId}/collaboration/comments/${threadId}`,
+    { ...options, body: payload, method: 'PATCH' },
+  )
+}
+
+/** Persist the personal document-scoped comment read coordinate. */
+export async function markEditorCollaborationCommentsRead(
+  documentId: string,
+  payload: { generation: number; revision: number },
+  options: ClientOptions = {},
+) {
+  return requestJson<{ last_read_revision: number }>(
+    `/v1/editor/documents/${documentId}/collaboration/comments/read`,
+    { ...options, body: payload, method: 'POST' },
+  )
 }
 
 /** Drain durable updates and publish the canonical markdown projection. */
@@ -1211,6 +1866,35 @@ export async function deleteEditorComment(
   )
 }
 
+/** Create or revise one unpublished suggestion visible only to its comment creator. */
+export async function saveEditorCommentSuggestionDraft(
+  documentId: string,
+  commentId: string,
+  payload: {
+    draft: EditorSuggestionDraftCreateWire | EditorSuggestionDraftRevisionRequestWire
+    expected_revision: number
+  },
+  options: ClientOptions = {},
+) {
+  return requestJson<{ suggestion_draft: EditorPrivateSuggestionDraftWire }>(
+    `/v1/editor/documents/${documentId}/comments/${commentId}/suggestion-draft`,
+    { ...options, body: payload, method: 'PUT' },
+  )
+}
+
+/** Discard one creator-private draft only when both revision and patch match. */
+export async function deleteEditorCommentSuggestionDraft(
+  documentId: string,
+  commentId: string,
+  payload: { expected_revision: number; patch_id: string },
+  options: ClientOptions = {},
+) {
+  await request(
+    `/v1/editor/documents/${documentId}/comments/${commentId}/suggestion-draft`,
+    { ...options, body: payload, method: 'DELETE' },
+  )
+}
+
 /** All of the caller's editor folders (newest first). */
 export async function listEditorFolders(options: ClientOptions = {}) {
   const payload = await requestJson<{ data: ServerEditorFolder[] }>(
@@ -1257,6 +1941,7 @@ export type ServerAssetSection = {
   id: string
   kind: string
   title: string
+  semantic_role: 'temporary' | 'library' | 'project_sources' | 'custom' | null
   created_at: number
   updated_at: number
 }
@@ -1270,8 +1955,8 @@ export type ServerAssetGroup = {
   updated_at: number
 }
 
-/** One file-asset record as the server stores it. ``extracted_text`` is the
- * heavy body — present on getAsset, ABSENT on the list (metadata only). */
+/** One file-asset record as the server stores it. Heavy editable and canonical
+ * prepared bodies are present on getAsset and absent on list metadata rows. */
 export type ServerAsset = {
   id: string
   section_id: string
@@ -1289,7 +1974,26 @@ export type ServerAsset = {
   server_file_id: string | null
   // Optional on the wire: a server predating the provenance field omits it.
   parser_id?: string | null
+  prepared_parser_id?: string | null
+  prepared_content_hash?: string | null
+  prepared_at?: number | null
+  lifecycle_status?: 'active' | 'deleting' | 'delete_failed'
+  deletion_operation_id?: string | null
+  deletion_stage?: string | null
+  deletion_error?: string | null
+  upload_status?:
+    | 'awaiting_upload'
+    | 'uploading'
+    | 'retrying'
+    | 'parsing'
+    | 'finalizing'
+    | 'ready'
+    | 'failed'
+    | 'cancelled'
+  upload_error?: string | null
+  upload_operation_id?: string | null
   extracted_text?: string
+  prepared_text?: string
   created_at: number
   updated_at: number
 }
@@ -1299,6 +2003,15 @@ export async function listAssetSections(options: ClientOptions = {}) {
   const payload = await requestJson<{ data: ServerAssetSection[] }>(
     '/v1/assets/sections',
     options,
+  )
+  return payload.data
+}
+
+/** Converge concurrent first-load clients on the scope's prepared sections. */
+export async function ensureDefaultAssetSections(options: ClientOptions = {}) {
+  const payload = await requestJson<{ data: ServerAssetSection[] }>(
+    '/v1/assets/default-sections',
+    { ...options, method: 'PUT' },
   )
   return payload.data
 }
@@ -1316,9 +2029,50 @@ export async function saveAssetSection(
   })
 }
 
-/** Delete one section (cascades its groups + assets server-side). */
+export type ServerDeletionOperation = {
+  operation_id: string
+  target_kind:
+    | 'asset'
+    | 'bulk'
+    | 'group'
+    | 'section'
+    | 'vector_index'
+    | 'knowledge_collection'
+    | 'knowledge_document'
+    | 'agent_session'
+    | 'knowledge_session'
+  target_id: string
+  asset_ids: string[]
+  status: 'queued' | 'running' | 'delete_failed' | 'deleted'
+  stage:
+    | 'queued'
+    | 'vector_index_detached'
+    | 'indexing_cancelled'
+    | 'search_detached'
+    | 'vectors_removed'
+    | 'knowledge_removed'
+    | 'blobs_removed'
+    | 'metadata_removed'
+    | 'session_data_removed'
+    | 'residuals_verified'
+    | 'delete_failed'
+    | 'deleted'
+  completed_items: number
+  total_items: number
+  attempt: number
+  created_at: number
+  started_at: number | null
+  finished_at: number | null
+  error: { message: string; type: string } | null
+  retryable: boolean
+}
+
+/** Start the server-owned cleanup of a section and all contained assets. */
 export async function deleteAssetSection(sectionId: string, options: ClientOptions = {}) {
-  await request(`/v1/assets/sections/${sectionId}`, { ...options, method: 'DELETE' })
+  return requestJson<ServerDeletionOperation>(`/v1/assets/sections/${sectionId}`, {
+    ...options,
+    method: 'DELETE',
+  })
 }
 
 /** All of the caller's file-library groups. */
@@ -1345,7 +2099,10 @@ export async function saveAssetGroup(
 
 /** Delete one group (its assets orphan to ungrouped server-side). */
 export async function deleteAssetGroup(groupId: string, options: ClientOptions = {}) {
-  await request(`/v1/assets/groups/${groupId}`, { ...options, method: 'DELETE' })
+  return requestJson<ServerDeletionOperation>(`/v1/assets/groups/${groupId}`, {
+    ...options,
+    method: 'DELETE',
+  })
 }
 
 /** One keyset page of the caller's assets (newest first, METADATA only). */
@@ -1392,9 +2149,56 @@ export async function saveAsset(
   })
 }
 
-/** Delete one asset (owner-only; idempotent). */
+/** Start one idempotent aggregate asset deletion. */
 export async function deleteAsset(assetId: string, options: ClientOptions = {}) {
-  await request(`/v1/assets/${assetId}`, { ...options, method: 'DELETE' })
+  return requestJson<ServerDeletionOperation>(`/v1/assets/${assetId}`, {
+    ...options,
+    method: 'DELETE',
+  })
+}
+
+/** Start one aggregate deletion for a stable set of assets. */
+export async function deleteAssets(assetIds: readonly string[], options: ClientOptions = {}) {
+  return requestJson<ServerDeletionOperation>('/v1/assets/deletion-operations', {
+    ...options,
+    body: { asset_ids: assetIds },
+    method: 'POST',
+  })
+}
+
+/**
+ * Read retained aggregate-deletion checkpoints for the current principal and
+ * workspace. The feed includes active/failed operations and retained deleted
+ * receipts: asset-list hydration alone cannot reveal an already removed row,
+ * and empty-section operations have no child asset from which to resume.
+ */
+export async function listAssetDeletionOperations(options: PageOptions = {}) {
+  return requestJson<{ data: ServerDeletionOperation[]; next_cursor: string | null }>(
+    `/v1/assets/deletion-operations${pageQuery(options)}`,
+    options,
+  )
+}
+
+/** Read the authoritative checkpoint of a deletion operation. */
+export async function getAssetDeletionOperation(
+  operationId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerDeletionOperation>(
+    `/v1/deletion-operations/${operationId}`,
+    options,
+  )
+}
+
+/** Retry the same failed operation and manifest; no replacement id is made. */
+export async function retryAssetDeletionOperation(
+  operationId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<ServerDeletionOperation>(
+    `/v1/deletion-operations/${operationId}/retry`,
+    { ...options, method: 'POST' },
+  )
 }
 
 // -- vector-index records (M6c) ---------------------------------------------
@@ -1476,9 +2280,22 @@ export async function saveVectorIndex(
   })
 }
 
-/** Delete one vector index and its members + history (owner-only; idempotent). */
-export async function deleteVectorIndex(indexId: string, options: ClientOptions = {}) {
-  await request(`/v1/vector-indexes/${indexId}`, { ...options, method: 'DELETE' })
+/** Delete one vector index and its complete server aggregate (owner-only;
+ * idempotent). A client-retained collection id lets the server recover a
+ * binding whose preceding terminal autosave was interrupted; the server
+ * re-authorizes that collection before including it in the durable operation. */
+export async function deleteVectorIndex(
+  indexId: string,
+  options: ClientOptions = {},
+  serverCollectionId?: string | null,
+) {
+  return requestJson<ServerDeletionOperation>(`/v1/vector-indexes/${indexId}`, {
+    ...options,
+    ...(serverCollectionId
+      ? { body: { server_collection_id: serverCollectionId } }
+      : {}),
+    method: 'DELETE',
+  })
 }
 
 // -- account preferences (M6c) ----------------------------------------------
@@ -1489,7 +2306,12 @@ export async function deleteVectorIndex(indexId: string, options: ClientOptions 
 // to null so the caller keeps its own default (the defaults are a frontend
 // SSOT, never fabricated server-side).
 
-/** Account preferences as the server stores them. */
+/** Account preferences as the server stores them.
+ *
+ * Fields added after the first release are OPTIONAL here on purpose: a row
+ * written by an older server has no such key, and the reader falls back per
+ * field rather than failing. The write side ({@link AccountPreferencesPayload})
+ * is deliberately strict instead — see there. */
 export type ServerAccountPreferences = {
   contrast_mode: string
   locale: string
@@ -1497,6 +2319,25 @@ export type ServerAccountPreferences = {
   theme_preset: string
   user_bubble_tone?: string
   enable_agent_memory?: boolean
+  chat_model_tier?: string
+  agent_model_tier?: string
+  updated_at: number
+}
+
+/** What a save must send — every field, always.
+ *
+ * The endpoint knows no PATCH: it replaces the whole row, so an omitted field
+ * is reset to its server-side default. Making every field required is what
+ * turns that silent reset into a compile error. */
+export type AccountPreferencesPayload = {
+  contrast_mode: string
+  locale: string
+  theme: string
+  theme_preset: string
+  user_bubble_tone: string
+  enable_agent_memory: boolean
+  chat_model_tier: string
+  agent_model_tier: string
   updated_at: number
 }
 
@@ -1514,15 +2355,7 @@ export async function getAccountPreferences(
 
 /** Create or idempotently update the caller's account preferences. */
 export async function saveAccountPreferences(
-  payload: {
-    contrast_mode: string
-    locale: string
-    theme: string
-    theme_preset: string
-    user_bubble_tone: string
-    enable_agent_memory: boolean
-    updated_at: number
-  },
+  payload: AccountPreferencesPayload,
   options: ClientOptions = {},
 ) {
   return requestJson<ServerAccountPreferences>('/v1/account/preferences', {
@@ -1600,6 +2433,128 @@ export async function updateShare(
     method: 'PATCH',
   })
   return payload.data
+}
+
+/** Owner-only HTTPS guest links for one collaboration document. */
+export async function listEditorShareLinks(
+  documentId: string,
+  options: ClientOptions = {},
+) {
+  const payload = await requestJson<{ data: EditorShareLink[] }>(
+    `/v1/editor/documents/${encodeURIComponent(documentId)}/share-links`,
+    options,
+  )
+  return payload.data
+}
+
+export async function createEditorShareLink(
+  documentId: string,
+  requestBody: {
+    commandId: string
+    generation: number
+    permission: EditorShareLinkPermission
+    ttlSeconds: number
+  },
+  options: ClientOptions = {},
+) {
+  const payload = await requestJson<{ data: CreatedEditorShareLink }>(
+    `/v1/editor/documents/${encodeURIComponent(documentId)}/share-links`,
+    {
+      ...options,
+      body: {
+        command_id: requestBody.commandId,
+        generation: requestBody.generation,
+        permission: requestBody.permission,
+        ttl_seconds: requestBody.ttlSeconds,
+      },
+      method: 'POST',
+    },
+  )
+  return payload.data
+}
+
+export async function updateEditorShareLink(
+  documentId: string,
+  linkId: string,
+  requestBody: {
+    commandId: string
+    expectedRevision: number
+    permission?: EditorShareLinkPermission
+    ttlSeconds?: number
+  },
+  options: ClientOptions = {},
+) {
+  const payload = await requestJson<{ data: EditorShareLink }>(
+    `/v1/editor/documents/${encodeURIComponent(documentId)}/share-links/${encodeURIComponent(linkId)}`,
+    {
+      ...options,
+      body: {
+        command_id: requestBody.commandId,
+        expected_revision: requestBody.expectedRevision,
+        ...(requestBody.permission
+          ? { permission: requestBody.permission }
+          : {}),
+        ...(requestBody.ttlSeconds
+          ? { ttl_seconds: requestBody.ttlSeconds }
+          : {}),
+      },
+      method: 'PATCH',
+    },
+  )
+  return payload.data
+}
+
+export async function revokeEditorShareLink(
+  documentId: string,
+  linkId: string,
+  requestBody: { commandId: string; expectedRevision: number },
+  options: ClientOptions = {},
+) {
+  const payload = await requestJson<{ data: EditorShareLink }>(
+    `/v1/editor/documents/${encodeURIComponent(documentId)}/share-links/${encodeURIComponent(linkId)}`,
+    {
+      ...options,
+      body: {
+        command_id: requestBody.commandId,
+        expected_revision: requestBody.expectedRevision,
+      },
+      method: 'DELETE',
+    },
+  )
+  return payload.data
+}
+
+export async function rotateEditorShareLinkPassword(
+  documentId: string,
+  linkId: string,
+  requestBody: { commandId: string; expectedRevision: number },
+  options: ClientOptions = {},
+) {
+  const payload = await requestJson<{
+    data: EditorShareLink & { password: string }
+  }>(
+    `/v1/editor/documents/${encodeURIComponent(documentId)}/share-links/${encodeURIComponent(linkId)}:rotate-password`,
+    {
+      ...options,
+      body: {
+        command_id: requestBody.commandId,
+        expected_revision: requestBody.expectedRevision,
+      },
+      method: 'POST',
+    },
+  )
+  return payload.data
+}
+
+export async function getEditorAccessSummary(
+  documentId: string,
+  window: '7d' | '30d',
+  options: ClientOptions = {},
+) {
+  return requestJson<EditorAccessSummary>(
+    `/v1/editor/documents/${encodeURIComponent(documentId)}/access-summary?window=${window}`,
+    options,
+  )
 }
 
 /** The caller's incoming shares, split into pending (consent queue) and
@@ -1736,10 +2691,26 @@ export type KnowledgeChunkDetail = {
   chunk_id: string
   document_id: string
   chunk_index: number
-  text: string
-  source_text: string
+  /** Canonical document text only; retrieval scaffolding is never exposed. */
+  excerpt: string
   page_number: number | null
-  neighbors?: { chunk_index: number; text: string }[]
+  source_span: {
+    start: number
+    end: number
+    offset_unit: 'utf8_byte'
+    document_content_hash: string
+  }
+  revision_id: string | null
+  generation_id: string | null
+  provenance_status: 'verified_span'
+  neighbors?: {
+    chunk_index: number
+    excerpt: string
+    source_span: KnowledgeChunkDetail['source_span']
+    revision_id: string | null
+    generation_id: string | null
+    provenance_status: 'verified_span'
+  }[]
 }
 
 export async function getKnowledgeChunk(
@@ -1988,10 +2959,12 @@ export async function deleteAgentSession(
   sessionId: string,
   options: ClientOptions = {},
 ) {
-  await request(`/v1/agent-sessions/${sessionId}`, {
+  const response = await request(`/v1/agent-sessions/${sessionId}`, {
     ...options,
     method: 'DELETE',
   })
+  if (response.status === 204) return null
+  return (await response.json()) as ServerDeletionOperation
 }
 
 export async function listAgentSessionGroups(options: ClientOptions = {}) {
@@ -2543,12 +3516,68 @@ export async function startIndexingJob(
   )
 }
 
+export async function startDocumentRevisionJob(
+  collectionId: string,
+  request: {
+    assetId?: string
+    metadata?: Record<string, unknown>
+    text?: string
+    title: string
+  },
+  options: ClientOptions = {},
+) {
+  return requestJson<IndexingJobSummary>(
+    `/v1/knowledge/collections/${collectionId}/document-revisions`,
+    {
+      ...options,
+      method: 'POST',
+      body: {
+        asset_id: request.assetId,
+        metadata: request.metadata,
+        text: request.text,
+        title: request.title,
+        workspace_id: options.workspaceId,
+      },
+    },
+  )
+}
+
+export async function getIndexingJob(
+  jobId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<IndexingJobSummary>(
+    `/v1/knowledge/indexing-jobs/${jobId}`,
+    options,
+  )
+}
+
 export async function cancelIndexingJob(
   jobId: string,
   options: ClientOptions = {},
 ) {
   return requestJson<IndexingJobSummary>(
     `/v1/knowledge/indexing-jobs/${jobId}/cancel`,
+    { ...options, method: 'POST' },
+  )
+}
+
+export async function resumeIndexingJob(
+  jobId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<IndexingJobSummary>(
+    `/v1/knowledge/indexing-jobs/${jobId}/resume`,
+    { ...options, method: 'POST' },
+  )
+}
+
+export async function resumeIndexingJobWithoutContext(
+  jobId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<IndexingJobSummary>(
+    `/v1/knowledge/indexing-jobs/${jobId}/resume-raw`,
     { ...options, method: 'POST' },
   )
 }
@@ -2580,48 +3609,134 @@ async function requestJson<T>(path: string, options: RequestJsonOptions = {}) {
 
 async function request(path: string, options: RequestJsonOptions = {}) {
   const method = options.method ?? 'GET'
-  const headers = new Headers()
-  if (options.body !== undefined) {
-    headers.set('Content-Type', 'application/json')
-  }
-  if (options.apiKey) {
-    headers.set('Authorization', `Bearer ${options.apiKey}`)
-  }
-  if (options.workspaceId) {
-    headers.set('X-Inqtrix-Workspace-Id', options.workspaceId)
-  }
-  if (options.lastEventId) {
-    headers.set('Last-Event-ID', options.lastEventId)
-  }
-  attachExpectedUserIdentity(headers)
-  attachCsrfHeader(headers, method)
+  const serializedBody = options.body === undefined
+    ? undefined
+    : JSON.stringify(options.body)
 
-  const response = await fetch(resolveUrl(path, options.baseUrl), {
-    method,
-    headers,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    signal: options.signal,
-    credentials: 'include',
+  const send = async (csrfRetryAttempted: boolean): Promise<Response> => {
+    const headers = new Headers()
+    if (serializedBody !== undefined) {
+      headers.set('Content-Type', 'application/json')
+    }
+    if (options.apiKey) {
+      headers.set('Authorization', `Bearer ${options.apiKey}`)
+    }
+    if (options.workspaceId) {
+      headers.set('X-Inqtrix-Workspace-Id', options.workspaceId)
+    }
+    if (options.lastEventId) {
+      headers.set('Last-Event-ID', options.lastEventId)
+    }
+    attachExpectedUserIdentity(headers)
+    attachCsrfHeader(headers, method)
+
+    const response = await fetch(resolveUrl(path, options.baseUrl), {
+      method,
+      headers,
+      body: serializedBody,
+      signal: options.signal,
+      credentials: 'include',
+    })
+
+    if (response.ok) return response
+    const error = await requestError(response)
+    if (canRecoverCsrf({
+      csrfRetryAttempted,
+      error,
+      method,
+      options,
+      path,
+    })) {
+      await refreshSessionCsrf(options)
+      return send(true)
+    }
+    throwParsedRequestError(
+      error,
+      response.status,
+      options.reloadOnUnauthorized !== false,
+    )
+  }
+
+  return send(false)
+}
+
+function canRecoverCsrf({
+  csrfRetryAttempted,
+  error,
+  method,
+  options,
+  path,
+}: {
+  csrfRetryAttempted: boolean
+  error: InqtrixRequestError
+  method: string
+  options: ClientOptions
+  path: string
+}): boolean {
+  if (csrfRetryAttempted || error.status !== 403 || error.name !== 'csrf_error') {
+    return false
+  }
+  if (method === 'GET' || method === 'HEAD' || options.apiKey) return false
+  // Guest double-submit tokens and login/setup endpoints have different
+  // authorities. A session bootstrap must never be used to retry them.
+  if (path.startsWith('/v1/editor/guest/')) return false
+  return !path.startsWith('/api/auth/login')
+    && !path.startsWith('/api/setup/')
+    && path !== '/api/auth/session'
+}
+
+/** One process-wide recovery flight. It intentionally has no caller AbortSignal:
+ * one cancelled mutation must not abort the cookie repair awaited by other
+ * requests. The original request keeps its own signal for the retry. */
+async function refreshSessionCsrf(options: ClientOptions): Promise<void> {
+  if (csrfRefreshInFlight) return csrfRefreshInFlight
+  csrfRefreshInFlight = (async () => {
+    const headers = new Headers()
+    if (options.workspaceId) {
+      headers.set('X-Inqtrix-Workspace-Id', options.workspaceId)
+    }
+    attachExpectedUserIdentity(headers)
+    const response = await fetch(resolveUrl('/api/auth/session', options.baseUrl), {
+      credentials: 'include',
+      headers,
+      method: 'GET',
+    })
+    if (!response.ok) {
+      await throwRequestError(response, false)
+    }
+    const session = await response.json() as AuthSessionInfo
+    adoptSessionCsrfToken(session)
+    if (!session.authenticated) {
+      const error = new Error('The authenticated session is no longer available.') as InqtrixRequestError
+      error.name = 'authentication_error'
+      error.status = 401
+      throw error
+    }
+  })().finally(() => {
+    csrfRefreshInFlight = null
   })
-
-  if (!response.ok) {
-    await throwRequestError(response)
-  }
-
-  return response
+  return csrfRefreshInFlight
 }
 
 /**
  * Attach the OIDC double-submit CSRF token on unsafe methods. The
- * token lives in a non-HttpOnly cookie BY DESIGN (OWASP signed
- * double-submit): reading it here means no call site has to thread a
- * token around — sessions stay entirely cookie-driven. No cookie
- * means no OIDC session (apikey/none modes), and nothing is sent.
+ * authoritative token is adopted from the no-store session bootstrap and
+ * kept only in this page's process memory. The readable cookie remains the
+ * pre-bootstrap fallback required by OWASP signed double-submit. No
+ * bootstrap token or cookie means no OIDC session (apikey/none modes), and
+ * nothing is sent.
  */
 function attachCsrfHeader(headers: Headers, method: string) {
   if (method === 'GET' || method === 'HEAD') return
-  const token = readCsrfCookie()
+  const token = sessionCsrfToken ?? readCsrfCookie()
   if (token) headers.set('X-CSRF-Token', token)
+  const guestToken = readCookie('inqtrix_editor_guest_csrf')
+  if (guestToken) headers.set('X-Inqtrix-Guest-CSRF', guestToken)
+}
+
+function adoptSessionCsrfToken(session: AuthSessionInfo) {
+  const token = session.authenticated ? session.csrf_token?.trim() : null
+  sessionCsrfToken = token || null
 }
 
 function attachExpectedUserIdentity(headers: Headers) {
@@ -2639,6 +3754,14 @@ function readCsrfCookie(): string | null {
     if (match) return decodeURIComponent(match.slice(name.length + 1))
   }
   return null
+}
+
+function readCookie(name: string): string | null {
+  if (typeof document === 'undefined') return null
+  const match = document.cookie
+    .split('; ')
+    .find((entry) => entry.startsWith(`${name}=`))
+  return match ? decodeURIComponent(match.slice(name.length + 1)) : null
 }
 
 type AuthSessionBase = {
@@ -2675,16 +3798,20 @@ export type AuthSessionInfo = AuthSessionBase & (
  * adopted value.
  */
 export async function fetchAuthSession(options: ClientOptions = {}) {
-  return requestJson<AuthSessionInfo>('/api/auth/session', options)
+  const session = await requestJson<AuthSessionInfo>('/api/auth/session', options)
+  adoptSessionCsrfToken(session)
+  return session
 }
 
-/** Destroy the server-side OIDC session (CSRF token read from cookie). */
+/** Destroy the server-side OIDC session using the bootstrap/cookie CSRF token. */
 export async function logoutSession(options: ClientOptions = {}) {
-  return requestJson<{ logged_out: boolean }>('/api/auth/logout', {
+  const result = await requestJson<{ logged_out: boolean }>('/api/auth/logout', {
     ...options,
     body: {},
     method: 'POST',
   })
+  sessionCsrfToken = null
+  return result
 }
 
 /**
@@ -2728,7 +3855,7 @@ export async function fetchAuthConfig(options: ClientOptions = {}) {
 }
 
 // --- Native local / LDAP auth + first-run owner setup --------------------
-// All cookie-driven (the BFF session machinery, ADR-AUTH-3): no token is
+// All cookie-driven through the BFF session machinery: no token is
 // threaded by the caller and CSRF rides the cookie on unsafe methods.
 
 /** Create the first owner exactly once; the server logs them straight in. */
@@ -2825,11 +3952,125 @@ export type AdminSystemRuntime = {
     backend: string
     durable: boolean
   }
+  observability: {
+    tracing: string
+    tracing_active: boolean
+    content_capture: boolean
+    sample_rate: number
+    spool: boolean
+    retention_days: number | null
+    ui_link_configured: boolean
+  }
 }
 
 /** Sanitized runtime categories for the instance-admin System panel. */
 export async function fetchAdminSystemRuntime(options: ClientOptions = {}) {
   return requestJson<AdminSystemRuntime>('/v1/admin/system/runtime', options)
+}
+
+/** One row of the instance audit trail (OCSF-oriented read model). */
+export type AdminAuditEvent = {
+  id: number
+  occurred_at: number
+  action: string
+  resource_type: string
+  resource_id: string
+  actor_pseudonym: string | null
+  actor_type: string
+  outcome: 'success' | 'failure' | 'denied'
+  workspace_id: string | null
+  detail: Record<string, unknown>
+  origin: Record<string, string>
+  correlation: Record<string, string>
+}
+
+export type AdminAuditFilters = {
+  /** Action prefix, e.g. "run." or "auth.login_failed". */
+  action?: string
+  /** Stable actor pseudonym (usr_<hex16>). */
+  actor?: string
+  outcome?: 'success' | 'failure' | 'denied'
+  /** Inclusive lower bound, epoch seconds (matches occurred_at). */
+  from?: number
+  /** Exclusive upper bound, epoch seconds. */
+  to?: number
+  cursor?: string
+  limit?: number
+}
+
+function adminAuditQuery(filters: AdminAuditFilters): string {
+  const params = new URLSearchParams()
+  if (filters.action) params.set('action', filters.action)
+  if (filters.actor) params.set('actor', filters.actor)
+  if (filters.outcome) params.set('outcome', filters.outcome)
+  if (filters.from !== undefined) params.set('from', String(filters.from))
+  if (filters.to !== undefined) params.set('to', String(filters.to))
+  if (filters.cursor) params.set('cursor', filters.cursor)
+  if (filters.limit) params.set('limit', String(filters.limit))
+  const query = params.toString()
+  return query ? `?${query}` : ''
+}
+
+/** Newest-first audit page (cursor = opaque id keyset). */
+export async function listAdminAuditEvents(
+  filters: AdminAuditFilters = {},
+  options: ClientOptions = {},
+) {
+  return requestJson<{
+    object: 'list'
+    data: AdminAuditEvent[]
+    next_cursor: string | null
+  }>(`/v1/admin/audit${adminAuditQuery(filters)}`, options)
+}
+
+/** Durable step events of one run for the admin drawer. */
+export async function listAdminRunEvents(
+  runId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<{
+    object: 'list'
+    data: Array<{
+      type: string
+      run_id: string
+      sequence: number
+      created_at: number
+      data: Record<string, unknown>
+    }>
+  }>(`/v1/admin/runs/${encodeURIComponent(runId)}/events`, options)
+}
+
+/** Full trace document of one run (Langfuse or spool source). */
+export async function fetchAdminRunTraceExport(
+  runId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<{
+    run_id: string
+    trace_id: string
+    source: 'langfuse' | 'spool'
+    payload: Record<string, unknown>
+    html_path?: string
+    ui_url?: string
+  }>(`/v1/admin/runs/${encodeURIComponent(runId)}/trace/export`, options)
+}
+
+/** Browser URL for the streamed audit export (NDJSON/CSV download).
+
+ * Resolved against the configured API base: in split-origin setups
+ * (desk served separately from the API) a relative URL would hit the
+ * FRONTEND origin and 404. */
+export function adminAuditExportUrl(
+  format: 'ndjson' | 'csv',
+  filters: AdminAuditFilters = {},
+  baseUrl?: string,
+): string {
+  const query = adminAuditQuery({ ...filters, cursor: undefined })
+  const separator = query ? '&' : '?'
+  return resolveUrl(
+    `/v1/admin/audit/export${query}${separator}format=${format}`,
+    baseUrl,
+  )
 }
 
 /** One row of the instance user list. */
@@ -3066,8 +4307,14 @@ export async function revokeAccessToken(
 async function requestError(response: Response) {
   const fallbackMessage = `Inqtrix request failed with HTTP ${response.status}.`
   try {
-    const payload = await response.json() as { error?: InqtrixError }
-    const error = payload.error
+    const payload = await response.json() as {
+      detail?: { error?: InqtrixError }
+      error?: InqtrixError
+    }
+    // Application errors use the top-level shape; FastAPI dependency
+    // failures (including the session CSRF guard) wrap the same typed error
+    // under `detail`. Normalize both before any recovery decision.
+    const error = payload.error ?? payload.detail?.error
     if (error?.message) {
       const enrichedError = new Error(error.message) as InqtrixRequestError
       enrichedError.name = error.type || 'InqtrixRequestError'
@@ -3083,11 +4330,26 @@ async function requestError(response: Response) {
   return fallbackError
 }
 
-async function throwRequestError(response: Response): Promise<never> {
+async function throwRequestError(
+  response: Response,
+  reloadOnUnauthorized = true,
+): Promise<never> {
   const error = await requestError(response)
+  return throwParsedRequestError(error, response.status, reloadOnUnauthorized)
+}
+
+function throwParsedRequestError(
+  error: InqtrixRequestError,
+  status: number,
+  reloadOnUnauthorized = true,
+): never {
   if (
     (error.name === 'principal_changed'
-      || (response.status === 401 && expectedUserIdentity !== null))
+      || (
+        reloadOnUnauthorized
+        && status === 401
+        && expectedUserIdentity !== null
+      ))
     && typeof window !== 'undefined'
     && typeof window.location?.reload === 'function'
   ) {

@@ -142,7 +142,9 @@ Docker Compose runs the complete self-hosted stack in three steps: web UI, API, 
 
 ### Step 1: What you need
 
-Inqtrix is provider-neutral: you bring your own accounts and keys, and each key in `deploy/.env.stack` has a specific job. You can't just start it empty.
+Inqtrix is provider-neutral: you bring your own accounts and keys, and each
+entry in the paired stack configuration has a specific job. You cannot start
+it empty.
 
 | You need (one per row) | What it's for |
 |---|---|
@@ -158,39 +160,54 @@ Want a knowledge base (RAG) over your own documents too? Then you also need an *
 ```bash
 git clone https://github.com/BZandi/inqtrix.git && cd inqtrix
 cp deploy/.env.stack.example deploy/.env.stack
+cp deploy/.env.stack.secrets.example deploy/.env.stack.secrets
+chmod 0600 deploy/.env.stack.secrets
 ```
 
-Open `deploy/.env.stack` and paste in **one** provider block below, replacing the placeholders with your keys. Each block is complete and Docker-ready: secrets, the Postgres connection, native login, and the provider settings including the model tiers, so you never have to hunt through the file.
+`deploy/.env.stack` is the transparent, non-secret configuration: the complete
+database URL, hosts, ports, profiles, providers, and model choices remain
+visible there. `deploy/.env.stack.secrets` contains the values that must not be
+committed. The visible DSN in the config references
+`${INQTRIX_PG_PASSWORD}`; no helper script assembles or materializes it.
+
+Set these independent values in `deploy/.env.stack.secrets` first:
+
+```dotenv
+INQTRIX_PG_PASSWORD=replace-with-url-safe-random-value
+INQTRIX_SESSION_SECRET=replace-with-independent-random-value
+INQTRIX_PAT_PEPPER=replace-with-another-independent-random-value
+```
+
+Then choose one LLM and one search provider below. Put each **Configuration**
+block in `deploy/.env.stack` and each **Credentials** block in
+`deploy/.env.stack.secrets`; replace the existing provider assignments in the
+copied config instead of appending duplicate keys. Uncomment only the selected
+credential lines and leave every unused provider credential commented. The
+preflight rejects duplicate keys in either file. Complete provider combinations
+and workload identity alternatives remain in
+[Provider recipes](docs/getting-started/provider-recipes.md).
 
 <details>
 <summary><b>Anthropic + Perplexity</b> <sub>(simplest cloud setup)</sub></summary>
 
-```dotenv
-# --- Core: secrets + Postgres + native login ---
-INQTRIX_PG_PASSWORD=change-me-strong-db-password
-# host is the `postgres` compose service (not localhost); the password must match the line above
-INQTRIX_DATABASE_URL=postgresql+asyncpg://inqtrix:change-me-strong-db-password@postgres:5432/inqtrix
-INQTRIX_STORAGE_BACKEND=postgres
-INQTRIX_AUTH_MODE=local
-INQTRIX_SESSION_SECRET=change-me-random-string   # signs browser login sessions
-INQTRIX_PAT_PEPPER=change-me-random-string       # hashes personal access tokens
+Configuration:
 
-# --- LLM = the reasoning (planning, summarising, claim extraction, answer writing) ---
+```dotenv
 INQTRIX_LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
 REASONING_MODEL=claude-opus-4-8
-# Model tiers: high = answer synthesis, mid = planning + evaluation, fast = classify + claim extraction
 TIER_HIGH_MODEL=claude-opus-4-8
 TIER_MID_MODEL=claude-sonnet-4-6
 TIER_FAST_MODEL=claude-haiku-4-5
 TIER_HIGH_EFFORT=medium
-
-# --- Web search = the actual web search each round runs ---
 INQTRIX_SEARCH_PROVIDER=perplexity
-PERPLEXITY_API_KEY=pplx-...
-
-# --- Models offered in the in-app model picker (optional) ---
 INQTRIX_SELECTABLE_CHAT_MODELS=claude-opus-4-8,claude-sonnet-4-6,claude-haiku-4-5
+```
+
+Credentials:
+
+```dotenv
+ANTHROPIC_API_KEY=sk-ant-...
+PERPLEXITY_API_KEY=pplx-...
 ```
 
 </details>
@@ -198,28 +215,22 @@ INQTRIX_SELECTABLE_CHAT_MODELS=claude-opus-4-8,claude-sonnet-4-6,claude-haiku-4-
 <details>
 <summary><b>OpenAI / OpenAI-compatible gateway (LiteLLM) + Perplexity</b></summary>
 
+Configuration:
+
 ```dotenv
-# --- Core: secrets + Postgres + native login ---
-INQTRIX_PG_PASSWORD=change-me-strong-db-password
-INQTRIX_DATABASE_URL=postgresql+asyncpg://inqtrix:change-me-strong-db-password@postgres:5432/inqtrix
-INQTRIX_STORAGE_BACKEND=postgres
-INQTRIX_AUTH_MODE=local
-INQTRIX_SESSION_SECRET=change-me-random-string
-INQTRIX_PAT_PEPPER=change-me-random-string
-
-# --- LLM via any OpenAI-compatible endpoint (OpenAI, OpenRouter, vLLM, Ollama, a LiteLLM proxy) ---
 INQTRIX_LLM_PROVIDER=litellm
-# point at any OpenAI-compatible base URL; for a proxy on your host use http://host.docker.internal:4000/v1
 LITELLM_BASE_URL=https://api.openai.com/v1
-LITELLM_API_KEY=sk-...
 REASONING_MODEL=gpt-4o
-
-# --- Web search ---
 INQTRIX_SEARCH_PROVIDER=perplexity
-PERPLEXITY_API_KEY=pplx-...
 SEARCH_MODEL=perplexity-sonar-pro-agent
-
 INQTRIX_SELECTABLE_CHAT_MODELS=gpt-4o,gpt-4o-mini
+```
+
+Credentials:
+
+```dotenv
+LITELLM_API_KEY=sk-...
+PERPLEXITY_API_KEY=pplx-...
 ```
 
 </details>
@@ -227,29 +238,23 @@ INQTRIX_SELECTABLE_CHAT_MODELS=gpt-4o,gpt-4o-mini
 <details>
 <summary><b>Azure OpenAI + Perplexity</b></summary>
 
-```dotenv
-# --- Core: secrets + Postgres + native login ---
-INQTRIX_PG_PASSWORD=change-me-strong-db-password
-INQTRIX_DATABASE_URL=postgresql+asyncpg://inqtrix:change-me-strong-db-password@postgres:5432/inqtrix
-INQTRIX_STORAGE_BACKEND=postgres
-INQTRIX_AUTH_MODE=local
-INQTRIX_SESSION_SECRET=change-me-random-string
-INQTRIX_PAT_PEPPER=change-me-random-string
+Configuration:
 
-# --- LLM on Azure OpenAI. Model names are DEPLOYMENT names, not model ids ---
+```dotenv
 INQTRIX_LLM_PROVIDER=azure
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-# authenticate with a key OR a Service Principal (AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET)
-AZURE_OPENAI_API_KEY=...
 REASONING_MODEL=gpt-5.4
 TIER_HIGH_MODEL=gpt-5.4
 TIER_FAST_MODEL=gpt-5.4-mini
-
-# --- Web search ---
 INQTRIX_SEARCH_PROVIDER=perplexity
-PERPLEXITY_API_KEY=pplx-...
-
 INQTRIX_SELECTABLE_CHAT_MODELS=gpt-5.4,gpt-5.4-mini
+```
+
+Credentials:
+
+```dotenv
+AZURE_OPENAI_API_KEY=...
+PERPLEXITY_API_KEY=pplx-...
 ```
 
 </details>
@@ -257,31 +262,24 @@ INQTRIX_SELECTABLE_CHAT_MODELS=gpt-5.4,gpt-5.4-mini
 <details>
 <summary><b>All-Azure: Azure OpenAI + Azure AI Foundry Web Search</b></summary>
 
+Configuration:
+
 ```dotenv
-# --- Core: secrets + Postgres + native login ---
-INQTRIX_PG_PASSWORD=change-me-strong-db-password
-INQTRIX_DATABASE_URL=postgresql+asyncpg://inqtrix:change-me-strong-db-password@postgres:5432/inqtrix
-INQTRIX_STORAGE_BACKEND=postgres
-INQTRIX_AUTH_MODE=local
-INQTRIX_SESSION_SECRET=change-me-random-string
-INQTRIX_PAT_PEPPER=change-me-random-string
-
-# --- One Service Principal authenticates BOTH the LLM and the search agent ---
-AZURE_TENANT_ID=...
-AZURE_CLIENT_ID=...
-AZURE_CLIENT_SECRET=...
-
-# --- LLM on Azure OpenAI (deployment names) ---
 INQTRIX_LLM_PROVIDER=azure
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 REASONING_MODEL=gpt-5.4
-
-# --- Web search via the Azure AI Foundry web-search agent ---
 INQTRIX_SEARCH_PROVIDER=azure_foundry
 AZURE_AI_PROJECT_ENDPOINT=https://your-project.services.ai.azure.com/api/projects/your-project
 WEB_SEARCH_AGENT_NAME=web-search-agent
-
 INQTRIX_SELECTABLE_CHAT_MODELS=gpt-5.4,gpt-5.4-mini
+```
+
+Credentials:
+
+```dotenv
+AZURE_TENANT_ID=...
+AZURE_CLIENT_ID=...
+AZURE_CLIENT_SECRET=...
 ```
 
 </details>
@@ -289,30 +287,25 @@ INQTRIX_SELECTABLE_CHAT_MODELS=gpt-5.4,gpt-5.4-mini
 <details>
 <summary><b>AWS Bedrock + Perplexity</b></summary>
 
-```dotenv
-# --- Core: secrets + Postgres + native login ---
-INQTRIX_PG_PASSWORD=change-me-strong-db-password
-INQTRIX_DATABASE_URL=postgresql+asyncpg://inqtrix:change-me-strong-db-password@postgres:5432/inqtrix
-INQTRIX_STORAGE_BACKEND=postgres
-INQTRIX_AUTH_MODE=local
-INQTRIX_SESSION_SECRET=change-me-random-string
-INQTRIX_PAT_PEPPER=change-me-random-string
+Configuration:
 
-# --- LLM on AWS Bedrock. In Docker prefer access-key vars (AWS_PROFILE needs ~/.aws mounted into the container) ---
+```dotenv
 INQTRIX_LLM_PROVIDER=bedrock
 AWS_REGION=eu-central-1
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
 REASONING_MODEL=eu.anthropic.claude-opus-4-8-v1
 TIER_HIGH_MODEL=eu.anthropic.claude-opus-4-8-v1
 TIER_MID_MODEL=eu.anthropic.claude-sonnet-4-6
 TIER_FAST_MODEL=eu.anthropic.claude-haiku-4-5
-
-# --- Web search ---
 INQTRIX_SEARCH_PROVIDER=perplexity
-PERPLEXITY_API_KEY=pplx-...
-
 INQTRIX_SELECTABLE_CHAT_MODELS=eu.anthropic.claude-opus-4-8-v1,eu.anthropic.claude-sonnet-4-6
+```
+
+Credentials (prefer workload identity where available):
+
+```dotenv
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+PERPLEXITY_API_KEY=pplx-...
 ```
 
 </details>
@@ -320,7 +313,10 @@ INQTRIX_SELECTABLE_CHAT_MODELS=eu.anthropic.claude-opus-4-8-v1,eu.anthropic.clau
 <details>
 <summary><b>Optional: add a knowledge base (RAG over your own documents)</b></summary>
 
-Paste this on top of your provider block, then start with `--profile knowledge` in Step 3. RAG is off by default; these switch it on.
+Edit the matching canonical fields in `deploy/.env.stack` rather than appending
+duplicate assignments, put any corresponding API keys in
+`deploy/.env.stack.secrets`, then start with `--profile knowledge`. RAG is off
+by default.
 
 ```dotenv
 # --- Knowledge engine (RAG): persistent vector store via Qdrant ---
@@ -328,18 +324,19 @@ INQTRIX_KNOWLEDGE_ENABLED=true
 INQTRIX_VECTOR_BACKEND=qdrant
 # the `qdrant` compose service, started by --profile knowledge
 INQTRIX_QDRANT_URL=http://qdrant:6333
-INQTRIX_QDRANT_API_KEY=change-me-qdrant-key
+# required for bundled Qdrant; belongs in deploy/.env.stack.secrets
+# INQTRIX_QDRANT_API_KEY=generate-a-long-random-value
 
 # --- Embedding model for indexing ---
 # Reuses your OpenAI-compatible (LiteLLM) gateway by default. With Anthropic/Bedrock LLMs,
 # set a dedicated embedding endpoint or use Azure (uncomment below).
 INQTRIX_EMBEDDING_MODEL=text-embedding-3-small
 # INQTRIX_EMBEDDING_PROVIDER=azure
-# INQTRIX_EMBEDDING_BASE_URL=...   INQTRIX_EMBEDDING_API_KEY=...
+# INQTRIX_EMBEDDING_BASE_URL=...
 
 # --- Optional reranker for the best retrieval quality (tested with Cohere) ---
 # INQTRIX_RERANKER_PROVIDER=cohere
-# INQTRIX_RERANKER_BASE_URL=...    INQTRIX_RERANKER_API_KEY=...    INQTRIX_RERANKER_MODEL=...
+# INQTRIX_RERANKER_BASE_URL=...    INQTRIX_RERANKER_MODEL=...
 ```
 
 </details>
@@ -349,15 +346,23 @@ INQTRIX_EMBEDDING_MODEL=text-embedding-3-small
 ```bash
 # Research + chat (the default stack):
 docker compose -f deploy/compose/compose.stack.yaml \
-  --env-file deploy/.env.stack up -d --build
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack \
+  up -d --build
 
 # ...or with the knowledge base (RAG): add the knowledge profile
 docker compose -f deploy/compose/compose.stack.yaml \
-  --env-file deploy/.env.stack --profile knowledge up -d --build
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack \
+  --profile knowledge \
+  up -d --build
 ```
 
 > [!NOTE]
-> **Using Podman?** The commands work unchanged with the Compose v2 provider: run `podman compose ...` in place of `docker compose ...`.
+> **Using Podman?** The commands work unchanged with the Compose v2 provider:
+> run `podman compose ...` in place of `docker compose ...`. The same ordered
+> environment pair is used by Docker and Podman; no engine-specific secret
+> materialization step exists.
 
 The first build pulls images and installs dependencies (a few minutes); later starts are fast. Then open <http://localhost:8080>; the first visit walks you through creating the owner account. Verify with:
 
@@ -366,76 +371,98 @@ curl http://localhost:8080/health          # active providers + models
 curl http://localhost:8080/v1/capabilities # which features are on (knowledge, files, sharing, ...)
 ```
 
-The default stack is **Postgres + API + web** (research, chat, durable runs, native login). Scaled workers (Valkey), S3 object storage, and SSO/LDAP (Dex/LLDAP) are further opt-in [capability tiers](#capability-tiers-opt-in) you add with a compose profile.
+The default stack is **Postgres + API + web** (research, chat, durable runs,
+native login). Scaled workers (Valkey), bundled S3-compatible storage
+(SeaweedFS), and the bundled SSO/LDAP references (Dex/LLDAP) are further
+opt-in [capability tiers](#capability-tiers-opt-in) added with Compose profiles.
+Managed or otherwise external S3 is selected only through configuration and
+does not use the bundled `s3` profile.
 
 <details>
 <summary><b>All compose profiles (turn on more)</b></summary>
 
-Each profile starts its container(s); the matching variables in `deploy/.env.stack` turn the feature on, so **you need both**. Profiles combine, each with its own `--profile` flag, for example `--profile knowledge --profile workers --profile s3`.
+Each profile starts its bundled container(s); the matching variables in
+`deploy/.env.stack` turn the feature on, so **you need both**. Profiles combine,
+each with its own `--profile` flag, for example
+`--profile knowledge --profile workers --profile s3` when the object store is
+the bundled SeaweedFS service.
 
 | `--profile` | Starts | Unlocks | Variables to set |
 |---|---|---|---|
 | *(none)* | postgres + migrate + api + web | research, chat, durable runs, login | (the default) |
-| **`knowledge`** | qdrant | RAG / knowledge base over your documents | `INQTRIX_KNOWLEDGE_ENABLED=true`, `INQTRIX_VECTOR_BACKEND=qdrant`, `INQTRIX_QDRANT_*` |
+| **`knowledge`** | qdrant | RAG / knowledge base over your documents | `INQTRIX_KNOWLEDGE_ENABLED=true`, `INQTRIX_VECTOR_BACKEND=qdrant`, `INQTRIX_QDRANT_URL`, required `INQTRIX_QDRANT_API_KEY` in the secrets file |
 | **`workers`** | valkey + worker | scaled, restart-surviving runs | `INQTRIX_QUEUE_BACKEND=valkey`, `INQTRIX_VALKEY_*` |
 | **`s3`** | seaweedfs | S3 object store instead of the local volume | `INQTRIX_OBJECT_STORE_BACKEND=s3`, `INQTRIX_S3_*` |
+| **`collaboration`** | collaboration sidecar | real-time multi-user editing | `INQTRIX_COLLABORATION_ENABLED=true`, independent collaboration secret |
+| **`pgbouncer`** | PgBouncer | optional transaction pooling for high database fan-in | runtime DSN explicitly changed to `pgbouncer:6432`; migrations remain direct |
 | **`oidc`** | dex | enterprise SSO (Dex is the dev reference; any OIDC IdP works) | `INQTRIX_AUTH_MODE=oidc`, `INQTRIX_OIDC_*` |
 | **`ldap`** | lldap | login against an LDAP/AD directory (LLDAP is the dev reference) | `INQTRIX_AUTH_MODE=ldap`, `INQTRIX_LDAP_*` |
 
 `workers` deliberately starts two containers (`valkey` and `worker`) under one profile. Every variable and its meaning is in `deploy/.env.stack.example` and [Settings and env](docs/configuration/settings-and-env.md).
+PgBouncer is never inferred from workload size or enabled by the deployment
+CLI: both the `pgbouncer` profile and the visible pooler DSN are required.
 
 </details>
 
 <details>
 <summary><b>Stop, start, update, and other lifecycle commands</b></summary>
 
-Both flags are required on every command: the compose file lives in `deploy/compose/` (not Compose's default location) and the env file is `deploy/.env.stack` (not the default `.env`), so Compose cannot find them on its own. With Podman it is identical, just swap `docker compose` for `podman compose`.
+The Compose file and both ordered environment files are required on every raw
+command: secrets first, visible configuration second. With Podman it is
+identical; only replace `docker compose` with `podman compose`.
 
 Status and health of every service:
 
 ```bash
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack ps
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack ps
 ```
 
 Follow the API log (startup and config errors land here):
 
 ```bash
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack logs -f api
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack logs -f api
 ```
 
 Stop and remove the containers, but keep your data (the volumes):
 
 ```bash
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack down
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack down
 ```
 
 Start it again:
 
 ```bash
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack up -d
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack up -d
 ```
 
 Restart without rebuilding:
 
 ```bash
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack restart api web
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack restart api web
 ```
 
 Update after a `git pull` (rebuild and re-run migrations):
 
 ```bash
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack up -d --build
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack up -d --build
 ```
 
-Managed PostgreSQL in migration `owner` mode uses the repository's
-`deploy/scripts/compose-owner-upgrade.sh` maintenance wrapper after the pull,
-not the generic command above; see
+Managed PostgreSQL in migration `owner` mode uses the guarded
+`inqtrix-deploy ... owner-upgrade` command after the pull, not the generic
+command above. Its raw-Compose maintenance sequence remains documented in
 [Database migrations](docs/deployment/database-migrations.md).
 
 Destroy everything, including the database and uploaded files (irreversible):
 
 ```bash
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack down -v
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack down -v
 ```
 
 Backup, restore, and reset playbooks: [Runbooks](docs/deployment/runbooks.md). To type less, run `export COMPOSE_FILE=deploy/compose/compose.stack.yaml` once per shell and drop the `-f` flag from every command above.
@@ -446,7 +473,9 @@ Backup, restore, and reset playbooks: [Runbooks](docs/deployment/runbooks.md). T
 
 - [Provider recipes](docs/getting-started/provider-recipes.md) gives copy-paste `.env` blocks for each LLM and search combination.
 - [Settings and env](docs/configuration/settings-and-env.md) documents every variable (secrets, models, storage, auth).
-- [Platform components](docs/getting-started/platform-components.md) maps each feature to its compose profile (Qdrant / Valkey / S3 / OIDC / LDAP).
+- [Platform components](docs/getting-started/platform-components.md) maps each
+  feature to its required service and distinguishes bundled Compose profiles
+  from managed dependencies (Qdrant / Valkey / S3 / OIDC / LDAP).
 - [Auth modes](docs/deployment/auth-modes.md) covers login setup: native accounts, SSO, or LDAP.
 - [Deployment quickstart](docs/getting-started/stack-quickstart.md) is the full step-by-step walkthrough.
 - [Kubernetes and OpenShift](docs/deployment/kubernetes.md) deploys the same stack on a cluster via the bundled Helm chart.
@@ -474,7 +503,12 @@ Same engine, four entry points: from a one-command deployment to a single Python
 > **What it is:** the complete stack (React web app + API + Postgres) in one `docker compose up`.
 > **Who it's for:** teams and self-hosters who want the whole stack from one command, with no Python toolchain and no host-side build.
 
-A single command builds the API and web images, starts Postgres, runs the schema migration once (the one-shot `migrate` service), then starts the FastAPI backend and an nginx web container. The browser talks to **one origin** at `http://localhost:8080`; nginx reverse-proxies `/api`, `/v1`, and `/health` to the API internally, so there is no CORS and no build-time API-URL coupling.
+A single command builds the API and web images, starts Postgres, runs the schema
+migration once (the one-shot `migrate` service), then starts the FastAPI
+backend and the Python web gateway. The browser talks to **one origin** at
+`http://localhost:8080`; the gateway reverse-proxies `/api`, `/v1`, `/health`,
+and `/collaboration` to the API internally, so there is no CORS and no
+build-time API-URL coupling.
 
 **Prerequisites.** Docker (or Podman with the docker-compose v2 provider), one LLM API key, and one search API key.
 
@@ -482,16 +516,27 @@ A single command builds the API and web images, starts Postgres, runs the schema
 
 ```bash
 cp deploy/.env.stack.example deploy/.env.stack
-# edit deploy/.env.stack
+cp deploy/.env.stack.secrets.example deploy/.env.stack.secrets
+chmod 0600 deploy/.env.stack.secrets
+# edit both files
 ```
 
-Set the four secrets: `INQTRIX_PG_PASSWORD` (and the matching password inside `INQTRIX_DATABASE_URL`), `INQTRIX_SESSION_SECRET`, `INQTRIX_PAT_PEPPER`. Then fill **one** LLM block and **one** search block (the default is LiteLLM + Perplexity). Switching to Azure / Anthropic / Bedrock is purely an `.env` change; copy the block from [Provider recipes](docs/getting-started/provider-recipes.md).
+Set `INQTRIX_PG_PASSWORD`, `INQTRIX_SESSION_SECRET`,
+`INQTRIX_PAT_PEPPER`, and provider credentials only in the secrets file. The
+config file keeps the complete
+`postgresql+asyncpg://...@postgres:5432/inqtrix` form and references the
+password variable. Then select one LLM and one search provider. Switching to
+Azure, Anthropic, or Bedrock changes only this pair; no generated file or
+provider-specific script is involved.
 
-**2. Start.** Always pass `--env-file deploy/.env.stack` (Compose does not auto-load that filename):
+**2. Start.** Pass both files in the documented order (Compose does not
+auto-load either filename):
 
 ```bash
 docker compose -f deploy/compose/compose.stack.yaml \
-  --env-file deploy/.env.stack up -d --build
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack \
+  up -d --build
 ```
 
 **3. Open** <http://localhost:8080>. The default stack uses **native accounts** (`INQTRIX_AUTH_MODE=local`): the first visit walks you through creating the instance owner; from then on the in-app admin area manages users, invitations, and tokens.
@@ -510,7 +555,8 @@ A missing or wrong credential surfaces as a loud startup error in `docker compos
 
 ```bash
 # Knowledge/RAG (Qdrant) and scaled runs (Valkey workers):
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack \
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack \
   --profile knowledge --profile workers up -d
 ```
 
@@ -527,10 +573,19 @@ docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack
 > **Who it's for:** integrators building a frontend, an SDK client, or any HTTP integration without embedding Python.
 
 ```bash
-uv sync --extra dev            # or: pip install -e ".[dev]"
-cp .env.example .env           # set one LLM provider + one search provider
-uv run python -m inqtrix       # OpenAI-compatible API on http://localhost:5100
+# uv
+uv sync --extra dev
+uv run python -m inqtrix
+
+# or standard Python/pip
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+python -m inqtrix
 ```
+
+Copy `.env.example` to `.env` and configure one LLM plus one search provider
+before either start command. The API listens on <http://localhost:5100>.
 
 Override the bind with `INQTRIX_SERVER_HOST` (default `0.0.0.0`) and `INQTRIX_SERVER_PORT` (default `5100`). Each request runs a fresh state; the server is stateless for research data unless you add durable backends.
 
@@ -579,8 +634,15 @@ The SSE stream emits named lifecycle events (`inqtrix.run.queued/started/snapsho
 > **Who it's for:** scripts, CLIs, notebooks, or embedding research inside a larger Python application.
 
 ```bash
-uv sync --extra dev            # editable install (required by the src/ layout)
-cp .env.example .env           # set one LLM provider + one search provider
+# uv
+uv sync --extra dev
+
+# or standard Python/pip
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+
+cp .env.example .env
 ```
 
 **Option A: auto-create providers from env** (both models reachable through one OpenAI-compatible endpoint):
@@ -623,7 +685,7 @@ LLM providers: `LiteLLM`, `AnthropicLLM`, `AzureOpenAILLM`, `BedrockLLM`. Search
 
 - **Runnable examples:** `examples/provider_stacks/` (library) and `examples/webserver_stacks/` (HTTP) are 1:1 pairs; provider construction is byte-for-byte identical, only the run block differs. Standouts: `multi_stack.py` (all stacks, auto-discovered via `/v1/stacks`), `anthropic_perplexity_chat.py` (an interactive terminal REPL), `azure_knowledge_quickstart.py` (the RAG engine end-to-end). See [examples/](examples/README.md).
 - **Custom providers &amp; strategies:** implement the `LLMProvider` / `SearchProvider` ABCs, or swap one of six strategy seams (source tiering, claim extraction/consolidation, context pruning, risk scoring, stop criteria). See [Writing a custom provider](docs/providers/writing-a-custom-provider.md).
-- **Run the Research Desk in dev:** start a backend (`uv run python examples/webserver_stacks/multi_stack.py`), then `pnpm run ui:dev` for the Vite dev server on `http://localhost:5173`, proxying `/v1` + `/health` to `:5100`. Node ≥ 22.12, pnpm ≥ 11.1.1 (or npm). See [React UI](docs/deployment/react-ui.md).
+- **Run the Research Desk in dev:** start a backend (`uv run python examples/webserver_stacks/multi_stack.py`, or plain `python` after a pip install), then `npm run ui:dev` for the Vite dev server on `http://localhost:5173`, proxying `/v1` + `/health` to `:5100`. Node ≥ 22.12 and npm ≥ 10.9. See [React UI](docs/deployment/react-ui.md).
 
 **Deeper:** [Examples index](examples/README.md) · [Providers overview](docs/providers/overview.md) · [Strategies](docs/architecture/strategies.md) · [Contributing](docs/development/contributing.md).
 
@@ -631,7 +693,12 @@ LLM providers: `LiteLLM`, `AnthropicLLM`, `AzureOpenAILLM`, `BedrockLLM`. Search
 
 ## Capability tiers (opt-in)
 
-Inqtrix runs with **zero infrastructure** by default: in-memory storage, in-memory queue, knowledge engine off. Each component below is opt-in, adds a specific capability, and is reported live at `GET /v1/capabilities` so the UI degrades *visibly* rather than failing silently. In a Compose deployment, you turn each on with a compose profile plus the matching env.
+Inqtrix runs with **zero infrastructure** by default: in-memory storage,
+in-memory queue, knowledge engine off. Each component below is opt-in, adds a
+specific capability, and is reported live at `GET /v1/capabilities` so the UI
+degrades *visibly* rather than failing silently. In Compose, bundled optional
+components use a profile plus matching configuration; managed/external
+services use configuration only and do not start the bundled profile.
 
 | Add this | You unlock | What you lose without it | Turn it on |
 |---|---|---|---|
@@ -640,8 +707,8 @@ Inqtrix runs with **zero infrastructure** by default: in-memory storage, in-memo
 | **Collaboration service** | Live editor co-authoring, carets, suggestions, and durable acknowledgements | shared editor documents remain read-only projections | `--profile collaboration` plus Postgres and cookie auth |
 | **Qdrant** | Knowledge / RAG over your documents; hybrid dense + BM25 retrieval | in-memory, dense-only, lost on restart | `--profile knowledge` |
 | **Valkey + worker** | Scaled, queued, restart-surviving runs | in-process queue only | `--profile workers` |
-| **Object store (S3)** | Shared file storage across replicas | local volume only | `--profile s3` |
-| **OIDC / LDAP** | Enterprise SSO / directory login | single-operator auth only | `--profile oidc` / `ldap` |
+| **Object store (S3)** | Shared file storage across replicas | local volume only | managed/native S3: configuration only; bundled SeaweedFS: additionally `--profile s3` |
+| **OIDC / LDAP** | Enterprise SSO / directory login | single-operator auth only | external IdP/directory: configuration only; bundled Dex/LLDAP development references: additionally `--profile oidc` / `--profile ldap` |
 
 Each component, and the role it plays:
 
@@ -650,7 +717,9 @@ Each component, and the role it plays:
 - **Qdrant:** the persistent vector + document store; the only backend with hybrid dense+BM25 retrieval. Without it the knowledge engine uses an in-memory, dense-only store.
 - **Valkey + worker:** dispatches native runs to separate worker processes for horizontal scaling and restart survival. The worker refuses to start without both Postgres and Valkey.
 - **Object store:** storage for uploaded file blobs; a local volume by default, or any S3 endpoint (SeaweedFS is the bundled reference).
-- **OIDC / LDAP IdP:** browser SSO (Dex is the dev reference; any OIDC provider works) or directory bind logins (LLDAP is the dev reference; any LDAP/AD works).
+- **OIDC / LDAP IdP:** browser SSO or directory bind login. External enterprise
+  providers are configured without a Compose profile; `oidc` and `ldap`
+  profiles start only the bundled Dex/LLDAP development references.
 
 > [!NOTE]
 > The simplest setups (`none`/`apikey` auth, in-memory storage) are perfectly usable for a single operator, but have no durable history, login, or sharing. Multi-user, invitations, and sharing require a cookie-session mode (`local`, `oidc`, or `ldap`) plus Postgres. That trade-off is by design.
@@ -672,18 +741,23 @@ The Research Desk is Inqtrix's React workspace, a purpose-built surface for iter
 - **Prompt Library:** project-scoped templates in three categories (Instructions, Functions, Context Packs), referenced in the composer via `@rules:` / `@research:`.
 - **Project import / export:** the whole workspace is one portable project written as plain Markdown.
 
-**You never build the React app yourself for a Compose deployment.** In the packaged web image the bundle is built into the container and served by nginx on a single origin (`:8080`, no CORS). The three ways the UI reaches a backend:
+**You never build the React app yourself for a Compose deployment.** In the
+packaged web image the bundle is built into the container and served by the
+dependency-light Python web gateway on a single origin (`:8080`, no CORS). The
+three ways the UI reaches a backend:
 
 | Mode | Command | Serves | Origin |
 |---|---|---|---|
-| Full stack (nginx) | container image | built `dist/` | single origin `:8080` → api `:5100` |
-| Dev (HMR) | `pnpm run ui:dev` | live Vite build | `127.0.0.1:5173` → `:5100` |
-| Standalone launcher | `uv run python scripts/run_research_desk.py` | pre-built `dist/` | `127.0.0.1:8080` → `INQTRIX_BACKEND_URL` |
+| Full stack (Python web image) | container image | built `dist/` | single origin `:8080` → api `:5100` |
+| Dev (HMR) | `npm run ui:dev` | live Vite build | `127.0.0.1:5173` → `:5100` |
+| Standalone Python gateway | `python -m inqtrix_web_gateway --dist-dir apps/research-desk/dist` | pre-built `dist/` | `127.0.0.1:8080` → `INQTRIX_BACKEND_URL` |
+| Optional nginx adapter | `compose.web-nginx.yaml` override | pre-built `dist/` | externally terminated HTTP/TLS edge |
 
 > [!WARNING]
 > Never put a Bearer token or API key in a `VITE_*` variable: Vite embeds those into the browser bundle. Enter Bearer tokens at runtime under Settings → Security.
 
-**Deeper:** [React UI](docs/deployment/react-ui.md) (dev/build/launcher matrix, nginx topology, API boundary) · [Editor collaboration](docs/architecture/editor-collaboration.md) · [Build a UI on Inqtrix](docs/how-to/build-a-ui-on-inqtrix.md).
+**Deeper:** [React UI](docs/deployment/react-ui.md) (dev/build/gateway matrix,
+Python web topology, API boundary) · [Editor collaboration](docs/architecture/editor-collaboration.md) · [Build a UI on Inqtrix](docs/how-to/build-a-ui-on-inqtrix.md).
 
 <div align="right"><a href="#readme-top"><sub>back to top ↑</sub></a></div>
 
@@ -691,7 +765,7 @@ The Research Desk is Inqtrix's React workspace, a purpose-built surface for iter
 
 Inqtrix doesn't do single-pass "search → summarise." It runs a **bounded, multi-round loop** on a LangGraph state machine. A mutable state object threads through five nodes, and the loop keeps refining until independent stopping heuristics agree the answer is solid (or a hard round cap is hit).
 
-```
+```text
 classify → plan → search → evaluate ──(not done)──► plan   (loop)
                                    └────(done)──────► answer → END
 ```
@@ -727,12 +801,19 @@ What makes each round different is that `evaluate` *diagnoses gaps* and feeds th
 
 ## Configuration essentials
 
-Going from a quick try to the full self-hosted stack is an `.env` change, not a code change. In `deploy/.env.stack` you set:
+Going from a quick try to the full self-hosted stack is an environment change,
+not a code change. The pair has one clear responsibility per file:
 
-- **Four secrets:** `INQTRIX_PG_PASSWORD` (also inside `INQTRIX_DATABASE_URL`), `INQTRIX_SESSION_SECRET`, `INQTRIX_PAT_PEPPER`.
-- **One LLM block:** `INQTRIX_LLM_PROVIDER` (`litellm` | `anthropic` | `azure` | `bedrock`) + its credentials + `REASONING_MODEL`.
-- **One search block:** `INQTRIX_SEARCH_PROVIDER` (`perplexity` | `azure_foundry`) + its key + `SEARCH_MODEL`.
-- **Optional toggles:** `INQTRIX_KNOWLEDGE_ENABLED`, `INQTRIX_AUTH_MODE`, `INQTRIX_QUEUE_BACKEND`, and `INQTRIX_COLLABORATION_ENABLED`, each paired with its compose profile and documented prerequisites.
+- **Visible configuration in `deploy/.env.stack`:** the complete
+  `INQTRIX_DATABASE_URL` expression, provider selection, model names, topology,
+  and optional feature switches. The DSN references
+  `${INQTRIX_PG_PASSWORD}` instead of repeating its value.
+- **Credentials in `deploy/.env.stack.secrets`:** the PostgreSQL password,
+  independent session and PAT secrets, and only the credentials for the chosen
+  LLM/search and optional components.
+- **Optional profiles:** `knowledge`, `workers`, `collaboration`, bundled
+  `s3`, `oidc`, `ldap`, and `pgbouncer` each start only their corresponding
+  local component. External S3 does not use the bundled `s3` profile.
 
 Copy-paste blocks for every provider combination: [Provider recipes](docs/getting-started/provider-recipes.md). Every variable, grouped by purpose: [Settings and env](docs/configuration/settings-and-env.md).
 

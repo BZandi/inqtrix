@@ -1,4 +1,4 @@
-"""Postgres implementation of the skill repository (plan M3 `3.1`).
+"""Postgres implementation of the skill repository.
 
 Same conventions as the prompt-template repository: every operation
 runs in one tenant-scoped transaction under the restricted app role,
@@ -100,10 +100,12 @@ class PostgresSkillRepository:
         session_factory: "async_sessionmaker[AsyncSession]",
         app_role: str,
         restrict_to_workspace_members: bool = False,
+        sharing_enabled: bool = True,
     ) -> None:
         self._session_factory = session_factory
         self._app_role = app_role
         self._restrict_to_workspace_members = restrict_to_workspace_members
+        self._sharing_enabled = sharing_enabled
 
     @property
     def atomic_resource_effects(self) -> bool:
@@ -190,6 +192,7 @@ class PostgresSkillRepository:
             tenant_id=tenant_id,
             actor_user_id=actor_user_id,
             restrict_to_workspace_members=self._restrict_to_workspace_members,
+            sharing_enabled=self._sharing_enabled,
         ).order_by(skill_templates.c.created_at.desc())
         async with self._session(tenant_id) as session:
             rows = (await session.execute(statement)).all()
@@ -227,6 +230,7 @@ class PostgresSkillRepository:
                 restrict_to_workspace_members=(
                     self._restrict_to_workspace_members
                 ),
+                sharing_enabled=self._sharing_enabled,
             )
             if access is None:
                 raise SkillNotFound(record.id)
@@ -291,6 +295,7 @@ class PostgresSkillRepository:
                 restrict_to_workspace_members=(
                     self._restrict_to_workspace_members
                 ),
+                sharing_enabled=self._sharing_enabled,
                 owner_only=True,
             )
             if access is None:

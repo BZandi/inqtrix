@@ -5,6 +5,7 @@ import type {
   SuggestionDescriptor,
   SuggestionKind,
 } from '@inqtrix/editor-schema'
+import type { BoundedChangeSummary } from './changeSummary'
 
 export type CollaborationSettings = {
   apiBaseUrl: string
@@ -51,6 +52,8 @@ export type InstanceFence = {
 export type VerifiedUser = {
   color: string
   id: string
+  kind?: 'guest' | 'user'
+  linkLabel?: string
   name: string
 }
 
@@ -60,6 +63,7 @@ export type IntrospectedLease = {
   generation: number
   leaseId: string
   permission: CollaborationAccess
+  policyCursor: number
   protocolVersion: number
   schemaHash: string
   schemaVersion: number
@@ -106,9 +110,11 @@ export type PersistUpdateInput = {
   actorKind: CollaborationActorKind
   actorUserId: string
   changeKind: CollaborationChangeKind
+  changeSummary: BoundedChangeSummary
   commandId?: string
   commandPayloadHash: string | null
   decision: 'accept' | 'reject' | null
+  decisionOutcome: 'accepted' | 'rejected' | null
   documentId: string
   expectedSequence?: number
   fence: InstanceFence
@@ -141,6 +147,7 @@ export type SuggestionPatchState = {
   createdAt: number
   kinds: SuggestionKind[]
   patchId: string
+  supersededSuggestionIds: string[]
 }
 
 export type PersistUpdateResult = {
@@ -246,6 +253,7 @@ export type ConnectionContext = {
   expiresAt: number
   generation: number
   leaseId: string
+  policyCursor: number
   protocolVersion: number
   schemaHash: string
   schemaVersion: number

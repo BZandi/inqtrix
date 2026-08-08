@@ -1,4 +1,5 @@
 export type TaskResultReference = {
+  citationId?: string | null
   key: string
   label: string | null
   title: string
@@ -7,7 +8,10 @@ export type TaskResultReference = {
   documentId: string | null
   chunkIndex: number | null
   pageNumber: number | null
+  providerSnippet?: string | null
+  queryId?: string | null
   excerpt: string | null
+  sourceId: string | null
 }
 
 export type TaskResultReferenceGroup =
@@ -31,6 +35,7 @@ export function taskResultReferenceGroups(
   for (const raw of rawReferences) {
     const documentId = stringField(raw, 'document_id') || null
     const url = stringField(raw, 'url') || null
+    const queryId = stringField(raw, 'query_id') || null
     const chunkIndex = numberField(raw, 'chunk_index')
     const pageNumber = numberField(raw, 'page_number')
     const excerpt = firstString(raw, ['excerpt', 'source_text', 'grounded_support']) || null
@@ -44,6 +49,7 @@ export function taskResultReferenceGroups(
       }
       if (!group.some((reference) => reference.key === key)) {
         group.push({
+          citationId: stringField(raw, 'citation_id') || null,
           chunkIndex,
           documentId,
           domain: null,
@@ -51,26 +57,39 @@ export function taskResultReferenceGroups(
           key,
           label: stringField(raw, 'label') || null,
           pageNumber,
+          providerSnippet: stringField(raw, 'provider_snippet') || null,
+          queryId,
+          sourceId: stringField(raw, 'source_id') || null,
           title: stringField(raw, 'title') || documentId,
           url,
         })
       }
       continue
     }
-    if (!url) continue
-    const key = canonicalUrl(url)
-    if (web.has(key)) continue
-    web.set(key, {
+    if (!url && !queryId) continue
+    const key = url ? canonicalUrl(url) : `query:${queryId}`
+    const candidate: TaskResultReference = {
+      citationId: stringField(raw, 'citation_id') || null,
       chunkIndex,
       documentId: null,
-      domain: urlDomain(url),
+      domain: url ? urlDomain(url) : null,
       excerpt,
       key,
       label: stringField(raw, 'label') || null,
       pageNumber,
-      title: stringField(raw, 'title') || urlDomain(url) || url,
+      providerSnippet: stringField(raw, 'provider_snippet') || null,
+      queryId,
+      sourceId: stringField(raw, 'source_id') || null,
+      title: stringField(raw, 'title')
+        || (url ? urlDomain(url) || url : queryId ?? ''),
       url,
-    })
+    }
+    const existing = web.get(key)
+    if (existing) {
+      web.set(key, mergeWebProvenance(existing, candidate))
+      continue
+    }
+    web.set(key, candidate)
     order.push({ kind: 'web', key })
   }
 
@@ -88,6 +107,19 @@ export function taskResultReferenceGroups(
       }]
       : []
   })
+}
+
+function mergeWebProvenance(
+  existing: TaskResultReference,
+  candidate: TaskResultReference,
+): TaskResultReference {
+  return {
+    ...existing,
+    citationId: existing.citationId || candidate.citationId,
+    providerSnippet: existing.providerSnippet || candidate.providerSnippet,
+    queryId: existing.queryId || candidate.queryId,
+    sourceId: existing.sourceId || candidate.sourceId,
+  }
 }
 
 function canonicalUrl(value: string): string {

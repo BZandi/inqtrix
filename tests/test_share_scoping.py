@@ -8,6 +8,7 @@ IdP subjects are only external login bindings.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 
 from fastapi import FastAPI
@@ -201,17 +202,27 @@ def test_on_grant_allows_comember_denies_stranger():
         )
 
 
-def test_on_nonexistent_invitee_is_hidden_like_a_non_member():
+def test_on_nonexistent_invitee_is_hidden_like_a_non_member(caplog):
     client, csrf, owned, _identity, _ws, _comember_id, stranger_id = (
         make_world(restrict=True)
     )
 
-    with client:
-        ghost = grant(client, csrf, owned, UNKNOWN_USER_ID)
-        stranger = grant(client, csrf, owned, stranger_id)
-        assert ghost.status_code == 404
-        assert stranger.status_code == 404
-        assert ghost.json() == stranger.json()
+    with caplog.at_level(logging.WARNING, logger="inqtrix"):
+        with client:
+            ghost = grant(client, csrf, owned, UNKNOWN_USER_ID)
+            stranger = grant(client, csrf, owned, stranger_id)
+            assert ghost.status_code == 404
+            assert stranger.status_code == 404
+            assert ghost.json() == stranger.json()
+
+    authz_messages = [
+        message for message in caplog.messages if "authz denied" in message
+    ]
+    assert len(authz_messages) == 2
+    assert all("action=share" in message for message in authz_messages)
+    assert all(str(UNKNOWN_USER_ID) not in message for message in authz_messages)
+    assert all(str(stranger_id) not in message for message in authz_messages)
+    assert all(owned not in message for message in authz_messages)
 
 
 def test_on_typeahead_scopes_to_comembers():

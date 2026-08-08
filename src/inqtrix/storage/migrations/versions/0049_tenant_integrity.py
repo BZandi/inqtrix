@@ -2,7 +2,6 @@
 
 Revision ID: 0049_tenant_integrity
 Revises: 0048_editor_collaboration
-Create Date: 2026-07-15
 
 Revision 0043 originally joined globally unique public identifiers without
 also carrying the tenant boundary. This repair reruns those backfills with the

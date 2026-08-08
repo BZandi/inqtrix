@@ -797,14 +797,16 @@ def _call_openai_chat_completion_with_retries(
                 )
             else:
                 log.warning(
-                    "%s transport error (%s, code=%s, attempt=%d/%d). Retrying in %.2fs: %s",
+                    "%s transport error "
+                    "(model=%s, code=%s, error_type=%s, attempt=%d/%d). "
+                    "Retrying in %.2fs.",
                     provider_label,
                     model,
                     error_code,
+                    type(exc).__name__,
                     attempt,
                     max_attempts,
                     delay,
-                    exc,
                 )
             try:
                 _sleep_before_retry(delay, deadline)
@@ -854,6 +856,8 @@ class LLMResponse:
     finish_reason: str = ""
     raw: dict[str, Any] | None = None
     request_max_tokens: int = 0
+    duration_ms: float = 0.0
+    """Wall-clock call duration, stamped by the tracing wrapper; ``0.0`` when the provider is used unwrapped."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -886,6 +890,8 @@ class StructuredLLMResponse:
     raw: dict[str, Any] | None = None
     request_max_tokens: int = 0
     schema_name: str = ""
+    duration_ms: float = 0.0
+    """Wall-clock call duration, stamped by the tracing wrapper; ``0.0`` when the provider is used unwrapped."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -915,8 +921,8 @@ class ChatTurn:
     """One assistant turn of a tool-calling chat conversation.
 
     The native function-calling counterpart of :class:`LLMResponse`
-    (plan M2 step 1): carries the assistant text AND any requested tool
-    calls, so an agent loop can decide whether to execute tools or
+    carries the assistant text AND any requested tool calls, so an
+    agent loop can decide whether to execute tools or
     finish. Exactly one of ``text``/``tool_calls`` may be empty; both
     empty means the backend produced nothing visible (callers treat that
     as a loud failure, not a silent stop).
@@ -941,6 +947,8 @@ class ChatTurn:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     raw: dict[str, Any] | None = None
+    duration_ms: float = 0.0
+    """Wall-clock call duration, stamped by the tracing wrapper; ``0.0`` when the provider is used unwrapped."""
 
 
 def chat_turn_from_openai_response(
@@ -1679,8 +1687,8 @@ class LLMProvider(ABC):
     def supports_tool_calls(self, *, model: str | None = None) -> bool:
         """Return whether native function calling is available.
 
-        The cognitive kernel (plan M2) registers only against providers
-        that opt in here — the capabilities endpoint then reports the
+        The cognitive kernel registers only against providers that opt
+        in here — the capabilities endpoint then reports the
         kernel as unavailable instead of failing mid-run. The default is
         intentionally ``False`` so existing custom providers stay on the
         prompt-only surface until they implement :meth:`chat`.
@@ -1706,7 +1714,7 @@ class LLMProvider(ABC):
         deadline: float | None = None,
         reasoning_effort: str | None = None,
     ) -> "ChatTurn":
-        """Run ONE native tool-calling chat turn (plan M2 step 1).
+        """Run ONE native tool-calling chat turn.
 
         This is the message-array counterpart of :meth:`complete`: the
         caller owns the conversation (system/user/assistant/tool

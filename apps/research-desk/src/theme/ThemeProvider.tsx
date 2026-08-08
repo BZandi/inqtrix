@@ -8,6 +8,8 @@ import {
   type ReactNode,
 } from 'react'
 
+import type { ModelTierPreference } from '@/features/researchRuns/types'
+
 export type ThemeMode = 'light' | 'dark' | 'system'
 export type ThemePreset = 'standard' | 'slate' | 'graphite' | 'sage'
 export type ContrastMode = 'standard' | 'high'
@@ -19,10 +21,18 @@ type ThemeContextValue = {
   // useAccountPreferences reads/writes; the server row is authoritative and
   // wins on login. localStorage is only the device cache/default (OFF).
   agentMemoryEnabled: boolean
+  // Preferred model tier per surface, riding the same bag for the same
+  // reason. Two values, never one: an agent run fans out over several
+  // thinking nodes while a chat answer is a single call, so a chat pick must
+  // not raise agent spend. `''` means no preference.
+  agentModelTier: ModelTierPreference
+  chatModelTier: ModelTierPreference
   contrastMode: ContrastMode
   preset: ThemePreset
   resolvedTheme: 'light' | 'dark'
   setAgentMemoryEnabled: (enabled: boolean) => void
+  setAgentModelTier: (tier: ModelTierPreference) => void
+  setChatModelTier: (tier: ModelTierPreference) => void
   setContrastMode: (mode: ContrastMode) => void
   setPreset: (preset: ThemePreset) => void
   setTheme: (theme: ThemeMode) => void
@@ -36,6 +46,8 @@ const THEME_PRESET_STORAGE_KEY = 'inqtrix.researchDesk.themePreset'
 const CONTRAST_MODE_STORAGE_KEY = 'inqtrix.researchDesk.contrastMode'
 const USER_BUBBLE_TONE_STORAGE_KEY = 'inqtrix.researchDesk.userBubbleTone'
 const AGENT_MEMORY_ENABLED_STORAGE_KEY = 'inqtrix.researchDesk.agentMemoryEnabled'
+const CHAT_MODEL_TIER_STORAGE_KEY = 'inqtrix.researchDesk.chatModelTier'
+const AGENT_MODEL_TIER_STORAGE_KEY = 'inqtrix.researchDesk.agentModelTier'
 const THEME_TRANSITION_SUPPRESSION_ATTR = 'data-theme-transition-suppressed'
 const ThemeContext = createContext<ThemeContextValue | null>(null)
 
@@ -54,6 +66,12 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   )
   const [agentMemoryEnabled, setAgentMemoryEnabledState] = useState<boolean>(() =>
     readStoredAgentMemoryEnabled(),
+  )
+  const [chatModelTier, setChatModelTierState] = useState<ModelTierPreference>(() =>
+    readStoredModelTier(CHAT_MODEL_TIER_STORAGE_KEY),
+  )
+  const [agentModelTier, setAgentModelTierState] = useState<ModelTierPreference>(() =>
+    readStoredModelTier(AGENT_MODEL_TIER_STORAGE_KEY),
   )
   const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>(() =>
     getSystemTheme(),
@@ -89,6 +107,8 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   const value = useMemo<ThemeContextValue>(
     () => ({
       agentMemoryEnabled,
+      agentModelTier,
+      chatModelTier,
       contrastMode,
       preset,
       resolvedTheme,
@@ -98,6 +118,14 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
           nextEnabled ? 'true' : 'false',
         )
         setAgentMemoryEnabledState(nextEnabled)
+      },
+      setAgentModelTier(nextTier) {
+        localStorage.setItem(AGENT_MODEL_TIER_STORAGE_KEY, nextTier)
+        setAgentModelTierState(nextTier)
+      },
+      setChatModelTier(nextTier) {
+        localStorage.setItem(CHAT_MODEL_TIER_STORAGE_KEY, nextTier)
+        setChatModelTierState(nextTier)
       },
       setContrastMode(nextMode) {
         localStorage.setItem(CONTRAST_MODE_STORAGE_KEY, nextMode)
@@ -118,7 +146,16 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       theme,
       userBubbleTone,
     }),
-    [agentMemoryEnabled, contrastMode, preset, resolvedTheme, theme, userBubbleTone],
+    [
+      agentMemoryEnabled,
+      agentModelTier,
+      chatModelTier,
+      contrastMode,
+      preset,
+      resolvedTheme,
+      theme,
+      userBubbleTone,
+    ],
   )
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
@@ -159,6 +196,15 @@ function readStoredContrastMode(): ContrastMode {
   if (typeof localStorage === 'undefined') return 'standard'
   const stored = localStorage.getItem(CONTRAST_MODE_STORAGE_KEY)
   return stored === 'high' ? stored : 'standard'
+}
+
+/** Device cache for a model-tier preference; the account row still wins on
+ * login. An unreadable or unknown value resolves to `''` (no preference), so
+ * the deployment default applies rather than an invented tier. */
+function readStoredModelTier(key: string): ModelTierPreference {
+  if (typeof localStorage === 'undefined') return ''
+  const stored = localStorage.getItem(key)
+  return stored === 'high' || stored === 'mid' || stored === 'fast' ? stored : ''
 }
 
 function readStoredUserBubbleTone(): UserBubbleTone {

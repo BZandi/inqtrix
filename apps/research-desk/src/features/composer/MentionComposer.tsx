@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import { MENTION_PILL_NAME, MentionPill, type MentionPillKind } from './MentionPill'
@@ -125,7 +125,9 @@ export const MentionComposer = forwardRef<MentionComposerHandle, MentionComposer
     editorProps: {
       attributes: {
         'aria-label': ariaLabel,
+        'aria-multiline': 'true',
         class: 'mention-composer-prose focus:outline-none',
+        role: 'textbox',
       },
       handleKeyDown: (_view, event) => handleEditorKeyDown(event),
     },
@@ -136,6 +138,11 @@ export const MentionComposer = forwardRef<MentionComposerHandle, MentionComposer
     },
     onSelectionUpdate: () => refreshAutocomplete(),
   })
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return
+    editor.view.dom.setAttribute('aria-label', ariaLabel)
+  }, [ariaLabel, editor])
 
   function refreshAutocomplete() {
     if (!editor) return

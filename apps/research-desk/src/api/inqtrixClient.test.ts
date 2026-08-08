@@ -1,26 +1,41 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   acceptAgentMemoryCandidate,
   clearAgentMemories,
+  createResearchRun,
   createEditorCollaborationSession,
   createShares,
   decideEditorCollaborationPatches,
+  deleteEditorCommentSuggestionDraft,
   deleteAgentMemory,
   enableEditorDocumentCollaboration,
+  fetchAuthSession,
   fetchMyShares,
   fetchServerFileInfo,
   fetchSharingInbox,
   flushEditorCollaborationProjection,
+  getEditorAccessSummary,
   listAgentMemories,
   listAgentMemoryCandidates,
   listAgentMemoryFeedback,
+  listAssetDeletionOperations,
   listEditorCollaborationActivity,
   listEditorDocuments,
   listKnowledgeDocuments,
+  listUploadOperations,
+  logoutSession,
+  markGuestEditorCollaborationCommentsRead,
   patchEditorDocumentMetadata,
   publishEditorCollaborationSuggestion,
   rejectAgentMemoryCandidate,
+  reserveServerFileUpload,
+  resolveKnowledgeDocumentBySource,
+  retryUploadOperation,
+  resumeIndexingJob,
+  resumeIndexingJobWithoutContext,
+  searchKnowledge,
+  saveEditorCommentSuggestionDraft,
   setExpectedUserIdentity,
   submitAgentRunFeedback,
   streamServerSentEvents,
@@ -29,7 +44,231 @@ import {
   updatePromptTemplate,
   updateShare,
   updateSkill,
+  uploadServerFile,
 } from './inqtrixClient'
+
+describe('knowledge evidence wire contract', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('preserves the original-source excerpt and never expects retrieval text', async () => {
+    const hit = {
+      chunk_id: 'kch_1',
+      chunk_index: 2,
+      collection_id: 'kc_1',
+      document_id: 'kd_1',
+      document_title: 'Vertrag.pdf',
+      excerpt: 'Die Haftung ist begrenzt.',
+      generation_id: 'gen_1',
+      page_number: 4,
+      provenance_status: 'verified_span',
+      rank: 1,
+      reference_id: 'K1',
+      revision_id: 'rev_1',
+      score: 0.91,
+      source_span: {
+        document_content_hash: 'abc123',
+        end: 28,
+        offset_unit: 'utf8_byte',
+        start: 0,
+      },
+    }
+    const warnings = [
+      {
+        candidate_cap: 64,
+        code: 'vector_overfetch_cap',
+        final_evidence_complete: true,
+        final_top_k: 1,
+        message: 'candidate pool limited; final evidence complete',
+        reason: 'vector_overfetch_cap',
+        requested_candidate_pool: 10,
+        requested_top_k: 1,
+        retrieval_mode: 'hybrid',
+        returned_candidate_pool: 4,
+        returned_hits: 1,
+        stage: 'vector_candidate_pool',
+      },
+      {
+        candidate_cap: 64,
+        code: 'vector_overfetch_cap',
+        final_evidence_complete: false,
+        final_top_k: 5,
+        message: 'candidate pool limited; final evidence incomplete',
+        reason: 'vector_overfetch_cap',
+        requested_candidate_pool: 50,
+        requested_top_k: 5,
+        retrieval_mode: 'hybrid',
+        returned_candidate_pool: 4,
+        returned_hits: 4,
+        stage: 'vector_candidate_pool',
+      },
+      {
+        candidate_cap: null,
+        code: 'vector_candidate_stalled',
+        final_evidence_complete: true,
+        final_top_k: 1,
+        message: 'candidate pool stalled; final evidence complete',
+        reason: 'vector_candidate_stalled',
+        requested_candidate_pool: 10,
+        requested_top_k: 1,
+        retrieval_mode: 'dense',
+        returned_candidate_pool: 4,
+        returned_hits: 1,
+        stage: 'vector_candidate_pool',
+      },
+      {
+        candidate_cap: null,
+        code: 'vector_candidate_stalled',
+        final_evidence_complete: false,
+        final_top_k: 5,
+        message: 'candidate pool stalled; final evidence incomplete',
+        reason: 'vector_candidate_stalled',
+        requested_candidate_pool: 50,
+        requested_top_k: 5,
+        retrieval_mode: 'dense',
+        returned_candidate_pool: 4,
+        returned_hits: 4,
+        stage: 'vector_candidate_pool',
+      },
+    ]
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ data: [hit], warnings })))
+
+    const results = await searchKnowledge(
+      { collectionIds: ['kc_1'], query: 'Haftung', topK: 5 },
+      { baseUrl: 'http://api.test' },
+    )
+
+    expect(results).toEqual({ data: [hit], warnings })
+    expect(results.data[0]).not.toHaveProperty('text')
+  })
+
+  it('resumes a paused indexing job through the explicit server action', async () => {
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      void _input
+      void _init
+      return jsonResponse({
+        collection_id: 'kc_1',
+        job_id: 'ix_1',
+        status: 'queued',
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await resumeIndexingJob('ix_1', {
+      baseUrl: 'http://api.test',
+      workspaceId: 'workspace-1',
+    })
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
+      '/v1/knowledge/indexing-jobs/ix_1/resume',
+    )
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('POST')
+  })
+
+  it('rebuilds a paused indexing generation raw only by explicit action', async () => {
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      void _input
+      void _init
+      return jsonResponse({
+        collection_id: 'kc_1',
+        job_id: 'ix_1',
+        status: 'queued',
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await resumeIndexingJobWithoutContext('ix_1', {
+      baseUrl: 'http://api.test',
+      workspaceId: 'workspace-1',
+    })
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
+      '/v1/knowledge/indexing-jobs/ix_1/resume-raw',
+    )
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('POST')
+  })
+})
+
+describe('private editor suggestion draft client', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('uses the nested creator-private draft endpoint with explicit revision guards', async () => {
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => init?.method === 'DELETE'
+      ? new Response(null, { status: 204 })
+      : jsonResponse({ suggestion_draft: {} }))
+    vi.stubGlobal('fetch', fetchMock)
+    const options = { baseUrl: 'http://api.test' }
+    const patchId = '00000000-0000-4000-8000-000000000003'
+
+    await saveEditorCommentSuggestionDraft(
+      'doc-1',
+      'comment-1',
+      {
+        draft: {
+          anchor_version: 1,
+          change_summary: [],
+          evidence: null,
+          group_id: 'group-1',
+          patch_id: patchId,
+          proposed_text: 'Private provider result',
+          publication_command_id: '00000000-0000-4000-8000-000000000002',
+          suggestion_id: 'suggestion-1',
+          warnings: [],
+        },
+        expected_revision: 0,
+      },
+      options,
+    )
+    await deleteEditorCommentSuggestionDraft(
+      'doc-1',
+      'comment-1',
+      { expected_revision: 1, patch_id: patchId },
+      options,
+    )
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'http://api.test/v1/editor/documents/doc-1/comments/comment-1/suggestion-draft',
+      expect.objectContaining({
+        body: JSON.stringify({
+          draft: {
+            anchor_version: 1,
+            change_summary: [],
+            evidence: null,
+            group_id: 'group-1',
+            patch_id: patchId,
+            proposed_text: 'Private provider result',
+            publication_command_id: '00000000-0000-4000-8000-000000000002',
+            suggestion_id: 'suggestion-1',
+            warnings: [],
+          },
+          expected_revision: 0,
+        }),
+        method: 'PUT',
+      }),
+    )
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'http://api.test/v1/editor/documents/doc-1/comments/comment-1/suggestion-draft',
+      expect.objectContaining({
+        body: JSON.stringify({ expected_revision: 1, patch_id: patchId }),
+        method: 'DELETE',
+      }),
+    )
+  })
+})
 
 describe('browser principal generation', () => {
   afterEach(() => {
@@ -72,6 +311,494 @@ describe('browser principal generation', () => {
     await expect(
       fetchServerFileInfo('file-1', { baseUrl: 'http://api.test' }),
     ).rejects.toMatchObject({ name: 'principal_changed', status: 409 })
+  })
+
+  it('leaves an expired collaboration lease to the controller recovery flow', async () => {
+    const reload = vi.fn()
+    vi.stubGlobal('window', { location: { reload } })
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(
+      {
+        error: {
+          message: 'collaboration lease expired',
+          type: 'authentication_error',
+        },
+      },
+      401,
+    )))
+    setExpectedUserIdentity('00000000-0000-4000-8000-000000000001')
+
+    await expect(createEditorCollaborationSession(
+      'doc-1',
+      {
+        lease_token: 'expired-private-token',
+        protocol_version: 1,
+        rotation_command_id: '00000000-0000-4000-8000-000000000004',
+        schema_version: 1,
+      },
+      { baseUrl: 'http://api.test' },
+    )).rejects.toMatchObject({ status: 401 })
+
+    expect(reload).not.toHaveBeenCalled()
+  })
+
+  it('leaves an expired research submit to a visible caller recovery flow', async () => {
+    const reload = vi.fn()
+    vi.stubGlobal('window', { location: { reload } })
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(
+      {
+        error: {
+          message: 'session expired',
+          type: 'authentication_error',
+        },
+      },
+      401,
+    )))
+    setExpectedUserIdentity('00000000-0000-4000-8000-000000000001')
+
+    await expect(createResearchRun(
+      { mode: 'research', question: 'Retain this draft' },
+      { baseUrl: 'http://api.test', reloadOnUnauthorized: false },
+    )).rejects.toMatchObject({ status: 401 })
+
+    expect(reload).not.toHaveBeenCalled()
+  })
+})
+
+describe('cookie-session CSRF recovery', () => {
+  beforeEach(() => {
+    setExpectedUserIdentity('user-1')
+  })
+
+  afterEach(() => {
+    setExpectedUserIdentity(null)
+    vi.unstubAllGlobals()
+  })
+
+  it('uses the authenticated session bootstrap token for the first mutation', async () => {
+    vi.stubGlobal('document', { cookie: '' })
+    const mutationHeaders: Array<string | null> = []
+    const fetchMock = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (String(input).endsWith('/api/auth/session')) {
+        return jsonResponse({
+          authenticated: true,
+          csrf_token: 'fresh-token',
+          user: { display_name: 'Ada', email: 'ada@example.de', id: 'user-1', role: 'user' },
+        })
+      }
+      const token = new Headers(init?.headers).get('X-CSRF-Token')
+      mutationHeaders.push(token)
+      return token === 'fresh-token'
+        ? jsonResponse({ id: 'one', revision: 2 })
+        : jsonResponse({
+          detail: { error: { message: 'CSRF failed', type: 'csrf_error' } },
+        }, 403)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchAuthSession({ baseUrl: 'http://api.test' })
+    await updatePromptTemplate(
+      'one',
+      {
+        category: null,
+        content_markdown: 'a',
+        expected_revision: 1,
+        include_in_autocomplete: true,
+        label: 'one',
+        title: 'One',
+        visibility: { chat: true, editor: false },
+      },
+      { baseUrl: 'http://api.test' },
+    )
+
+    expect(mutationHeaders).toEqual(['fresh-token'])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears the in-memory token when the session bootstrap becomes anonymous', async () => {
+    vi.stubGlobal('document', { cookie: '' })
+    let sessionCalls = 0
+    const mutationHeaders: Array<string | null> = []
+    const fetchMock = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (String(input).endsWith('/api/auth/session')) {
+        sessionCalls += 1
+        return sessionCalls === 1
+          ? jsonResponse({
+            authenticated: true,
+            csrf_token: 'fresh-token',
+            user: { display_name: 'Ada', email: 'ada@example.de', id: 'user-1', role: 'user' },
+          })
+          : jsonResponse({ authenticated: false })
+      }
+      mutationHeaders.push(new Headers(init?.headers).get('X-CSRF-Token'))
+      return jsonResponse({
+        error: { message: 'Forbidden', type: 'authorization_error' },
+      }, 403)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchAuthSession({ baseUrl: 'http://api.test' })
+    await fetchAuthSession({ baseUrl: 'http://api.test' })
+    await expect(updatePromptTemplate(
+      'one',
+      {
+        category: null,
+        content_markdown: 'a',
+        expected_revision: 1,
+        include_in_autocomplete: true,
+        label: 'one',
+        title: 'One',
+        visibility: { chat: true, editor: false },
+      },
+      { baseUrl: 'http://api.test' },
+    )).rejects.toMatchObject({ name: 'authorization_error', status: 403 })
+
+    expect(mutationHeaders).toEqual([null])
+  })
+
+  it('does not carry a bootstrap token across an identity transition', async () => {
+    vi.stubGlobal('document', { cookie: '' })
+    const mutationHeaders: Array<string | null> = []
+    const fetchMock = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (String(input).endsWith('/api/auth/session')) {
+        return jsonResponse({
+          authenticated: true,
+          csrf_token: 'user-one-token',
+          user: { display_name: 'Ada', email: 'ada@example.de', id: 'user-1', role: 'user' },
+        })
+      }
+      mutationHeaders.push(new Headers(init?.headers).get('X-CSRF-Token'))
+      return jsonResponse({
+        error: { message: 'Forbidden', type: 'authorization_error' },
+      }, 403)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchAuthSession({ baseUrl: 'http://api.test' })
+    setExpectedUserIdentity('user-2')
+    await expect(updatePromptTemplate(
+      'one',
+      {
+        category: null,
+        content_markdown: 'a',
+        expected_revision: 1,
+        include_in_autocomplete: true,
+        label: 'one',
+        title: 'One',
+        visibility: { chat: true, editor: false },
+      },
+      { baseUrl: 'http://api.test' },
+    )).rejects.toMatchObject({ name: 'authorization_error', status: 403 })
+
+    expect(mutationHeaders).toEqual([null])
+  })
+
+  it('clears the in-memory token only after logout is confirmed', async () => {
+    vi.stubGlobal('document', { cookie: '' })
+    const logoutHeaders: Array<string | null> = []
+    const mutationHeaders: Array<string | null> = []
+    const fetchMock = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input)
+      if (url.endsWith('/api/auth/session')) {
+        return jsonResponse({
+          authenticated: true,
+          csrf_token: 'fresh-token',
+          user: { display_name: 'Ada', email: 'ada@example.de', id: 'user-1', role: 'user' },
+        })
+      }
+      if (url.endsWith('/api/auth/logout')) {
+        logoutHeaders.push(new Headers(init?.headers).get('X-CSRF-Token'))
+        return jsonResponse({ logged_out: true })
+      }
+      mutationHeaders.push(new Headers(init?.headers).get('X-CSRF-Token'))
+      return jsonResponse({
+        error: { message: 'Forbidden', type: 'authorization_error' },
+      }, 403)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchAuthSession({ baseUrl: 'http://api.test' })
+    await logoutSession({ baseUrl: 'http://api.test' })
+    await expect(updatePromptTemplate(
+      'one',
+      {
+        category: null,
+        content_markdown: 'a',
+        expected_revision: 1,
+        include_in_autocomplete: true,
+        label: 'one',
+        title: 'One',
+        visibility: { chat: true, editor: false },
+      },
+      { baseUrl: 'http://api.test' },
+    )).rejects.toMatchObject({ name: 'authorization_error', status: 403 })
+
+    expect(logoutHeaders).toEqual(['fresh-token'])
+    expect(mutationHeaders).toEqual([null])
+  })
+
+  it('refreshes once for concurrent typed CSRF failures and retries each mutation once', async () => {
+    vi.stubGlobal('document', { cookie: 'inqtrix_csrf=stale-token' })
+    let refreshCalls = 0
+    const attempts = new Map<string, number>()
+    const mutationHeaders = new Map<string, Array<string | null>>()
+    const fetchMock = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input)
+      if (url.endsWith('/api/auth/session')) {
+        refreshCalls += 1
+        await Promise.resolve()
+        return jsonResponse({
+          authenticated: true,
+          csrf_token: 'fresh-token',
+          user: { display_name: 'Ada', email: 'ada@example.de', id: 'user-1', role: 'user' },
+        })
+      }
+      const count = (attempts.get(url) ?? 0) + 1
+      attempts.set(url, count)
+      const token = new Headers(init?.headers).get('X-CSRF-Token')
+      mutationHeaders.set(url, [...mutationHeaders.get(url) ?? [], token])
+      return count === 1 || token !== 'fresh-token'
+        ? jsonResponse({
+          detail: { error: { message: 'CSRF failed', type: 'csrf_error' } },
+        }, 403)
+        : jsonResponse({ id: url, revision: 2 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await Promise.all([
+      updatePromptTemplate(
+        'one',
+        {
+          category: null,
+          content_markdown: 'a',
+          expected_revision: 1,
+          include_in_autocomplete: true,
+          label: 'one',
+          title: 'One',
+          visibility: { chat: true, editor: false },
+        },
+        { baseUrl: 'http://api.test' },
+      ),
+      updatePromptTemplate(
+        'two',
+        {
+          category: null,
+          content_markdown: 'b',
+          expected_revision: 1,
+          include_in_autocomplete: true,
+          label: 'two',
+          title: 'Two',
+          visibility: { chat: true, editor: false },
+        },
+        { baseUrl: 'http://api.test' },
+      ),
+    ])
+
+    expect(refreshCalls).toBe(1)
+    expect(attempts.get('http://api.test/v1/prompt-templates/one')).toBe(2)
+    expect(attempts.get('http://api.test/v1/prompt-templates/two')).toBe(2)
+    expect(mutationHeaders.get('http://api.test/v1/prompt-templates/one')).toEqual([
+      'stale-token',
+      'fresh-token',
+    ])
+    expect(mutationHeaders.get('http://api.test/v1/prompt-templates/two')).toEqual([
+      'stale-token',
+      'fresh-token',
+    ])
+  })
+
+  it('repairs a missing cookie once and never loops when the retry still fails CSRF', async () => {
+    vi.stubGlobal('document', { cookie: '' })
+    const mutationHeaders: Array<string | null> = []
+    const fetchMock = vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (String(input).endsWith('/api/auth/session')) {
+        return jsonResponse({
+          authenticated: true,
+          csrf_token: 'fresh-token',
+          user: { display_name: null, email: null, id: 'user-1', role: 'user' },
+        })
+      }
+      mutationHeaders.push(new Headers(init?.headers).get('X-CSRF-Token'))
+      return jsonResponse({
+        detail: { error: { message: 'CSRF failed', type: 'csrf_error' } },
+      }, 403)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(updatePromptTemplate(
+      'one',
+      {
+        category: null,
+        content_markdown: 'a',
+        expected_revision: 1,
+        include_in_autocomplete: true,
+        label: 'one',
+        title: 'One',
+        visibility: { chat: true, editor: false },
+      },
+      { baseUrl: 'http://api.test' },
+    )).rejects.toMatchObject({ name: 'csrf_error', status: 403 })
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(mutationHeaders).toEqual([null, 'fresh-token'])
+  })
+
+  it('does not refresh PAT requests or ordinary forbidden responses', async () => {
+    vi.stubGlobal('document', { cookie: 'inqtrix_csrf=stale-token' })
+    const fetchMock = vi.fn(async () => jsonResponse({
+      error: { message: 'Forbidden', type: 'authorization_error' },
+    }, 403))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(updatePromptTemplate(
+      'one',
+      {
+        category: null,
+        content_markdown: 'a',
+        expected_revision: 1,
+        include_in_autocomplete: true,
+        label: 'one',
+        title: 'One',
+        visibility: { chat: true, editor: false },
+      },
+      { apiKey: 'pat', baseUrl: 'http://api.test' },
+    )).rejects.toMatchObject({ name: 'authorization_error', status: 403 })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not use an account-session bootstrap for guest CSRF failures', async () => {
+    vi.stubGlobal('document', { cookie: 'inqtrix_editor_guest_csrf=guest-token' })
+    const fetchMock = vi.fn(async () => jsonResponse({
+      detail: { error: { message: 'Guest CSRF failed', type: 'csrf_error' } },
+    }, 403))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(markGuestEditorCollaborationCommentsRead(
+      7,
+      { baseUrl: 'http://api.test' },
+    )).rejects.toMatchObject({ name: 'csrf_error', status: 403 })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('bound file upload reservation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reserves the stable asset id before multipart bytes move', async () => {
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      void _input
+      void _init
+      return jsonResponse({
+        id: 'file-a',
+        section_id: 'section-a',
+        upload_status: 'uploading',
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const file = new File(['hello'], 'A.txt', { type: 'text/plain' })
+
+    await reserveServerFileUpload(file, {
+      asset_id: 'file-a',
+      created_at: 10,
+      group_id: null,
+      label: 'a',
+      origin: 'editor',
+      section_id: 'section-a',
+      title: 'A.txt',
+      updated_at: 11,
+    }, { baseUrl: 'http://api.test', workspaceId: 'workspace-a' })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://api.test/v1/assets/file-a/upload-reservation',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      file_name: 'A.txt',
+      mime_type: 'text/plain',
+      section_id: 'section-a',
+      size_bytes: 5,
+    })
+  })
+
+  it('preserves a 202 durable retry instead of treating it as a ready file', async () => {
+    const response = {
+      asset: {
+        id: 'file-a',
+        server_file_id: null,
+        upload_operation_id: 'up_1',
+        upload_status: 'retrying',
+      },
+      object: 'upload_operation',
+      upload_operation: {
+        asset_id: 'file-a',
+        attempt: 1,
+        created_at: 1,
+        error: { message: 'storage unavailable', type: 'dependency_error' },
+        file_id: 'fl_1',
+        finished_at: null,
+        operation_id: 'up_1',
+        requires_bytes: false,
+        retryable: true,
+        stage: 'object_stored',
+        started_at: 2,
+        status: 'queued',
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(response, 202)))
+
+    const result = await uploadServerFile(
+      new File(['hello'], 'A.txt', { type: 'text/plain' }),
+      { baseUrl: 'http://api.test' },
+    )
+
+    expect(result).toMatchObject({
+      object: 'upload_operation',
+      upload_operation: { operation_id: 'up_1', status: 'queued' },
+    })
+  })
+
+  it('uses the canonical operation feed and retry endpoints', async () => {
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      void _input
+      void _init
+      return jsonResponse({ data: [], object: 'list' })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await listUploadOperations({ baseUrl: 'http://api.test' })
+    await retryUploadOperation('up 1', { baseUrl: 'http://api.test' })
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://api.test/v1/uploads')
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('http://api.test/v1/uploads/up%201/retry')
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ method: 'POST' }))
   })
 })
 
@@ -425,6 +1152,31 @@ describe('sharing client contract', () => {
     )
   })
 
+  it('loads bounded editor access metrics for the selected owner window', async () => {
+    const payload = {
+      direct_share_count: 3,
+      guest_link_count: 2,
+      guest_open_count: 8,
+      guest_session_count: 5,
+      last_guest_accessed_at: 123,
+      object: 'editor_access_summary',
+      share_links: [],
+      window: '30d',
+    }
+    const fetchMock = vi.fn(async () => jsonResponse(payload))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(getEditorAccessSummary(
+      'doc / 1',
+      '30d',
+      { baseUrl: 'http://api.test' },
+    )).resolves.toEqual(payload)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://api.test/v1/editor/documents/doc%20%2F%201/access-summary?window=30d',
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+
   it('grants by canonical user id without subject aliases', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({
       data: [],
@@ -513,6 +1265,62 @@ describe('knowledge collection client contract', () => {
       'http://api.test/v1/files/fl 1',
       expect.objectContaining({ method: 'GET' }),
     )
+  })
+
+  it('resolves a legacy index member through its encoded stable source id', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      chunk_count: 1,
+      collection_id: 'kc-1',
+      created_at: 1,
+      id: 'kd-1',
+      metadata: {},
+      title: 'Legacy',
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await resolveKnowledgeDocumentBySource(
+      'kc-1',
+      'asset:file with spaces',
+      { baseUrl: 'http://api.test' },
+    )
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://api.test/v1/knowledge/collections/kc-1/documents/by-source?source_id=asset%3Afile+with+spaces',
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+})
+
+describe('asset deletion operation client contract', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reads the retained scoped feed with keyset pagination', async () => {
+    const payload = { data: [], next_cursor: null }
+    const fetchMock = vi.fn(async (
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ) => {
+      void _input
+      void _init
+      return jsonResponse(payload)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(listAssetDeletionOperations({
+      baseUrl: 'http://api.test',
+      cursor: 'next operation',
+      limit: 200,
+      workspaceId: 'workspace-1',
+    })).resolves.toEqual(payload)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://api.test/v1/assets/deletion-operations?cursor=next+operation&limit=200',
+      expect.objectContaining({ method: 'GET' }),
+    )
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers
+    expect(headers.get('X-Inqtrix-Workspace-Id')).toBe('workspace-1')
   })
 })
 

@@ -230,16 +230,20 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
                 append_retry_notice=self._append_retry_notice,
             )
         except RateLimitError as exc:
-            log.error("FATAL Rate-Limit (Perplexity '%s'): %s", query, exc)
+            log.error("FATAL Rate-Limit bei Perplexity-WebSearch")
             raise AgentRateLimited(self._model, exc) from exc
         except APIStatusError as exc:
             if exc.status_code == 429:
-                log.error("FATAL Rate-Limit (Perplexity '%s'): %s", query, exc)
+                log.error("FATAL Rate-Limit bei Perplexity-WebSearch")
                 raise AgentRateLimited(self._model, exc) from exc
-            log.error("Perplexity-Suche fehlgeschlagen fuer '%s': %s", query, exc)
+            log.error(
+                "Perplexity-WebSearch fehlgeschlagen (status=%s, type=%s)",
+                exc.status_code,
+                type(exc).__name__,
+            )
             self._set_nonfatal_notice(
-                f"Perplexity-Suche fehlgeschlagen fuer Query '{query[:80]}'; "
-                "leeres Ergebnis wird weiterverwendet.",
+                "Perplexity-WebSearch fehlgeschlagen; leeres Ergebnis wird "
+                "als sichtbare Evidenzluecke weiterverwendet.",
                 code=(
                     "provider_timeout"
                     if exc.status_code == 408
@@ -252,20 +256,23 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
                 http_status=exc.status_code,
             )
             return GroundedSearchResult()
-        except APITimeoutError as exc:
-            log.error("Perplexity-Suche Timeout fuer '%s': %s", query, exc)
+        except APITimeoutError:
+            log.error("Perplexity-WebSearch hat das Provider-Timeout erreicht")
             self._set_nonfatal_notice(
-                f"Perplexity-Suche Timeout fuer Query '{query[:80]}'; "
-                "leeres Ergebnis wird weiterverwendet.",
+                "Perplexity-WebSearch hat das Provider-Timeout erreicht; "
+                "das leere Ergebnis bleibt als sichtbare Evidenzluecke erhalten.",
                 code="provider_timeout",
                 http_status=504,
             )
             return GroundedSearchResult()
         except APIError as exc:
-            log.error("Perplexity-Suche fehlgeschlagen fuer '%s': %s", query, exc)
+            log.error(
+                "Perplexity-WebSearch fehlgeschlagen (type=%s)",
+                type(exc).__name__,
+            )
             self._set_nonfatal_notice(
-                f"Perplexity-Suche fehlgeschlagen fuer Query '{query[:80]}'; "
-                "leeres Ergebnis wird weiterverwendet.",
+                "Perplexity-WebSearch fehlgeschlagen; leeres Ergebnis wird "
+                "als sichtbare Evidenzluecke weiterverwendet.",
                 code="temporary_transport",
                 http_status=503,
             )
@@ -274,7 +281,7 @@ class PerplexitySearch(_RetryNoticeMixin, _NonFatalNoticeMixin, SearchProvider):
         result = self._parse_response(response)
         if not result.answer and not result.sources:
             self._set_nonfatal_notice(
-                f"Perplexity-Suche fuer '{query[:80]}' lieferte keine Textantwort"
+                "Perplexity-WebSearch lieferte weder Antworttext noch Quellen."
             )
 
         with self._cache_lock:

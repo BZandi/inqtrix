@@ -105,19 +105,19 @@ export type AgentComposerSubmit = {
   collectionIds: string[]
   /** Target editor document for a patch assignment (M7); at most one. */
   documentId?: string
-  /** The selected engine (plan M2): the deterministic mission machine or
+  /** The selected engine: the deterministic mission machine or
    * the conversational kernel. Callers gate availability server-side. */
   engineMode: AgentEngineMode
-  /** Explicitly attached skills (plan M3, chips); server-admitted. */
+  /** Explicitly attached skill chips; server-admitted. */
   skillIds: string[]
   /** Source availability chosen for this Agent Desk session. */
   sourcePolicy: AgentSourcePolicy
   /** Optional direct route that applies to this message only. */
   executionDirective?: AgentExecutionDirective
-  /** Output form (plan M1): 'auto' lets the agent decide, 'chat' forces
+  /** Output form: 'auto' lets the agent decide, 'chat' forces
    * the inline answer, 'canvas' the memo document. */
   responseForm: 'auto' | 'chat' | 'canvas'
-  /** Thoroughness (plan M4): 'deep' = budgets + verification pass. */
+  /** Thoroughness: 'deep' = budgets + verification pass. */
   depth: 'normal' | 'deep'
   /** Selected Stufe; null on servers without the tiers capability (the
    * legacy depth toggle applies then). */
@@ -198,7 +198,7 @@ export function AgentComposer({
    * document scope entirely. */
   documents?: AgentDocumentOption[]
   draftQuestion: string
-  /** Thoroughness (plan M4); caller-owned like `autonomy`. */
+  /** Thoroughness; caller-owned like `autonomy`. */
   depthMode?: 'normal' | 'deep'
   /** True only when the server publishes `agent.depth_modes` with
    * 'deep' — the toggle hides otherwise (feature detection). */
@@ -208,8 +208,8 @@ export function AgentComposer({
   /** Published Stufen ladder (`capabilities.agent.tiers`); non-empty
    * replaces the legacy depth toggle with the Stufe control. */
   tiers?: AgentTierCapability[] | null
-  onTierModeChange?: (tier: AgentTierId) => void
-  /** The selected engine; caller-owned like `autonomy` (plan M2). */
+  onTierModeChange?: (tier: AgentTierId | null) => void
+  /** The selected engine; caller-owned like `autonomy`. */
   engineMode?: AgentEngineMode
   /** True only when the server registered the kernel
    * (`features.agent_kernel`) — the picker hides otherwise. */
@@ -235,7 +235,7 @@ export function AgentComposer({
   /** Server-fact summary for the run overview; null hides the menu
    * (older server without the agent capabilities block). */
   overview?: AgentOverview | null
-  /** Output-form override (plan M1); caller-owned like `autonomy`. */
+  /** Output-form override; caller-owned like `autonomy`. */
   responseForm?: AgentResponseForm
   running?: boolean
   selectedCollectionIds: string[]
@@ -709,6 +709,7 @@ export function AgentComposer({
         <Textarea
           aria-label={placeholder}
           className="min-h-16 resize-none border-0 bg-transparent pb-2 pl-2 pr-2 pt-2 text-sm font-normal leading-6 shadow-none placeholder:text-muted-foreground/70 focus-visible:ring-0"
+          data-testid="agent-composer-input"
           disabled={disabled}
           onBlur={() => {
             setMention(null)
@@ -1009,6 +1010,10 @@ export function AgentComposer({
                         <p className="px-2.5 pb-1 pt-1.5 t-caption text-muted-foreground/65">
                           {t.agent.composer.tierTitle}
                         </p>
+                        {/* No extra "no tier" entry: the composer always
+                            submits the effective Stufe (selected ?? the
+                            published default), so the active mark on the
+                            default IS the honest state (B6). */}
                         {tiers.map((tier) => (
                           <OptionMenuItem
                             active={tierMode === tier.id}
@@ -1092,6 +1097,7 @@ export function AgentComposer({
                 overview={overview}
                 responseFormValue={responseFormLabel(responseForm, t)}
                 responseForm={responseForm}
+                tier={tierMode}
                 execution={statusExecution}
                 executionDirective={executionDirective}
                 sourcePolicy={sourcePolicy}
@@ -1106,6 +1112,7 @@ export function AgentComposer({
                   <Button
                     aria-label={t.agent.composer.submit}
                     className="size-7 shrink-0 rounded-md bg-brand text-brand-foreground hover:bg-brand/90"
+                    data-testid="agent-submit"
                     disabled={!canSubmit}
                     size="icon"
                     type="submit"

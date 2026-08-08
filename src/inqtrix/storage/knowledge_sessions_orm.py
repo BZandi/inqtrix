@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Column,
+    CheckConstraint,
     Float,
     ForeignKey,
     Index,
@@ -74,8 +75,16 @@ knowledge_sessions = Table(
     # The ordered Q&A items as a JSON array (question + answer record). Heavy;
     # excluded from the list query, loaded on open.
     Column("items_json", Text, nullable=False, server_default=text("'[]'")),
+    Column("lifecycle_status", Text, nullable=False, server_default=text("'active'")),
+    Column("deletion_operation_id", Text, nullable=True),
+    Column("deletion_stage", Text, nullable=True),
+    Column("deletion_error", Text, nullable=True),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    CheckConstraint(
+        "lifecycle_status IN ('active', 'deleting', 'delete_failed')",
+        name="ck_knowledge_sessions_lifecycle_status",
+    ),
     Index(
         "ix_knowledge_sessions_owner_updated",
         "tenant_id",
@@ -83,5 +92,10 @@ knowledge_sessions = Table(
         "workspace_id",
         "updated_at",
         "id",
+    ),
+    Index(
+        "ix_knowledge_sessions_deletion_operation",
+        "tenant_id",
+        "deletion_operation_id",
     ),
 )

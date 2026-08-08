@@ -28,15 +28,21 @@ from typing import Any
 
 import uvicorn
 
-from inqtrix.logging_config import build_uvicorn_log_config, configure_logging
+from inqtrix.logging_config import (
+    build_uvicorn_log_config,
+    configure_logging,
+    read_logging_env,
+)
 from inqtrix.server import create_app
 from inqtrix.settings import Settings
 
 
+_LOGGING_ENV = read_logging_env()
 _INQTRIX_LOG_PATH = configure_logging(
-    enabled=os.getenv("INQTRIX_LOG_ENABLED", "").lower() == "true",
-    level=os.getenv("INQTRIX_LOG_LEVEL", "INFO"),
-    console=os.getenv("INQTRIX_LOG_CONSOLE", "").lower() == "true",
+    enabled=_LOGGING_ENV.enabled,
+    level=_LOGGING_ENV.level,
+    console=_LOGGING_ENV.console,
+    json_format=_LOGGING_ENV.json_format,
 )
 
 _SETTINGS = Settings()
@@ -53,10 +59,11 @@ def main() -> None:
         ws_max_size=_SETTINGS.collaboration.max_frame_bytes,
         ws_max_queue=_SETTINGS.collaboration.max_queued_frames,
     )
-    if os.getenv("INQTRIX_LOG_INCLUDE_WEB", "true").lower() != "false":
+    if _LOGGING_ENV.include_web:
         uvicorn_kwargs["log_config"] = build_uvicorn_log_config(
             _INQTRIX_LOG_PATH,
-            web_level=os.getenv("INQTRIX_LOG_WEB_LEVEL", "INFO"),
+            web_level=_LOGGING_ENV.web_level,
+            json_format=_LOGGING_ENV.json_format,
         )
     uvicorn.run(app, **uvicorn_kwargs)
 

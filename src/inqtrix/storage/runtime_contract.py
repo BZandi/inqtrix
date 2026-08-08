@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import (
+    DBAPIError,
+    DisconnectionError,
+    SQLAlchemyError,
+    TimeoutError as SQLAlchemyTimeoutError,
+)
 
 from inqtrix.storage.db import (
     build_engine,
@@ -20,18 +25,83 @@ from inqtrix.storage.migration_contract import (
     SCHEMA_HEAD_REVISION,
     TENANT_RLS_POLICY,
     TENANT_RLS_TABLES,
+    WORM_TENANT_TABLES,
     postgres_direct_relation_acl_sql,
     postgres_role_can_set_sql,
     postgres_tenant_table_acl_sql,
     tenant_policy_expression_matches,
+    worm_relname_sql,
 )
 
 _RUNTIME_PROBE_TENANT = "default"
+# Append-only tables carry INSERT/SELECT only; UPDATE/DELETE on them is a
+# privilege escalation, not a normal grant. Derived from ONE inventory so
+# a new WORM table cannot be forgotten in one of the four assertions.
+worm_relation_predicate = worm_relname_sql("relation")
 DatabaseRuntimeLoginPolicy = Literal["restricted", "bundled_legacy"]
 
 
 class DatabaseRuntimeContractError(RuntimeError):
     """Raised when a runtime connection is unsafe or on the wrong schema."""
+
+
+class DatabaseRuntimeUnavailableError(RuntimeError):
+    """Raised when the runtime contract cannot run for a transient outage."""
+
+
+_TRANSIENT_DATABASE_SQLSTATES = frozenset(
+    {
+        "53300",  # too_many_connections
+        "57P01",  # admin_shutdown
+        "57P02",  # crash_shutdown
+        "57P03",  # cannot_connect_now
+    }
+)
+
+
+def _database_sqlstate(exc: BaseException) -> str:
+    """Return a driver SQLSTATE without parsing localized error text."""
+    for candidate in (exc, getattr(exc, "orig", None)):
+        if candidate is None:
+            continue
+        value = getattr(candidate, "sqlstate", None) or getattr(
+            candidate,
+            "pgcode",
+            None,
+        )
+        if value:
+            return str(value)
+    return ""
+
+
+def _is_database_runtime_unavailable(exc: BaseException) -> bool:
+    """Classify known reachability failures without hiding verifier defects."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(
+            current,
+            (
+                OSError,
+                TimeoutError,
+                DisconnectionError,
+                SQLAlchemyTimeoutError,
+            ),
+        ):
+            return True
+        sqlstate = _database_sqlstate(current)
+        if sqlstate.startswith("08") or (
+            sqlstate in _TRANSIENT_DATABASE_SQLSTATES
+        ):
+            return True
+        if (
+            isinstance(current, DBAPIError)
+            and current.connection_invalidated
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 @dataclass(frozen=True)
@@ -100,12 +170,12 @@ def _assert_runtime_tenant_table_contract(rows: list[Any]) -> None:
             and bool(row["can_insert"])
             and (
                 (
-                    name == "audit_log"
+                    name in WORM_TENANT_TABLES
                     and not bool(row["can_update"])
                     and not bool(row["can_delete"])
                 )
                 or (
-                    name != "audit_log"
+                    name not in WORM_TENANT_TABLES
                     and bool(row["can_update"])
                     and bool(row["can_delete"])
                 )
@@ -311,7 +381,8 @@ def _assert_runtime_identity_contract(
         ):
             raise DatabaseRuntimeContractError(
                 "PostgreSQL runtime session login must be LOGIN NOSUPERUSER "
-                "NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION"
+                "NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION and "
+                "must not hold schema CREATE authority"
             )
         if (
             bool(row["session_owns_rls_table"])
@@ -418,7 +489,7 @@ SELECT
                       candidate.oid, relation.oid, 'TRIGGER'
                   )
                   OR (
-                      relation.relname = 'audit_log'
+                      {worm_relation_predicate}
                       AND (
                           has_table_privilege(
                               candidate.oid, relation.oid, 'UPDATE'
@@ -454,7 +525,7 @@ SELECT
                       'REFERENCES'
                   )
                   OR (
-                      relation.relname = 'audit_log'
+                      {worm_relation_predicate}
                       AND has_any_column_privilege(
                           candidate.oid,
                           relation.oid,
@@ -1066,7 +1137,7 @@ async def verify_database_runtime_contract(
                             current_user, relation.oid, 'REFERENCES'
                         )
                         OR (
-                            relation.relname = 'audit_log'
+                            {worm_relation_predicate}
                             AND has_any_column_privilege(
                                 current_user, relation.oid, 'UPDATE'
                             )
@@ -1348,13 +1419,30 @@ async def verify_database_url_runtime_contract(
     This is the worker bootstrap variant. It keeps engine construction in one
     shared contract instead of letting each process implement a subtly
     different pre-claim check.
+
+    Raises:
+        DatabaseRuntimeUnavailableError: A known DNS, connection, capacity or
+            timeout failure prevented verification.
+        DatabaseRuntimeContractError: The reachable database violates the
+            runtime role, schema, permission or tenant contract.
+        Exception: Unexpected verifier defects and unclassified configuration
+            failures remain visible and fatal to the worker.
     """
     engine = build_engine(database_url, null_pool=True)
     try:
-        return await verify_database_runtime_contract(
-            build_session_factory(engine),
-            app_role=app_role,
-            login_policy=login_policy,
-        )
+        try:
+            return await verify_database_runtime_contract(
+                build_session_factory(engine),
+                app_role=app_role,
+                login_policy=login_policy,
+            )
+        except DatabaseRuntimeUnavailableError:
+            raise
+        except Exception as exc:
+            if _is_database_runtime_unavailable(exc):
+                raise DatabaseRuntimeUnavailableError(
+                    "database runtime contract probe is temporarily unavailable"
+                ) from exc
+            raise
     finally:
         await engine.dispose()

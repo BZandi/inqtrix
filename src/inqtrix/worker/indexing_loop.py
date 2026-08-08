@@ -1,14 +1,13 @@
-"""The reindex worker loop: durable background re-embedding.
+"""Worker loop for durable knowledge-indexing operations.
 
-The reindex twin of :class:`~inqtrix.worker.loop.WorkerLoop`. It reuses
+The indexing twin of :class:`~inqtrix.worker.loop.WorkerLoop`. It reuses
 the entire generic claim/fence/heartbeat/reclaim/reconcile/cancel
 machinery in :class:`~inqtrix.worker.loop.BaseWorkerLoop` and supplies
-only the reindex specifics: the dispatch id field, the stale/cancel
-store calls on the reindex stream, and an execution body that runs the
-shared :func:`~inqtrix.services.indexing_service.execute_reindex_job`
+only operation-specific dispatch, stale/cancel store calls, and execution of
+either an isolated collection generation or an immutable document revision
 against a fenced job handle.
 
-The worker has no live principal, so it meters the re-embed against the
+The worker has no live principal, so it meters provider work against the
 ``QuotaSubject`` reconstructed from the persisted ``created_by_*``
 attribution on the claimed row — exactly as the run worker does.
 """
@@ -18,14 +17,27 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Callable
 
-from inqtrix.quota.models import QuotaSubject
 from inqtrix.auth.principal import Principal
 from inqtrix.execution_authority import AuthorizationRevoked
 from inqtrix.execution_failures import classify_execution_failure
-from inqtrix.server.indexing import IndexingJobHandle
-from inqtrix.services.indexing_service import execute_reindex_job
+from inqtrix.indexing_failures import IndexingDependencyError
+from inqtrix.knowledge.contextualize import (
+    ContextualizationDependencyError,
+    ContextualizationValidationError,
+)
+from inqtrix.knowledge.stores.ports import (
+    GenerationValidationError,
+    IndexGenerationSuperseded,
+)
+from inqtrix.quota.models import QuotaSubject
+from inqtrix.server.indexing import (
+    FencedIndexingJobHandle,
+    IndexingOperationKind,
+)
+from inqtrix.services.indexing_service import execute_indexing_operation
+from inqtrix.sync_bridge import run_coro_sync
 from inqtrix.urls import sanitize_error
 from inqtrix.worker.loop import _RECONCILE_MIN_AGE_SECONDS, BaseWorkerLoop
 
@@ -35,91 +47,23 @@ if TYPE_CHECKING:
         PostgresIndexingJobStore,
     )
     from inqtrix.runs.indexing_queue import QueuedIndexingJob, ValkeyIndexingQueue
+    from inqtrix.services.execution_dependency_authority import CollectionEditAuthorizer
     from inqtrix.services.knowledge_service import KnowledgeService
     from inqtrix.services.quota_service import QuotaService
-    from inqtrix.services.execution_dependency_authority import (
-        CollectionEditAuthorizer,
-    )
 
 log = logging.getLogger("inqtrix")
 
 
-class FencedIndexingJobHandle(IndexingJobHandle):
-    """Reindex job handle whose writes carry the claim fence.
-
-    The fence ``(claimed_by, attempt)`` makes a reclaimed zombie's late
-    progress/terminal writes a visible no-op instead of corrupting the
-    superseding attempt's stream. ``terminal_landed`` records whether
-    THIS attempt's terminal write actually landed — the worker acks the
-    dispatch message only when it did.
-    """
-
-    def __init__(
-        self,
-        store: "PostgresIndexingJobStore",
-        job_id: str,
-        cancel_event: threading.Event,
-        attempt: int,
-    ) -> None:
-        super().__init__(store, job_id, cancel_event)
-        self._fence_attempt = attempt
-        self.terminal_landed = False
-
-    def begin(self, total_documents: int) -> None:
-        """Record the total document count, fenced to this attempt."""
-        self._store.set_total(
-            self.job_id, total_documents, fence_attempt=self._fence_attempt
-        )
-
-    def progress(
-        self, *, completed_documents: int, current_document_title: str = ""
-    ) -> None:
-        """Emit one progress step, fenced to this attempt."""
-        self._store.progress(
-            self.job_id,
-            completed_documents=completed_documents,
-            current_document_title=current_document_title,
-            fence_attempt=self._fence_attempt,
-        )
-
-    def document_completed(self, document_id: str) -> None:
-        """Emit a per-document completion event, fenced to this attempt."""
-        self._store.document_completed(
-            self.job_id, document_id, fence_attempt=self._fence_attempt
-        )
-
-    def complete(self) -> None:
-        """Mark the job completed, fenced to this attempt."""
-        self.terminal_landed = self._store.complete(
-            self.job_id, fence_attempt=self._fence_attempt
-        )
-
-    def fail(self, message: str, *, error_type: str = "server_error") -> None:
-        """Mark the job failed, fenced to this attempt."""
-        self.terminal_landed = self._store.fail(
-            self.job_id,
-            message,
-            error_type=error_type,
-            fence_attempt=self._fence_attempt,
-        )
-
-    def cancel(self, reason: str = "cancelled") -> None:
-        """Mark the job cancelled, fenced to this attempt."""
-        self.terminal_landed = self._store.mark_cancelled(
-            self.job_id, reason=reason, fence_attempt=self._fence_attempt
-        )
-
-
 class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob"]):
-    """Claim-and-execute loop for durable reindex jobs.
+    """Claim-and-execute loop for durable indexing operations.
 
     Args:
-        store: Postgres reindex-job store (claims, events, terminal
+        store: Postgres indexing-job store (claims, events, terminal
             writes).
-        queue: Reindex Valkey queue bound to this worker's consumer name.
+        queue: Indexing Valkey queue bound to this worker's consumer name.
         knowledge_service: The collection/document service whose store
-            and re-embed pipeline the worker drives.
-        concurrency: Parallel re-embeds in this process.
+            and preparation pipeline the worker drives.
+        concurrency: Parallel indexing operations in this process.
         max_attempts: Delivery budget before dead-lettering.
         heartbeat_seconds: Idle-reset interval for in-flight entries.
         claim_idle_seconds: Reclaim threshold for entries whose owner
@@ -170,6 +114,20 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
     def _enqueue_dispatch(self, entity_id: str, tenant_id: str) -> None:
         self._queue.enqueue(job_id=entity_id, tenant_id=tenant_id)
 
+    def _periodic_maintenance(self) -> None:
+        report = run_coro_sync(self._knowledge_service.prune_expired_generations_all())
+        if report["collections"] or report["chunks"]:
+            log.info(
+                "Generation retention removed %d chunks across %d collections",
+                report["chunks"],
+                report["collections"],
+                extra={
+                    "event": "knowledge.generation.retention.completed",
+                    "collection_count": report["collections"],
+                    "chunk_count": report["chunks"],
+                },
+            )
+
     def _execute(
         self,
         job: "QueuedIndexingJob",
@@ -181,8 +139,41 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
         handle = FencedIndexingJobHandle(
             self._store, job.job_id, cancel_event, claimed.attempt
         )
+        # Root span + log correlation for the whole indexing segment;
+        # embedding spans (C0 wrapper) nest under it. Worker threads are
+        # reused — both undone in the outer finally.
+        from contextlib import ExitStack as _ExitStack
+
+        from inqtrix.observability import semconv
+        from inqtrix.observability.context import (
+            bind_log_context,
+            reset_log_context,
+        )
+        from inqtrix.observability.otel import operation_span
+
+        # Setup INSIDE the try so a telemetry failure never skips the
+        # finally (_finish_active); a leaked slot would wedge the worker.
+        telemetry_stack = _ExitStack()
+        log_tokens: dict = {}
         old_message_acked = False
         try:
+            telemetry_stack.enter_context(
+                operation_span(
+                    "inqtrix.indexing",
+                    {
+                        semconv.INQTRIX_RUN_ID: job.job_id,
+                        semconv.INQTRIX_TENANT: job.tenant_id,
+                        semconv.INQTRIX_ATTEMPT: claimed.attempt,
+                        semconv.LANGFUSE_TRACE_NAME: "indexing",
+                    },
+                )
+            )
+            log_tokens = bind_log_context(
+                run_id=job.job_id, tenant=job.tenant_id
+            )
+            from inqtrix.observability.context import bind_feature
+
+            bind_feature("indexing")
             try:
                 # Reconstruct quota attribution from the persisted canonical
                 # user UUID — the worker has no live principal, but the
@@ -195,12 +186,12 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
                 has_tenant = claimed.created_by_tenant_id is not None
                 if has_user != has_tenant:
                     raise AuthorizationRevoked(
-                        "reindex job has incomplete requester attribution"
+                        "indexing job has incomplete requester attribution"
                     )
                 if has_user:
                     if not claimed.created_by_tenant_id:
                         raise AuthorizationRevoked(
-                            "reindex job has incomplete requester attribution"
+                            "indexing job has incomplete requester attribution"
                         )
                     actor_user_id = uuid.UUID(str(claimed.created_by_user_id))
                     principal = Principal(
@@ -222,46 +213,140 @@ class IndexingWorkerLoop(BaseWorkerLoop["QueuedIndexingJob", "ClaimedIndexingJob
                             principal,
                         )
 
-                execute_reindex_job(
+                execute_indexing_operation(
                     handle,
                     knowledge_service=self._knowledge_service,
+                    operation_kind=claimed.operation_kind.value,
                     collection_id=claimed.collection_id,
                     embedding_model=claimed.embedding_model,
+                    generation_id=claimed.generation_id,
+                    document_id=claimed.document_id,
+                    revision_id=claimed.revision_id,
                     quota_service=self._quota_service,
                     quota_subject=quota_subject,
                     authority_check=_check_authority,
                     actor_user_id=actor_user_id,
+                    tenant_id=claimed.created_by_tenant_id,
+                )
+                if (
+                    handle.cancelled
+                    and claimed.operation_kind
+                    == IndexingOperationKind.COLLECTION_GENERATION
+                ):
+                    run_coro_sync(
+                        self._knowledge_service.discard_generation(
+                            collection_id=claimed.collection_id,
+                            generation_id=claimed.generation_id,
+                            fence_job_id=job.job_id,
+                            fence_attempt=claimed.attempt,
+                            actor_user_id=actor_user_id,
+                        )
+                    )
+            except ContextualizationDependencyError as exc:
+                handle.pause_dependency(str(exc), error_type=exc.error_type)
+            except IndexingDependencyError as exc:
+                handle.pause_dependency(str(exc), error_type=exc.error_type)
+            except ContextualizationValidationError as exc:
+                handle.pause_validation(str(exc))
+            except GenerationValidationError as exc:
+                handle.pause_validation(str(exc))
+            except IndexGenerationSuperseded:
+                # A successor attempt owns the same generation. The stale
+                # worker must neither clean its staging nor write terminal
+                # state; both would corrupt the successor's work.
+                log.warning(
+                    "Worker %s lost the publication fence for indexing job %s",
+                    self._store.worker_id,
+                    job.job_id,
                 )
             except Exception as exc:  # noqa: BLE001 — terminal-write then ack
-                log.exception("Worker-Reindex %s fehlgeschlagen", job.job_id)
-                handle.fail(
-                    sanitize_error(exc),
-                    error_type=classify_execution_failure(exc),
+                log.error(
+                    "Indexing worker job %s failed (error_type=%s)",
+                    job.job_id,
+                    type(exc).__name__,
                 )
+                if (
+                    claimed.operation_kind
+                    == IndexingOperationKind.COLLECTION_GENERATION
+                ):
+                    try:
+                        run_coro_sync(
+                            self._knowledge_service.discard_generation(
+                                collection_id=claimed.collection_id,
+                                generation_id=claimed.generation_id,
+                                fence_job_id=job.job_id,
+                                fence_attempt=claimed.attempt,
+                                actor_user_id=actor_user_id,
+                            )
+                        )
+                    except Exception as cleanup_exc:  # noqa: BLE001 - terminal failure visible
+                        log.error(
+                            "Indexing job %s staging cleanup failed "
+                            "(error_type=%s)",
+                            job.job_id,
+                            type(cleanup_exc).__name__,
+                        )
+                failure_code = classify_execution_failure(exc)
+                handle.fail(sanitize_error(exc), error_type=failure_code)
+                # The root span is still current here (the telemetry
+                # stack closes in the outer finally). Without this a
+                # failed indexing job renders as a clean span in the
+                # waterfall — the run path marks its span the same way.
+                from inqtrix.observability.otel import (
+                    enrich_current_span,
+                    mark_current_span_error,
+                )
+
+                mark_current_span_error(failure_code)
+                enrich_current_span({"inqtrix.outcome": "failed"})
             if handle.terminal_landed:
                 # Terminal state is committed; only now may the stream
                 # forget the job.
                 self._queue.ack(job.message_id)
                 old_message_acked = True
+                _count_worker_job("indexing", "terminal")
             else:
                 # Fenced out: a superseding attempt owns the job AND this
                 # very message id — acking here would strip the new
                 # owner's crash-recovery entry.
                 log.warning(
-                    "Worker %s: Reindex-Job %s wurde waehrend der "
-                    "Ausfuehrung von einem anderen Worker uebernommen — "
-                    "Ergebnis verworfen, Nachricht bleibt beim neuen Owner.",
+                    "Worker %s: indexing job %s was taken over during "
+                    "execution; its result was fenced and the dispatch "
+                    "remains with the new owner.",
                     self._store.worker_id,
                     job.job_id,
                 )
-        except Exception:  # noqa: BLE001 — Futures here are unobserved
-            log.exception(
-                "Worker %s: Abschlussphase fuer Reindex-Job %s "
-                "fehlgeschlagen — Redelivery uebernimmt.",
+                _count_worker_job("indexing", "fenced")
+        except Exception as exc:  # noqa: BLE001 — Futures here are unobserved
+            log.error(
+                "Worker %s: terminal phase for indexing job %s failed; "
+                "redelivery remains responsible (error_type=%s).",
                 self._store.worker_id,
                 job.job_id,
+                type(exc).__name__,
             )
+            _count_worker_job("indexing", "finalization_failed")
         finally:
-            self._finish_active(
-                job, allow_successor=old_message_acked
-            )
+            reset_log_context(log_tokens)
+            _clear_feature_after_segment()
+            telemetry_stack.close()
+            self._finish_active(job, allow_successor=old_message_acked)
+
+
+def _clear_feature_after_segment() -> None:
+    """Reused threads must not leak feature label or ledger subject."""
+    from inqtrix.observability.context import (
+        clear_feature,
+        clear_usage_subject,
+    )
+
+    clear_feature()
+    clear_usage_subject()
+
+
+def _count_worker_job(loop_name: str, outcome: str) -> None:
+    from inqtrix.observability.metrics_defs import active_metrics
+
+    metrics = active_metrics()
+    if metrics is not None:
+        metrics.count_worker_job(loop=loop_name, outcome=outcome)

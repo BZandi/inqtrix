@@ -101,12 +101,11 @@ def build_score_snapshot(
             "final_confidence": int(extra.get("final_confidence", state.get("final_confidence", 0)) or 0),
             "evidence_consistency": int(state.get("evidence_consistency", 0) or 0),
             "evidence_sufficiency": int(state.get("evidence_sufficiency", 0) or 0),
-            # Observer for OPEN-EVAL-1 (confidence-regression-stop design
-            # question, deferred 2026-05-10). Mirrors the same key that
-            # `evaluate()` writes into `iteration_log`, so a snapshot
-            # consumer can spot the marker without having to merge the
-            # iteration log. Auto-revert / new stop heuristic remains
-            # off-scope until OPEN-EVAL-1 is decided.
+            # Mirrors the marker written by `evaluate()` into
+            # `iteration_log`, so a snapshot consumer can identify an
+            # unjustified confidence drop without merging the iteration log.
+            # The marker is observational and does not add an automatic
+            # revert or another stopping heuristic.
             "confidence_unjustified_drop": bool(extra.get("confidence_unjustified_drop", False)),
         },
         "stop": {

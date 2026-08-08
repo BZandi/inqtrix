@@ -7,7 +7,6 @@ import re
 from abc import ABC, abstractmethod
 
 from inqtrix.i18n import t
-from inqtrix.runtime_logging import format_log_excerpt
 from inqtrix.settings import AgentSettings
 from inqtrix.state import emit_progress
 from inqtrix.text import is_none_value
@@ -313,14 +312,14 @@ class MultiSignalStopCriteria(StopCriteriaStrategy):
         comp_text = m.group(1).strip()
         if is_none_value(comp_text):
             s["competing_events"] = ""
-            log.info(
-                "TRACE evaluate: competing_events=None (parsed '%s')",
-                comp_text.lower()[:60],
-            )
+            log.info("TRACE evaluate: competing_events_present=false")
             return conf
 
         s["competing_events"] = comp_text
-        log.info("TRACE evaluate: competing_events='%s'", format_log_excerpt(comp_text, limit=300))
+        log.info(
+            "TRACE evaluate: competing_events_present=true chars=%d",
+            len(comp_text),
+        )
         emit_progress(s, t(s, "multiple_explanations"))
 
         _prev_comp = s.get("prev_competing_events", "")

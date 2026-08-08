@@ -12,7 +12,7 @@ from inqtrix.domains import GENERIC_QUERY_TERMS_DE, SOURCE_TIER_WEIGHTS
 from inqtrix.prompts import default_claims_prompt_view
 from inqtrix.runtime_logging import make_record_id
 from inqtrix.strategies._source_tiering import SourceTieringStrategy
-from inqtrix.text import NEGATION_TOKENS, STOPWORDS, is_none_value, norm_match_token, tokenize
+from inqtrix.text import NEGATION_TOKENS, STOPWORDS, norm_match_token, tokenize
 from inqtrix.urls import domain_from_url, normalize_url
 
 _STATUS_WEIGHTS: dict[str, float] = {
@@ -449,12 +449,18 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
             has_mainstream = tier_counts.get("mainstream", 0) > 0
             has_stakeholder = tier_counts.get("stakeholder", 0) > 0
             for url in source_urls:
-                if self._tiering.tier_for_url(url) in {"primary", "mainstream", "stakeholder"}:
+                if self._tiering.tier_for_url(url) in {
+                    "primary",
+                    "mainstream",
+                    "stakeholder",
+                }:
                     domain = domain_from_url(url)
                     if domain:
                         supporting_quality_domains.add(domain)
             supporting_domain_count = len(supporting_domains)
-            supporting_non_low_domain_count = len(supporting_non_low_domains)
+            supporting_non_low_domain_count = len(
+                supporting_non_low_domains
+            )
             independent_support_count = max(
                 len(supporting_evidence_ids),
                 supporting_domain_count,
@@ -477,22 +483,13 @@ class DefaultClaimConsolidator(ClaimConsolidationStrategy):
                 status = "verified"
                 reason = "mehrfach unabhaengig belegt"
                 verification_basis = "verified_cross_checked"
-            elif support_count >= 2 and (has_primary or has_mainstream or has_stakeholder):
+            elif support_count >= 2 and (
+                has_primary or has_mainstream or has_stakeholder
+            ):
                 status = "verified"
                 reason = "mehrfach belegt"
                 verification_basis = "verified_cross_checked"
             elif support_count >= 1 and (has_primary or has_mainstream):
-                # Tier-gated single-quality-source verification: a single hit
-                # from a primary tier (SEC, ECB, IR pages, government, ...)
-                # or mainstream tier (Reuters, Bloomberg, FT, WSJ, NYT, ARD,
-                # ...) source qualifies the claim as ``verified`` -- one
-                # institutional-editorial source is real evidence, just not
-                # cross-checked. Stakeholder/unknown/low single hits do NOT
-                # trigger this branch and fall through to ``unverified``.
-                # The single-source nature is surfaced separately by
-                # ``evidence_depth_gap`` and the EVIDENZTIEFE prompt block so
-                # the answer attributes such claims inline as one source's
-                # statement, not as cross-checked hard facts.
                 status = "verified"
                 reason = "belegt durch hochwertige Quelle"
                 verification_basis = "verified_quality_source"

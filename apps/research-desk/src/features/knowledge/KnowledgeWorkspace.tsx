@@ -58,7 +58,7 @@ import type {
   KnowledgeThreadItemRecord,
 } from '@/features/project/types'
 import type { KnowledgeSessionHistorySection } from '@/features/project/selectors'
-import type { KnowledgeSearchHit } from '@/features/researchRuns/types'
+import type { KnowledgeSearchHit, KnowledgeSearchWarning } from '@/features/researchRuns/types'
 import { AnswerCard } from './AnswerCard'
 import {
   knowledgeCompletionHandoffId,
@@ -133,6 +133,7 @@ type KnowledgeWorkspaceProps = {
   onDemoAsk?: () => void
   onDeleteSessionGroup: (groupId: string) => void
   onDeleteSession: (sessionId: string) => void
+  onRetrySessionDeletion: (sessionId: string) => void
   onDeleteItems: (itemIds: string[]) => void
   onOpenDatabase?: () => void
   onHistoryPanelSizeChange: (size: number) => void
@@ -194,6 +195,7 @@ export function KnowledgeWorkspace({
   onDemoAsk,
   onDeleteSessionGroup,
   onDeleteSession,
+  onRetrySessionDeletion,
   onDeleteItems,
   onHistoryPanelSizeChange,
   onHistoryVisibleChange,
@@ -411,10 +413,12 @@ export function KnowledgeWorkspace({
     setViewerTarget({
       collectionLabel: collectionTitleByBackendId.get(hit.collection_id) ?? undefined,
       documentId: hit.document_id,
-      // The chunk text may carry a contextualization prefix that is not
-      // part of the source document; the query terms act as fallback.
-      highlightTargets: [hit.text, ...searchTermsFromQuery(query)],
+      highlightTargets: [hit.excerpt, ...searchTermsFromQuery(query)],
       title: hit.document_title,
+      excerpt: hit.excerpt,
+      chunkIndex: hit.chunk_index,
+      pageNumber: hit.page_number,
+      verified: hit.provenance_status === 'verified_span',
     })
   }
 
@@ -443,6 +447,7 @@ export function KnowledgeWorkspace({
       onDeleteSessionGroup={onDeleteSessionGroup}
       onCreateSession={onCreateSession}
       onDeleteSession={onDeleteSession}
+      onRetrySessionDeletion={onRetrySessionDeletion}
       onMoveSessionGroup={onMoveSessionGroup}
       onMoveSessionToGroup={onMoveSessionToGroup}
       onRenameSessionGroup={onRenameSessionGroup}
@@ -1420,6 +1425,7 @@ function KnowledgeFindMode({
   const { t } = useLocale()
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<KnowledgeSearchHit[]>([])
+  const [warnings, setWarnings] = useState<KnowledgeSearchWarning[]>([])
   const [state, setState] = useState<FindResultsState>('idle')
   const [error, setError] = useState<string | null>(null)
   const requestIdRef = useRef(0)
@@ -1432,32 +1438,37 @@ function KnowledgeFindMode({
   )
 
   useEffect(() => {
+    const requestId = (requestIdRef.current += 1)
     const trimmed = query.trim()
     if (trimmed === '') {
       setState('idle')
       setHits([])
+      setWarnings([])
       return undefined
     }
     if (trimmed.length < FIND_MIN_QUERY_LENGTH) {
       setState('short')
       setHits([])
+      setWarnings([])
       return undefined
     }
 
     setState('searching')
-    const requestId = (requestIdRef.current += 1)
+    setWarnings([])
     const timeoutId = window.setTimeout(() => {
       dataSource
         .search(trimmed, backendCollectionIds, FIND_TOP_K)
-        .then((nextHits) => {
+        .then((result) => {
           if (requestIdRef.current !== requestId) return
-          setHits(nextHits)
+          setHits(result.data)
+          setWarnings(result.warnings)
           setError(null)
           setState('ready')
         })
         .catch((searchError: unknown) => {
           if (requestIdRef.current !== requestId) return
           setHits([])
+          setWarnings([])
           setError(searchError instanceof Error ? searchError.message : null)
           setState('error')
         })
@@ -1510,6 +1521,7 @@ function KnowledgeFindMode({
             onOpenSnippet={(hit) => onOpenSnippet(hit, query)}
             query={query}
             state={state}
+            warnings={warnings}
           />
         </div>
       </div>

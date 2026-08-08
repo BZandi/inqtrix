@@ -9,15 +9,17 @@ import {
 import { useReducedMotion } from 'motion/react'
 import {
   uploadServerFile,
+  reserveServerFileUpload,
   createChatCompletion,
   fetchKnowledgeDocumentText,
   fetchServerFileContent,
   fetchServerFileInfo,
-  fetchServerFileText,
   hasHttpStatus,
   listResearchRuns,
   loginLdap,
   loginLocal,
+  saveAssetGroup,
+  saveAssetSection,
   searchKnowledge,
   setExpectedUserIdentity,
   streamChatCompletion,
@@ -49,9 +51,13 @@ import { useVectorIndexHistoryApi } from '@/features/fileLibrary/useVectorIndexH
 import { useAccountPreferences } from '@/features/account/useAccountPreferences'
 import { useProjectServerImport } from '@/features/project/useProjectServerImport'
 import { prepareProjectFileImport } from '@/features/project/detachedImport'
-import EditorWorkspace from '@/features/editor/EditorWorkspace'
+import EditorWorkspace, {
+  type EditorDocumentDetailsSummary,
+  type EditorRecoveryCaptureProvider,
+} from '@/features/editor/EditorWorkspace'
 import { exportProject, loadProject, saveProject } from '@/features/project/fileSystem'
 import {
+  attachmentContextReadiness,
   assetIdsFromChatRefs,
   chatAttachmentsFromRefs,
   projectChatHistorySections,
@@ -62,6 +68,7 @@ import {
   dedupeChatContextRefs,
   fileGroupMentionOptions,
   fileMentionOptions,
+  projectAgentTargetEditorDocuments,
   projectAllKnowledgeItems,
   projectChatThreads,
   projectChatRules,
@@ -72,6 +79,7 @@ import {
   projectResearchJobs,
   projectVectorIndexes,
   selectedResearchRun,
+  type ChatAttachmentChipModel,
 } from '@/features/project/selectors'
 import { chatFunctionChainTemplatesFromRefs } from '@/features/project/chatRules'
 import type {
@@ -111,8 +119,12 @@ import type {
 } from '@/features/researchRuns/types'
 import SettingsWorkspace from '@/features/settings/SettingsWorkspace'
 import { KnowledgeWorkspace, type KnowledgeAskOptions, type KnowledgeMode } from '@/features/knowledge/KnowledgeWorkspace'
-import { knowledgeAnswerFromRunResult } from '@/features/knowledge/answer'
+import {
+  knowledgeAnswerFromRunResult,
+  knowledgeAnswerWithRunProgress,
+} from '@/features/knowledge/answer'
 import { buildKnowledgeAskMessages } from '@/features/knowledge/conversationContext'
+import { knowledgeComposerContextForSession } from '@/features/knowledge/composerSessionContext'
 import { AgentWorkspace } from '@/features/agent/AgentWorkspace'
 import { effectiveAgentDepth } from '@/features/agent/agentStatusOverview'
 import { createAgentDemo } from '@/features/agent/demo'
@@ -156,10 +168,26 @@ import type { InboxShare } from '@/features/sharing/types'
 import { seedSystemHealth } from '@/features/admin/demo'
 import { useTemplateSync } from '@/features/promptLibrary/useTemplateSync'
 import { FileLibraryWorkspace } from '@/features/fileLibrary/FileLibraryWorkspace'
+import {
+  assetRecordFromServer,
+  serverGroupPayload,
+  serverSectionPayload,
+  serverUploadBinding,
+} from '@/features/fileLibrary/assetSync'
 import { PromptLibraryWorkspace } from '@/features/promptLibrary/PromptLibraryWorkspace'
 import { modelOverridesFromSelection } from '@/features/researchRuns/modelSelection'
 import { useSkillsApi } from '@/features/skills/useSkillsApi'
-import { ingestFiles, scheduleServerParse, type ServerFileUpload } from '@/features/files/ingest'
+import {
+  createFileAssetPlaceholders,
+  createFileUploadRegistry,
+  runFileIngestPipeline,
+  serverUploadFailureMessage,
+  type ServerFileUpload,
+  type FileUploadRegistry,
+  type UploadBinding,
+  uploadBindingForRecord,
+} from '@/features/files/ingest'
+import { createDefaultFileParser } from '@/features/files/parsing'
 import { chatStateForIncognito, ingestIncognitoFiles } from './incognitoAttachments'
 import { moveItem } from '@/features/composer/reorder'
 import { temporaryFileSectionId } from '@/features/files/sections'
@@ -177,6 +205,7 @@ import { ProfileAvatar } from './components/ProfileAvatar'
 import { ResearchWorkspace } from './components/ResearchWorkspace'
 import { Topbar } from './components/Topbar'
 import { useMediaQuery } from './hooks/useMediaQuery'
+import type { ResearchSubmissionOutcome } from './researchSubmission'
 import {
   initializeResearchDeskState,
   researchDeskReducer,
@@ -234,9 +263,13 @@ export function ResearchDesk({
   const { locale, setLocale, t } = useLocale()
   const {
     agentMemoryEnabled,
+    agentModelTier,
+    chatModelTier,
     contrastMode,
     preset: themePreset,
     setAgentMemoryEnabled,
+    setAgentModelTier,
+    setChatModelTier,
     setContrastMode,
     setPreset: setThemePreset,
     setTheme,
@@ -251,6 +284,25 @@ export function ResearchDesk({
     undefined,
     initializeResearchDeskState,
   )
+  const uploadRegistryRef = useRef<FileUploadRegistry | null>(null)
+  if (uploadRegistryRef.current === null) {
+    uploadRegistryRef.current = createFileUploadRegistry()
+  }
+  const uploadRegistry = uploadRegistryRef.current
+  useEffect(() => {
+    uploadRegistry.clear()
+  }, [state.projectEpoch, uploadRegistry])
+  useEffect(() => {
+    for (const asset of Object.values(state.fileAssets)) {
+      if (
+        asset.uploadStatus === 'ready'
+        || asset.uploadStatus === 'cancelled'
+        || (asset.lifecycleStatus ?? 'active') !== 'active'
+      ) {
+        uploadRegistry.delete(asset.id)
+      }
+    }
+  }, [state.fileAssets, uploadRegistry])
   const [projectAction, setProjectAction] = useState<'export' | 'load' | 'save' | null>(null)
   const [projectActionError, setProjectActionError] = useState<string | null>(null)
   const [apiKey, setApiKey] = useState('')
@@ -287,6 +339,7 @@ export function ResearchDesk({
   const [incognitoAttachmentRefs, setIncognitoAttachmentRefs] = useState<ChatContextReferenceRecord[]>([])
   const [chatStreamingEnabled, setChatStreamingEnabled] = useState(true)
   const chatControllerByThreadIdRef = useRef<Map<string, AbortController>>(new Map())
+  const chatSubmittingThreadIdsRef = useRef<Set<string>>(new Set())
   const chatFlushFrameByThreadIdRef = useRef<Map<string, number>>(new Map())
   const chatStreamContentByThreadIdRef = useRef<Map<string, string>>(new Map())
   const activeCollaborationControllerRef = useRef<{
@@ -489,10 +542,6 @@ export function ResearchDesk({
       state.researchRuns,
     ],
   )
-  const pendingChips = useMemo(
-    () => chatAttachmentChipsFromRefs(chatResolveState, combinedChatRefs),
-    [chatResolveState, combinedChatRefs],
-  )
   const fileOptions = useMemo(
     () => fileMentionOptions(state),
     [state.fileAssetOrder, state.fileAssets],
@@ -521,34 +570,67 @@ export function ResearchDesk({
       ])
       return
     }
+    if (files.length === 0) return
     const existingLabels = projectFileAssets(state).map((asset) => asset.label)
-    const assets = await ingestFiles(
+    const sectionId = temporaryFileSectionId(Object.values(state.fileLibrarySections))
+    const { queue, records } = createFileAssetPlaceholders(
       files,
-      {
-        kind: 'chat',
-        sectionId: temporaryFileSectionId(Object.values(state.fileLibrarySections)),
-      },
-      undefined,
+      { kind: 'chat', sectionId },
       existingLabels,
-      serverFileUpload,
+      Boolean(serverFileUpload),
     )
-    if (assets.length === 0) return
-    dispatch({ assets, type: 'ingestFileAssets' })
-    runServerParse(assets)
-    for (const asset of assets) {
+    dispatch({ assets: records, type: 'ingestFileAssets' })
+    for (const asset of records) {
       dispatch({ ref: { fileId: asset.id, kind: 'file-asset' }, type: 'attachChatContextToDraft' })
     }
+    const bindings = new Map(records.map((record) => [record.id, uploadBindingForRecord(record)]))
+    for (const item of queue) {
+      const binding = bindings.get(item.assetId)
+      if (binding) uploadRegistry.register(item.assetId, { binding, file: item.file })
+    }
+    const parser = createDefaultFileParser()
+    void (async () => {
+      const bindingReady = serverFileUpload
+        ? await ensureUploadTarget(sectionId, null).catch(() => false)
+        : false
+      await runFileIngestPipeline(queue, {
+        needsClientParse: () => true,
+        onParsed: (assetId, parsed, clearParsePending) => dispatch({
+          assetId,
+          clearParsePending,
+          extractedText: parsed.extractedText,
+          pageCount: parsed.pageCount,
+          parseStatus: parsed.parseStatus,
+          parseWarning: parsed.parseWarning,
+          textTruncated: parsed.textTruncated,
+          type: 'applyFileAssetClientParse',
+        }),
+        onUploadAccepted: (assetId, result) => {
+          dispatch({ assetId, ...result, type: 'adoptFileAssetUploadLifecycle' })
+          if (result.status !== 'ready' || !result.serverFileId) return
+          uploadRegistry.delete(assetId)
+        },
+        onUploadFailed: (assetId, message) => {
+          dispatch({ assetId, message, type: 'failFileAssetUpload' })
+        },
+        parse: (file) => parser.parse(file),
+        serverParseWillRun: (_assetId, uploaded) => uploaded && serverParserAvailable,
+        upload: serverFileUpload
+          ? (item) => {
+              const binding = bindings.get(item.assetId)
+              if (!binding) return Promise.reject(new Error('Upload-Bindung fehlt'))
+              if (!bindingReady) {
+                return Promise.reject(
+                  new Error('Zielordner konnte nicht auf dem Server reserviert werden'),
+                )
+              }
+              return serverFileUpload(item.file, binding)
+            }
+          : undefined,
+      })
+    })()
   }
 
-  const pendingAttachmentBudget = evaluateBudget(
-    chatAttachmentsFromRefs(chatResolveState, combinedChatRefs).map((attachment) => ({
-      content: attachment.contentMarkdown,
-      label: attachment.label ?? attachment.title,
-    })),
-  )
-  const attachmentBudgetNotice = shouldShowAttachmentBudgetNotice(pendingAttachmentBudget)
-    ? t.chat.attachmentBudgetWarning
-    : null
   const displayedChatThread = isIncognitoChat
     ? incognitoThread
     : state.ui.selectedChatThreadId
@@ -567,8 +649,26 @@ export function ResearchDesk({
   // effect then re-arms only on a genuine preference change, matching the
   // stable-reference contract the sibling sync hooks rely on (M6c).
   const currentPreferences = useMemo<ProjectPreferences>(
-    () => ({ agentMemoryEnabled, contrastMode, locale, theme, themePreset, userBubbleTone }),
-    [agentMemoryEnabled, contrastMode, locale, theme, themePreset, userBubbleTone],
+    () => ({
+      agentMemoryEnabled,
+      agentModelTier,
+      chatModelTier,
+      contrastMode,
+      locale,
+      theme,
+      themePreset,
+      userBubbleTone,
+    }),
+    [
+      agentMemoryEnabled,
+      agentModelTier,
+      chatModelTier,
+      contrastMode,
+      locale,
+      theme,
+      themePreset,
+      userBubbleTone,
+    ],
   )
   const handleApiSummary = useCallback((summary: ResearchRunSummary, options?: { select?: boolean }) => {
     dispatch({ select: options?.select, summary, type: 'upsertApiRunSummary' })
@@ -637,6 +737,7 @@ export function ResearchDesk({
     login: ssoLogin,
     logout: ssoLogout,
     logoutError,
+    refresh: refreshAuthSession,
   } = useAuthSession(
     isCookieMode,
     state.workspaceId,
@@ -705,7 +806,7 @@ export function ResearchDesk({
     }),
     [apiKey, effectiveWorkspaceId],
   )
-  // Skill library (plan M3): server-first behind features.skills; the
+  // Skill library: server-first behind features.skills; the
   // demo serves its in-memory list so the tab stays demo-visible.
   const skillsEnabled = isDemoMode
     || (capabilities?.features.skills === true && authUnlocked)
@@ -801,14 +902,68 @@ export function ResearchDesk({
       projectKnowledgeIndexes,
     ],
   )
+  // Late-bound handle: the asset-history hook mounts further down, but the
+  // upload closure above it must report bound uploads into its synced map.
+  const noteServerAssetRecordRef = useRef<(assetId: string) => void>(() => undefined)
   const serverFileUpload = useMemo<ServerFileUpload | undefined>(() => {
-    if (!serverFilesAvailable) return undefined
+    const syncActive = projectPersistenceAvailable && state.serverSyncEnabled
+    if (!serverFilesAvailable || !syncActive) return undefined
     const options = { apiKey: apiKey.trim() || undefined, workspaceId: effectiveWorkspaceId }
-    // Upload the ORIGINAL bytes only — the file appears instantly from the
-    // client parse; the MarkItDown upgrade runs in the background (see
-    // runServerParse) and again at index time as a fallback.
-    return async (file: File) => (await uploadServerFile(file, options)).id
-  }, [apiKey, serverFilesAvailable, effectiveWorkspaceId])
+    // Upload the ORIGINAL bytes — the file appears instantly as a pending
+    // row; the MarkItDown upgrade runs in the background (see runServerParse)
+    // and again at index time as a fallback. With an active project sync the
+    // upload also carries its section binding, so the server persists the
+    // collection placement atomically with the bytes (reload-safe).
+    return async (file: File, binding: UploadBinding) => {
+      const wireBinding = serverUploadBinding(binding)
+      const reserved = await reserveServerFileUpload(file, wireBinding, options)
+      dispatch({ assets: [assetRecordFromServer(reserved)], type: 'upsertServerAssetMetadata' })
+      noteServerAssetRecordRef.current(reserved.id)
+      const info = await uploadServerFile(file, options, wireBinding)
+      dispatch({ assets: [assetRecordFromServer(info.asset)], type: 'upsertServerAssetMetadata' })
+      noteServerAssetRecordRef.current(info.asset.id)
+      return {
+        error: info.upload_operation.error?.message ?? null,
+        operationId: info.upload_operation.operation_id,
+        serverFileId: info.asset.server_file_id,
+        status: info.asset.upload_status ?? (
+          info.upload_operation.status === 'ready' ? 'ready' : 'retrying'
+        ),
+      }
+    }
+  }, [apiKey, dispatch, serverFilesAvailable, effectiveWorkspaceId, projectPersistenceAvailable, state.serverSyncEnabled])
+  // Pre-flight for bound uploads: the target section (+ group) must exist
+  // server-side before a binding referencing it can be accepted. Idempotent
+  // PUTs of the records the autosave would push anyway, just earlier.
+  const ensureUploadTarget = useCallback(
+    async (sectionId: string, groupId: string | null): Promise<boolean> => {
+      if (!(projectPersistenceAvailable && state.serverSyncEnabled)) return false
+      const section = state.fileLibrarySections[sectionId]
+      if (!section) return false
+      const options = { apiKey: apiKey.trim() || undefined, workspaceId: effectiveWorkspaceId }
+      try {
+        await saveAssetSection(section.id, serverSectionPayload(section), options)
+        dispatch({ sectionId: section.id, type: 'markFileLibrarySectionServerSynced' })
+        if (groupId) {
+          const group = state.fileGroups[groupId]
+          if (!group) return false
+          await saveAssetGroup(group.id, serverGroupPayload(group), options)
+        }
+        return true
+      } catch {
+        return false
+      }
+    },
+    [
+      apiKey,
+      dispatch,
+      effectiveWorkspaceId,
+      projectPersistenceAvailable,
+      state.fileGroups,
+      state.fileLibrarySections,
+      state.serverSyncEnabled,
+    ],
+  )
   // Client options for the file-library preview (getAsset body + original file
   // download). Gated on the FILES/persistence tier — NOT on knowledge: an
   // original exists whenever it was uploaded to the files server, independent of
@@ -818,23 +973,6 @@ export function ResearchDesk({
       ? { apiKey: apiKey.trim() || undefined, workspaceId: effectiveWorkspaceId }
       : null),
     [apiKey, isDemoMode, serverFilesAvailable, projectPersistenceAvailable, effectiveWorkspaceId],
-  )
-  // Kick off the non-blocking background server parse for freshly-uploaded
-  // assets (upgrades the instant client parse to browser-independent MarkItDown
-  // text). A no-op without a server parser — assets then stay client-parsed
-  // until indexed. Bound once here so chat and library ingest share the wiring.
-  const runServerParse = useCallback(
-    (assets: FileAssetRecord[]) => {
-      if (!serverParserAvailable) return
-      const options = { apiKey: apiKey.trim() || undefined, workspaceId: effectiveWorkspaceId }
-      scheduleServerParse(assets, {
-        fetchText: (fileId) => fetchServerFileText(fileId, options).then((r) => r.text),
-        onPending: (assetId) => dispatch({ assetId, pending: true, type: 'setFileAssetParsePending' }),
-        onParsed: (assetId, text) => dispatch({ assetId, extractedText: text, type: 'upgradeFileAssetParse' }),
-        onFailed: (assetId) => dispatch({ assetId, pending: false, type: 'setFileAssetParsePending' }),
-      })
-    },
-    [apiKey, serverParserAvailable, effectiveWorkspaceId, dispatch],
   )
   const serverFeatureLabels = useMemo<string[] | null>(() => {
     if (isDemoMode || !capabilities) return null
@@ -849,6 +987,16 @@ export function ResearchDesk({
     return labels
   }, [capabilities, isDemoMode, t])
   const projectSyncActive = projectPersistenceAvailable && state.serverSyncEnabled
+  const editorRecoveryCaptureProviderRef =
+    useRef<EditorRecoveryCaptureProvider | null>(null)
+  const consumeEditorRecoveryCapture = useCallback((documentId: string) => (
+    editorRecoveryCaptureProviderRef.current?.(documentId) ?? null
+  ), [])
+  const setEditorRecoveryCaptureProvider = useCallback((
+    provider: EditorRecoveryCaptureProvider | null,
+  ) => {
+    editorRecoveryCaptureProviderRef.current = provider
+  }, [])
   const {
     error: chatSyncError,
     hasMoreThreads: chatHistoryHasMore,
@@ -872,6 +1020,7 @@ export function ResearchDesk({
     registerOpenedServerDocument,
   } = useEditorHistoryApi({
     apiKey: apiKey.trim() || undefined,
+    consumeCollaborationRecovery: consumeEditorRecoveryCapture,
     dispatch,
     editorCommentOutbox: state.editorCommentOutbox,
     editorComments: state.editorComments,
@@ -930,7 +1079,13 @@ export function ResearchDesk({
     registerOpenedServerDocument,
     sharedOpenTarget,
   ])
-  const { error: assetSyncError, ensureAssetBodiesLoaded } = useAssetHistoryApi({
+  const {
+    bodyLoadStates: assetBodyLoadStates,
+    error: assetSyncError,
+    ensureAssetBodiesLoaded,
+    noteServerAssetRecord,
+    retryUpload: retryServerAssetUpload,
+  } = useAssetHistoryApi({
     apiKey: apiKey.trim() || undefined,
     dispatch,
     fileAssets: state.fileAssets,
@@ -940,7 +1095,88 @@ export function ResearchDesk({
     syncActive: projectSyncActive,
     workspaceId: effectiveWorkspaceId,
   })
-  const { error: vectorIndexSyncError } = useVectorIndexHistoryApi({
+  noteServerAssetRecordRef.current = noteServerAssetRecord
+  const pendingChips = useMemo(
+    () => chatAttachmentChipsFromRefs(
+      chatResolveState,
+      combinedChatRefs,
+      {
+        allowLocalFiles: isIncognitoChat,
+        bodyLoadStates: assetBodyLoadStates,
+      },
+    ),
+    [
+      assetBodyLoadStates,
+      chatResolveState,
+      combinedChatRefs,
+      isIncognitoChat,
+    ],
+  )
+  const pendingChatAssetIds = useMemo(
+    () => assetIdsFromChatRefs(chatResolveState, combinedChatRefs),
+    [chatResolveState, combinedChatRefs],
+  )
+  useEffect(() => {
+    if (pendingChatAssetIds.length === 0) return
+    void ensureAssetBodiesLoaded(pendingChatAssetIds).catch(() => undefined)
+  }, [ensureAssetBodiesLoaded, pendingChatAssetIds])
+  const pendingAttachmentBudget = evaluateBudget(
+    chatAttachmentsFromRefs(chatResolveState, combinedChatRefs).map((attachment) => ({
+      content: attachment.contentMarkdown,
+      label: attachment.label ?? attachment.title,
+    })),
+  )
+  const attachmentBudgetNotice = shouldShowAttachmentBudgetNotice(pendingAttachmentBudget)
+    ? t.chat.attachmentBudgetWarning
+    : null
+  const retryAttachmentUpload = useCallback((chip: ChatAttachmentChipModel) => {
+    const assetIds = chip.retryAssetIds.filter((assetId) => Boolean(state.fileAssets[assetId]))
+    if (assetIds.length === 0) return
+    void Promise.all(assetIds.map(async (assetId) => {
+      const pending = uploadRegistry.get(assetId)
+      dispatch({ assetId, pending: true, type: 'setFileAssetUploadPending' })
+      try {
+        if (pending && serverFileUpload) {
+          const targetReady = await ensureUploadTarget(
+            pending.binding.sectionId,
+            pending.binding.groupId,
+          )
+          if (!targetReady) {
+            throw new Error(
+              locale === 'de'
+                ? 'Zielordner konnte nicht auf dem Server reserviert werden'
+                : 'The destination could not be reserved on the server',
+            )
+          }
+          const result = await serverFileUpload(pending.file, pending.binding)
+          dispatch({ assetId, ...result, type: 'adoptFileAssetUploadLifecycle' })
+          if (result.status === 'ready' && result.serverFileId) {
+            uploadRegistry.delete(assetId)
+          }
+          return
+        }
+        await retryServerAssetUpload(assetId)
+      } catch (error) {
+        dispatch({
+          assetId,
+          message: serverUploadFailureMessage(error),
+          type: 'failFileAssetUpload',
+        })
+      }
+    }))
+  }, [
+    dispatch,
+    ensureUploadTarget,
+    locale,
+    retryServerAssetUpload,
+    serverFileUpload,
+    state.fileAssets,
+    uploadRegistry,
+  ])
+  const {
+    acknowledgeServerDeletion: acknowledgeVectorIndexServerDeletion,
+    error: vectorIndexSyncError,
+  } = useVectorIndexHistoryApi({
     apiKey: apiKey.trim() || undefined,
     dispatch,
     vectorIndexes: state.vectorIndexes,
@@ -949,8 +1185,10 @@ export function ResearchDesk({
     workspaceId: effectiveWorkspaceId,
   })
   const {
+    deleteSession: deletePersistedKnowledgeSession,
     error: knowledgeSessionSyncError,
     isSelectedSessionItemsLoading: knowledgeItemsLoading,
+    retrySessionDeletion: retryKnowledgeSessionDeletion,
   } = useKnowledgeSessionsApi({
     apiKey: apiKey.trim() || undefined,
     dispatch,
@@ -1033,7 +1271,7 @@ export function ResearchDesk({
   // (the KnowledgeComposer draft pattern).
   const [agentDraftQuestion, setAgentDraftQuestion] = useState('')
   const [agentAutonomy, setAgentAutonomy] = useState<string | null>(null)
-  // Thoroughness (plan M4): lifted like autonomy, so Deep genuinely
+  // Thoroughness: lifted like autonomy, so Deep genuinely
   // stays on across view switches until the user toggles it off.
   const [agentDepth, setAgentDepth] = useState<'normal' | 'deep' | null>(null)
   // Stufe (speed/depth ladder); lifted like depth so it survives view
@@ -1071,6 +1309,7 @@ export function ResearchDesk({
   const [knowledgeProfileId, setKnowledgeProfileId] = useState<string | null>(null)
   const [knowledgeTopK, setKnowledgeTopK] = useState<number | null>(null)
   const [knowledgeFinalK, setKnowledgeFinalK] = useState<number | null>(null)
+  const knowledgeComposerProjectionKeyRef = useRef<string | null>(null)
   const [knowledgeAskError, setKnowledgeAskError] = useState<string | null>(null)
   const [isIncognitoKnowledge, setIsIncognitoKnowledge] = useState(false)
   const [incognitoKnowledgeAskError, setIncognitoKnowledgeAskError] = useState<string | null>(null)
@@ -1092,24 +1331,12 @@ export function ResearchDesk({
     liveKnowledgeCollectionOptions,
     projectKnowledgeIndexes,
   ])
-  useEffect(() => {
-    if (sharedOpenTarget?.resource_type !== 'knowledge_collection') return
-    const option = knowledgeCollections.find(
-      (collection) => collection.collectionId === sharedOpenTarget.resource_id,
-    )
-    if (!option) return
-    setKnowledgeCollectionIds([option.id])
-    setSharedOpenTarget(null)
-  }, [knowledgeCollections, sharedOpenTarget])
-
   // Patchable editor documents: in demo every local document works; live
   // requires the server-persisted tier (the id IS the server id there).
   const agentDocumentOptions = useMemo(
     () =>
       isDemoMode || state.serverSyncEnabled
-        ? state.editorDocumentOrder
-          .map((id) => state.editorDocuments[id])
-          .filter(Boolean)
+        ? projectAgentTargetEditorDocuments(state)
           .map((document) => ({ id: document.id, title: document.title }))
         : [],
     [
@@ -1170,6 +1397,101 @@ export function ResearchDesk({
     () => projectKnowledgeItems(state),
     [state.knowledgeItemOrder, state.knowledgeItems, state.selectedKnowledgeSessionId],
   )
+  // Seed the working selection from the account preference while the user has
+  // not picked anything in this session. The preference arrives asynchronously
+  // (device cache first, server row on login), so this cannot happen at boot.
+  // The guard is the user's own choice: once either field is set, this stops
+  // touching it — a preference must never overrule a deliberate pick.
+  // Chat seeding waits until the selected thread is locally known: the list
+  // hydrate carries the stored pick, so before the thread row arrives, "no
+  // pick" and "not loaded yet" are indistinguishable (the agent seeding rule).
+  const activeChatThread = state.ui.selectedChatThreadId
+    ? state.chatThreads[state.ui.selectedChatThreadId] ?? null
+    : null
+  const chatSeedReady = state.ui.selectedChatThreadId === null
+    || (activeChatThread !== null && !activeChatThread.modelSelection)
+  const chatSelectionUntouched
+    = state.ui.selectedChatModelTier === null && state.ui.selectedChatModel === null
+  useEffect(() => {
+    if (!chatSelectionUntouched || !chatSeedReady) return
+    if (!chatModelTier) return
+    dispatch({ tier: chatModelTier, type: 'seedChatModelTierFromPreference' })
+  }, [chatModelTier, chatSeedReady, chatSelectionUntouched])
+  // Agent seeding waits for the active session's DETAIL: the session list is
+  // deliberately metadata-only, so before the items_json fetch lands, "no
+  // pick stored" and "pick not loaded yet" are indistinguishable. Seeding in
+  // that gap — and worse, writing the seed into the session — is exactly what
+  // broke the first attempt at session stickiness.
+  const activeAgentSession = state.ui.selectedAgentSessionId
+    ? state.agentSessions[state.ui.selectedAgentSessionId] ?? null
+    : null
+  const agentSeedReady = activeAgentSession === null
+    || (activeAgentSession.metadataHydrated === true
+      && !activeAgentSession.modelSelection)
+  const agentSelectionUntouched
+    = state.ui.selectedAgentModelTier === null && state.ui.selectedAgentModel === null
+  useEffect(() => {
+    if (!agentSelectionUntouched || !agentSeedReady) return
+    if (!agentModelTier) return
+    dispatch({ tier: agentModelTier, type: 'seedAgentModelTierFromPreference' })
+  }, [agentModelTier, agentSeedReady, agentSelectionUntouched])
+  useEffect(() => {
+    if (isIncognitoKnowledge) {
+      knowledgeComposerProjectionKeyRef.current = null
+      return
+    }
+    if (!isDemoMode && !knowledgeCollectionsApi.loaded) return
+    if (knowledgeProfileOptions.length === 0) return
+
+    const sessionId = state.selectedKnowledgeSessionId
+    const context = sessionId
+      ? knowledgeComposerContextForSession({
+          availableCollectionIds: knowledgeCollections.map((collection) => collection.id),
+          availableProfileIds: knowledgeProfileOptions.map((profile) => profile.id),
+          evidenceKMax: knowledgeEvidenceKMax,
+          itemOrder: state.knowledgeItemOrder,
+          items: state.knowledgeItems,
+          sessionId,
+        })
+      : null
+    // The source identity, rather than live option values, makes this a
+    // one-time projection. Subsequent user choices survive background
+    // progress updates; the existing availability effect still removes a
+    // collection immediately when access disappears.
+    const projectionKey = JSON.stringify([sessionId, context?.sourceItemId ?? null])
+    if (knowledgeComposerProjectionKeyRef.current === projectionKey) return
+    knowledgeComposerProjectionKeyRef.current = projectionKey
+    setKnowledgeCollectionIds(context?.collectionIds ?? [])
+    setKnowledgeProfileId(context?.profileId ?? null)
+    setKnowledgeTopK(context?.topK ?? null)
+    setKnowledgeFinalK(context?.finalK ?? null)
+  }, [
+    isDemoMode,
+    isIncognitoKnowledge,
+    knowledgeCollections,
+    knowledgeCollectionsApi.loaded,
+    knowledgeEvidenceKMax,
+    knowledgeProfileOptions,
+    state.knowledgeItemOrder,
+    state.knowledgeItems,
+    state.selectedKnowledgeSessionId,
+  ])
+  // An explicit shared-resource open is the later intent in this render. It
+  // runs after session projection so the target collection wins once and the
+  // projection key prevents a subsequent background sync from undoing it.
+  useEffect(() => {
+    if (sharedOpenTarget?.resource_type !== 'knowledge_collection') return
+    const option = knowledgeCollections.find(
+      (collection) => collection.collectionId === sharedOpenTarget.resource_id,
+    )
+    if (!option) return
+    knowledgeComposerProjectionKeyRef.current = JSON.stringify([
+      state.selectedKnowledgeSessionId,
+      knowledgeItems.at(-1)?.id ?? null,
+    ])
+    setKnowledgeCollectionIds([option.id])
+    setSharedOpenTarget(null)
+  }, [knowledgeCollections, knowledgeItems, sharedOpenTarget, state.selectedKnowledgeSessionId])
   const knowledgeAllItems = useMemo(
     () => projectAllKnowledgeItems(state),
     [state.knowledgeItemOrder, state.knowledgeItems],
@@ -1336,7 +1658,7 @@ export function ResearchDesk({
     const completedAt = new Date().toISOString()
     updateIncognitoKnowledgeItem(runId, (item) => ({
       ...item,
-      answer,
+      answer: knowledgeAnswerWithRunProgress(answer, item.progress),
       completedAt,
       progress: {
         ...item.progress,
@@ -1413,12 +1735,7 @@ export function ResearchDesk({
 
   function deleteKnowledgeAskSession(sessionId: string) {
     clearScrollMemory(`knowledge:${sessionId}`)
-    const deletedItems = state.knowledgeItemOrder.flatMap((itemId) => {
-      const item = state.knowledgeItems[itemId]
-      return item?.sessionId === sessionId ? [item] : []
-    })
-    retireKnowledgeRunRecords(knowledgeRunIdsFromThreadItems(deletedItems), { cancelIfActive: true })
-    dispatch({ sessionId, type: 'deleteKnowledgeSession' })
+    void deletePersistedKnowledgeSession(sessionId)
   }
 
   async function handleKnowledgeAsk(
@@ -1528,6 +1845,7 @@ export function ResearchDesk({
         messages,
         mode: 'knowledge',
         question,
+        ...(isIncognitoKnowledge ? {} : { sessionId }),
       },
       {
         callbacks: isIncognitoKnowledge
@@ -1765,16 +2083,46 @@ export function ResearchDesk({
       && isCookieMode
       && authSession.status === 'authenticated')
   const [shareTarget, setShareTarget] = useState<
-    { resourceId: string; resourceType: string; title: string } | null
+    {
+      collaborationGeneration?: number
+      document?: EditorDocumentRecord
+      documentDetails?: EditorDocumentDetailsSummary
+      /** Why the dialog opened — decides its landing tab and whether the
+       * recipient search takes focus. Only editor documents set it. */
+      intent?: 'details' | 'share'
+      returnFocusTarget?: HTMLElement
+      resourceId: string
+      resourceType: string
+      title: string
+    } | null
   >(null)
-  const handleShareEditorDocument = useCallback((document: EditorDocumentRecord) => {
-    if (document.access?.mode === 'shared') return
+  const handleShareEditorDocument = useCallback((
+    document: EditorDocumentRecord,
+    documentDetails: EditorDocumentDetailsSummary,
+    intent: 'details' | 'share' = 'share',
+    returnFocusTarget?: HTMLElement | null,
+  ) => {
     setShareTarget({
+      document,
+      documentDetails,
+      intent,
+      ...(returnFocusTarget ? { returnFocusTarget } : {}),
       resourceId: document.id,
       resourceType: 'editor_document',
       title: document.title,
+      ...(document.collaboration
+        ? { collaborationGeneration: document.collaboration.generation }
+        : {}),
     })
   }, [])
+  const incomingShareTarget = useMemo(() => {
+    const document = shareTarget?.document
+    if (!document || document.access?.mode !== 'shared') return null
+    return sharingInbox.state.accepted.find((share) => (
+      share.resource_type === 'editor_document'
+      && share.resource_id === document.id
+    )) ?? null
+  }, [shareTarget?.document, sharingInbox.state.accepted])
   const shareCountByRunId = useMemo(
     () => outgoingShareCounts(sharingInbox.state.outgoing, 'run'),
     [sharingInbox.state.outgoing],
@@ -1849,6 +2197,7 @@ export function ResearchDesk({
         window.cancelAnimationFrame(frame)
       }
       chatControllerByThreadIdRef.current.clear()
+      chatSubmittingThreadIdsRef.current.clear()
       chatFlushFrameByThreadIdRef.current.clear()
       chatStreamContentByThreadIdRef.current.clear()
       scheduledChatContentByThreadIdRef.current.clear()
@@ -1857,7 +2206,13 @@ export function ResearchDesk({
 
   function reportProjectActionError(error: unknown) {
     logProjectActionError(error)
-    if (error instanceof DOMException && error.name === 'AbortError') return
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      // Cancelling the directory dialog is a user decision, not a failure, but
+      // it still ends the action. Saying nothing leaves the user believing a
+      // backup was written.
+      setProjectActionError(t.topbar.projectActionCancelled)
+      return
+    }
     setProjectActionError(`${t.topbar.projectActionFailed}: ${messageFromError(error)}`)
   }
 
@@ -1914,7 +2269,10 @@ export function ResearchDesk({
       if (prepared.staleDocuments.length > 0 && !confirmStaleCollaborationExport(
         prepared.staleDocuments,
         locale,
-      )) return
+      )) {
+        setProjectActionError(t.topbar.projectActionCancelled)
+        return
+      }
       const result = await exportProject(
         prepared.state,
         { onWorkStart: () => setProjectAction('export') },
@@ -1944,7 +2302,10 @@ export function ResearchDesk({
       if (prepared.staleDocuments.length > 0 && !confirmStaleCollaborationExport(
         prepared.staleDocuments,
         locale,
-      )) return
+      )) {
+        setProjectActionError(t.topbar.projectActionCancelled)
+        return
+      }
       const result = await saveProject(
         prepared.state,
         { onWorkStart: () => setProjectAction('save') },
@@ -1962,26 +2323,65 @@ export function ResearchDesk({
     }
   }
 
-  function handleComposerSubmit(request: CreateResearchRunRequest) {
+  async function handleComposerSubmit(
+    request: CreateResearchRunRequest,
+  ): Promise<ResearchSubmissionOutcome> {
     if (isDemoMode) {
       dispatch({ request, type: 'createLocalRun' })
-      return
+      return { status: 'accepted' }
     }
-    if (!isDemoMode && !authUnlocked) return
+    if (!authUnlocked) {
+      return {
+        message: t.composer.sessionExpired,
+        recoverability: 'login',
+        status: 'rejected',
+      }
+    }
 
-    void submitRun(stackDiscoveryStatus === 'unsupported'
-      ? { ...request, stack: undefined }
-      : request)
+    let rejection: unknown
+    const summary = await submitRun(
+      stackDiscoveryStatus === 'unsupported'
+        ? { ...request, stack: undefined }
+        : request,
+      {
+        onRejected: (error) => {
+          rejection = error
+        },
+        reloadOnUnauthorized: false,
+      },
+    )
+    if (summary) return { status: 'accepted' }
+    if (hasHttpStatus(rejection, 401)) {
+      return {
+        message: t.composer.sessionExpired,
+        recoverability: 'login',
+        status: 'rejected',
+      }
+    }
+    return {
+      message: t.composer.submitFailed,
+      recoverability: 'retry',
+      status: 'rejected',
+    }
+  }
+
+  function handleResearchAuthenticationRequired() {
+    setAuthLockError(t.composer.sessionExpired)
+    if (isCookieMode) {
+      void refreshAuthSession()
+    } else if (authMode === 'apikey') {
+      setApiKey('')
+    }
   }
 
   async function handleChatMessageSubmit(
     contentMarkdown: string,
     inlineAttachmentRefs: ChatContextReferenceRecord[] = [],
     options: ChatSendOptions = {},
-  ) {
+  ): Promise<boolean> {
     const trimmedContent = contentMarkdown.trim()
-    if (!trimmedContent) return
-    if (!isDemoMode && !authUnlocked) return
+    if (!trimmedContent) return false
+    if (!isDemoMode && !authUnlocked) return false
 
     const selectedThread = isIncognitoChat
       ? incognitoThread
@@ -1991,13 +2391,24 @@ export function ResearchDesk({
     const threadId = isIncognitoChat
       ? INCOGNITO_THREAD_ID
       : selectedThread?.id ?? createClientId('chat')
-    if (chatControllerByThreadIdRef.current.has(threadId)) return
-    if (chatControllerByThreadIdRef.current.size >= MAX_PARALLEL_CHAT_REQUESTS) {
+    if (
+      chatControllerByThreadIdRef.current.has(threadId)
+      || chatSubmittingThreadIdsRef.current.has(threadId)
+    ) return false
+    if (
+      chatControllerByThreadIdRef.current.size
+      + chatSubmittingThreadIdsRef.current.size
+      >= MAX_PARALLEL_CHAT_REQUESTS
+    ) {
       setChatNoticeByThreadId((current) => ({
         ...current,
         [threadId]: t.chat.parallelLimitReached,
       }))
-      return
+      return false
+    }
+    chatSubmittingThreadIdsRef.current.add(threadId)
+    const releaseSubmissionLatch = () => {
+      chatSubmittingThreadIdsRef.current.delete(threadId)
     }
 
     const userMessageId = createClientId('msg')
@@ -2021,6 +2432,25 @@ export function ResearchDesk({
       ...inlineAttachmentRefs,
       ...pendingChatRefs,
     ])
+    const metadataReadiness = attachmentContextReadiness(
+      chatResolveState,
+      messageAttachmentRefs,
+      {
+        allowLocalFiles: isIncognitoChat,
+        bodyLoadStates: assetBodyLoadStates,
+      },
+    )
+    if (metadataReadiness.status !== 'ready') {
+      setChatErrorByThreadId((current) => ({
+        ...current,
+        [threadId]: metadataReadiness.error
+          ?? (metadataReadiness.status === 'pending'
+            ? t.chat.attachmentContextPending
+            : t.chat.attachmentContextFailed),
+      }))
+      releaseSubmissionLatch()
+      return false
+    }
     // Guarantee any attached file-asset bodies are loaded before they are read
     // synchronously into the outgoing attachments (M6c load-on-use). The
     // prefetch on attach usually made this instant; the returned map overrides
@@ -2038,13 +2468,31 @@ export function ResearchDesk({
         ...current,
         [threadId]: `${t.chat.requestFailed}: ${messageFromError(error)}`,
       }))
-      return
+      releaseSubmissionLatch()
+      return false
     }
     const messageAttachments = chatAttachmentsFromRefs(
       chatResolveState,
       messageAttachmentRefs,
       assetBodies,
     )
+    const contentReadiness = attachmentContextReadiness(
+      chatResolveState,
+      messageAttachmentRefs,
+      {
+        allowLocalFiles: isIncognitoChat,
+        assetBodyOverride: assetBodies,
+        requireContent: true,
+      },
+    )
+    if (contentReadiness.status !== 'ready') {
+      setChatErrorByThreadId((current) => ({
+        ...current,
+        [threadId]: contentReadiness.error ?? t.chat.attachmentContextFailed,
+      }))
+      releaseSubmissionLatch()
+      return false
+    }
     const requestMessages = buildChatMessages(
       selectedThread?.messages ?? [],
       trimmedContent,
@@ -2094,6 +2542,7 @@ export function ResearchDesk({
 
     const controller = new AbortController()
     chatControllerByThreadIdRef.current.set(threadId, controller)
+    releaseSubmissionLatch()
     chatStreamContentByThreadIdRef.current.set(threadId, '')
     setActiveChatRequestsByThreadId((current) => ({
       ...current,
@@ -2109,7 +2558,7 @@ export function ResearchDesk({
       : []
 
     if (chainTemplates.length > 0) {
-      await runChatChainRequest({
+      void runChatChainRequest({
         assistantMessageId,
         controller,
         history: selectedThread?.messages ?? [],
@@ -2128,7 +2577,7 @@ export function ResearchDesk({
         userText: trimmedContent,
       })
     } else {
-      await runChatAssistantRequest({
+      void runChatAssistantRequest({
         assistantMessageId,
         controller,
         requestMessages,
@@ -2141,6 +2590,7 @@ export function ResearchDesk({
         useStreaming,
       })
     }
+    return true
   }
 
   async function runChatChainRequest({
@@ -2711,7 +3161,13 @@ export function ResearchDesk({
         setIsIncognitoChat(false)
         resetIncognitoSession()
       }
-      dispatch({ groupId, type: 'createChatThread' })
+      dispatch({
+        groupId,
+        modelTier: chatModelTier || null,
+        preview: t.chat.empty,
+        title: t.chat.new,
+        type: 'createChatThread',
+      })
       return
     }
 
@@ -2732,7 +3188,12 @@ export function ResearchDesk({
       return
     }
 
-    dispatch({ type: 'createChatThread' })
+    dispatch({
+      modelTier: chatModelTier || null,
+      preview: t.chat.empty,
+      title: t.chat.new,
+      type: 'createChatThread',
+    })
   }
 
   function handleClearChatThread() {
@@ -2755,7 +3216,7 @@ export function ResearchDesk({
     }
     if (!threadId) return
     clearScrollMemory(`chat:${threadId}`)
-    dispatch({ threadId, type: 'clearChatThread' })
+    dispatch({ emptyPreview: t.chat.empty, threadId, type: 'clearChatThread' })
     setChatErrorByThreadId((current) => {
       const next = { ...current }
       delete next[threadId]
@@ -2818,7 +3279,12 @@ export function ResearchDesk({
       return
     }
 
-    dispatch({ messageIds, threadId, type: 'deleteChatMessages' })
+    dispatch({
+      emptyPreview: t.chat.empty,
+      messageIds,
+      threadId,
+      type: 'deleteChatMessages',
+    })
   }
 
   function handleEditChatMessage(threadId: string, messageId: string, contentMarkdown: string) {
@@ -2900,6 +3366,8 @@ export function ResearchDesk({
 
   function applyProjectPreferences(preferences: ProjectPreferences) {
     setAgentMemoryEnabled(preferences.agentMemoryEnabled)
+    setAgentModelTier(preferences.agentModelTier)
+    setChatModelTier(preferences.chatModelTier)
     setContrastMode(preferences.contrastMode)
     setLocale(preferences.locale)
     setTheme(preferences.theme)
@@ -2979,7 +3447,14 @@ export function ResearchDesk({
 
   return (
     <QuotaMeterProvider demo={isDemoMode} enabled={Boolean(quotaMeterEnabled)}>
-    <main className="flex h-svh flex-col overflow-hidden bg-canvas text-foreground">
+    <main
+      className="flex h-svh flex-col overflow-hidden bg-canvas text-foreground"
+      // While the lock screen covers the app, the shell behind it must be
+      // unreachable for keyboard and assistive technology — not merely
+      // invisible. `inert` is the native, single-source way to do that;
+      // a JS focus trap would still leave the shell in the a11y tree.
+      inert={isAuthLocked}
+    >
       <Topbar
         activeView={state.ui.activeView}
         canPersistProject={projectPersistenceAvailable}
@@ -3026,6 +3501,9 @@ export function ResearchDesk({
             <ResearchWorkspace
               activeFilter={state.ui.activeFilter}
               allJobs={allJobs}
+              authenticatedUserId={authSession.status === 'authenticated'
+                ? authSession.user?.id ?? null
+                : null}
               expandedJobId={state.ui.expandedJobId}
               isComposerVisible={state.ui.isComposerVisible}
               isDesktop={isDesktop}
@@ -3035,6 +3513,7 @@ export function ResearchDesk({
               cancelErrorByRunId={cancelErrorByRunId}
               cancelSubmittingRunIds={cancelSubmittingRunIds}
               onActiveFilterChange={(filter) => dispatch({ filter, type: 'setActiveFilter' })}
+              onAuthenticationRequired={handleResearchAuthenticationRequired}
               onComposerSubmit={handleComposerSubmit}
               researchQuestion={researchQuestion}
               onResearchQuestionChange={setResearchQuestion}
@@ -3098,9 +3577,9 @@ export function ResearchDesk({
                   dispatch({ ref, type: 'attachChatContextToDraft' })
                 }
                 // Prefetch the file body in the background so it is already in
-                // hand when the message is sent (M6c load-on-use); the send
-                // guard awaits it regardless if this has not finished, so a
-                // prefetch failure here is intentionally best-effort.
+                // hand when the message is sent (M6c load-on-use). The shared
+                // loader projects loading/failure into the chip; the send
+                // guard awaits the same de-duplicated request.
                 void ensureAssetBodiesLoaded(assetIdsFromChatRefs(chatResolveState, [ref])).catch(() => {})
               }}
               onAttachFiles={(files) => void handleAttachChatFiles(files)}
@@ -3153,6 +3632,7 @@ export function ResearchDesk({
                   dispatch({ ref, type: 'removeChatContextFromDraft' })
                 }
               }}
+              onRetryAttachment={retryAttachmentUpload}
               onReorderContext={(fromIndex, toIndex) => {
                 if (isIncognitoChat) {
                   setIncognitoAttachmentRefs((current) => moveItem(current, fromIndex, toIndex))
@@ -3162,7 +3642,7 @@ export function ResearchDesk({
               }}
               pendingReorderKeys={pendingChatRefs.map(chatContextRefKey)}
               pillKeys={chatPillRefs.map(chatContextRefKey)}
-              onSendMessage={(contentMarkdown, refs, options) => void handleChatMessageSubmit(contentMarkdown, refs, options)}
+              onSendMessage={handleChatMessageSubmit}
               onSelectThread={handleSelectChatThread}
               onTogglePinnedThread={(threadId) => dispatch({ threadId, type: 'togglePinnedChatThread' })}
               onSelectedModelTierChange={(tier) => dispatch({ tier, type: 'setSelectedChatModelTier' })}
@@ -3208,6 +3688,7 @@ export function ResearchDesk({
           ) : state.ui.activeView === 'editor' ? (
             <EditorWorkspace
               apiKey={apiKey.trim() || undefined}
+              assetBodyLoadStates={assetBodyLoadStates}
               capabilities={capabilities}
               chatModelOptions={chatModelOptions}
               chatModelOptionsStatus={chatModelOptionsState.status}
@@ -3215,12 +3696,17 @@ export function ResearchDesk({
               defaultChatModel={defaultChatModel}
               dispatch={dispatch}
               ensureAssetBodiesLoaded={ensureAssetBodiesLoaded}
+              ensureUploadTarget={projectPersistenceAvailable ? ensureUploadTarget : undefined}
               onCollaborationControllerChange={handleCollaborationControllerChange}
               onFlushDocumentForShare={projectSyncActive ? flushDocumentForShare : undefined}
+              onRecoveryCaptureProviderChange={setEditorRecoveryCaptureProvider}
               onShareDocument={sharingEnabled ? handleShareEditorDocument : undefined}
               onServerDocumentObserved={registerOpenedServerDocument}
               reportOptions={reportOptions}
               selectedModelTier={state.ui.selectedChatModelTier}
+              serverFileUpload={serverFileUpload}
+              serverParserAvailable={serverParserAvailable}
+              onRetryAttachment={retryAttachmentUpload}
               state={state}
               textImprovement={{
                 apiKey: apiKey.trim() || undefined,
@@ -3228,12 +3714,13 @@ export function ResearchDesk({
                 selectedStack: textImprovementStack,
                 workspaceId: effectiveWorkspaceId,
               }}
+              workspaceId={effectiveWorkspaceId}
+              uploadRegistry={uploadRegistry}
             />
           ) : state.ui.activeView === 'agent' ? (
             <AgentWorkspace
               apiKey={apiKey.trim() || undefined}
               cancelRun={cancelRun}
-              deleteRun={deleteRun}
               pollingRunIds={pollingRunIds}
               runsHydrated={runsHydrated}
               canvasPanelSize={state.ui.panelLayout.agentCanvas}
@@ -3300,6 +3787,9 @@ export function ResearchDesk({
               onCreateSessionGroup={() => dispatch({ title: t.knowledge.newFolder, type: 'createKnowledgeSessionGroup' })}
               onDeleteSessionGroup={(groupId) => dispatch({ groupId, type: 'deleteKnowledgeSessionGroup' })}
               onDeleteSession={deleteKnowledgeAskSession}
+              onRetrySessionDeletion={(sessionId) => {
+                void retryKnowledgeSessionDeletion(sessionId)
+              }}
               onDeleteItems={deleteKnowledgeAskItems}
               onDemoAsk={isDemoMode ? handleKnowledgeDemoAsk : undefined}
               onHistoryPanelSizeChange={(size) => dispatch({
@@ -3383,13 +3873,22 @@ export function ResearchDesk({
             />
           ) : state.ui.activeView === 'database' ? (
             <FileLibraryWorkspace
+              assetDeletionApiOptions={projectSyncActive ? fileApiOptions : null}
+              deletionRefreshToken={resourceRefreshToken}
+              deletionScopeKey={[
+                effectiveWorkspaceId,
+                state.projectEpoch,
+                fileApiOptions?.baseUrl ?? '',
+                authSession.user?.id ?? authMode,
+              ].join('\u001f')}
               dispatch={dispatch}
               embedModels={embedCatalog}
               ensureAssetBodiesLoaded={ensureAssetBodiesLoaded}
+              ensureUploadTarget={projectPersistenceAvailable ? ensureUploadTarget : undefined}
               fileApiOptions={fileApiOptions}
               knowledgeSync={knowledgeSyncOptions}
-              onAssetsIngested={runServerParse}
               onRefreshServerCollections={knowledgeCollectionsApi.refresh}
+              onVectorIndexServerDeleted={acknowledgeVectorIndexServerDeletion}
               onShareServerCollection={sharingEnabled
                 ? (collection) => {
                   if (collection.access.mode !== 'owner') return
@@ -3403,8 +3902,16 @@ export function ResearchDesk({
               serverCollections={knowledgeCollectionsApi.collections}
               serverCollectionsLoaded={knowledgeCollectionsApi.loaded}
               serverCollectionsRefreshToken={resourceRefreshToken}
+              contextualRetrievalEnabled={
+                isDemoMode || !capabilities
+                  ? null
+                  : capabilities.features.contextual_retrieval
+              }
               serverFeatureLabels={serverFeatureLabels}
               serverFileUpload={serverFileUpload}
+              serverParserAvailable={serverParserAvailable}
+              retryServerUpload={retryServerAssetUpload}
+              uploadRegistry={uploadRegistry}
               state={state}
             />
           ) : (
@@ -3437,55 +3944,85 @@ export function ResearchDesk({
       </div>
       {sharingEnabled && shareTarget && (
         <ShareDialog
+          {...(shareTarget.collaborationGeneration !== undefined
+            ? { collaborationGeneration: shareTarget.collaborationGeneration }
+            : {})}
           demo={isDemoMode}
+          initialTab={shareTarget.intent === 'details' ? 'overview' : 'access'}
+          guestLinksEnabled={
+            capabilities?.features.editor_guest_links === true
+              && shareTarget.document?.access?.mode !== 'shared'
+          }
+          documentDetails={shareTarget.documentDetails}
+          onLeave={incomingShareTarget
+            ? async () => {
+                await sharingInbox.drop(incomingShareTarget.id)
+                requestResourceRefresh()
+              }
+            : undefined}
           onChanged={() => {
             requestResourceRefresh()
           }}
           onClose={() => setShareTarget(null)}
           ownerEmail={isDemoMode ? DEMO_OWNER.email : authSession.user?.email ?? null}
           ownerName={isDemoMode ? DEMO_OWNER.displayName : authSession.user?.displayName ?? null}
+          recipientAccess={shareTarget.document?.access?.mode === 'shared'
+            ? {
+                ownerId: shareTarget.document.access.owner?.id
+                  ?? incomingShareTarget?.granted_by_user_id
+                  ?? '',
+                ownerName: shareTarget.document.access.owner?.name
+                  ?? incomingShareTarget?.granted_by_display_name
+                  ?? (locale === 'de' ? 'Unbekannter Eigentümer' : 'Unknown owner'),
+                permission: shareTarget.document.access.permission,
+              }
+            : undefined}
           refreshToken={resourceRefreshToken}
           resourceId={shareTarget.resourceId}
           resourceTitle={shareTarget.title}
           resourceType={shareTarget.resourceType}
-        />
-      )}
-      {isAuthLocked && (
-        <AuthLockScreen
-          error={authLockError}
-          identifier={authIdentifier}
-          isSubmitting={isAuthSubmitting}
-          mode={
-            authMode === 'oidc'
-              ? 'sso'
-              : authMode === 'local'
-                ? 'local'
-                : authMode === 'ldap'
-                  ? 'ldap'
-                  : 'apikey'
-          }
-          onCredentialSubmit={() => void handleCredentialLogin()}
-          onIdentifierChange={(value) => {
-            setAuthIdentifier(value)
-            setAuthLockError(null)
-          }}
-          onPasswordChange={(value) => {
-            setAuthPassword(value)
-            setAuthLockError(null)
-          }}
-          onSsoLogin={ssoLogin}
-          providerName={authConfig?.provider_name}
-          onSubmit={(token) => void handleAuthUnlock(token)}
-          onTokenChange={(token) => {
-            setApiKeyDraft(token)
-            setAuthLockError(null)
-          }}
-          password={authPassword}
-          reduceMotion={reduceMotion}
-          token={apiKeyDraft}
+          returnFocusTarget={shareTarget.returnFocusTarget}
         />
       )}
     </main>
+    {/* Sibling of the shell, never a child: the shell carries `inert`
+        while locked, and a nested lock screen would inert ITSELF —
+        leaving the user with an unusable sign-in form. */}
+    {isAuthLocked && (
+      <AuthLockScreen
+        error={authLockError}
+        identifier={authIdentifier}
+        isSubmitting={isAuthSubmitting}
+        mode={
+          authMode === 'oidc'
+            ? 'sso'
+            : authMode === 'local'
+              ? 'local'
+              : authMode === 'ldap'
+                ? 'ldap'
+                : 'apikey'
+        }
+        onCredentialSubmit={() => void handleCredentialLogin()}
+        onIdentifierChange={(value) => {
+          setAuthIdentifier(value)
+          setAuthLockError(null)
+        }}
+        onPasswordChange={(value) => {
+          setAuthPassword(value)
+          setAuthLockError(null)
+        }}
+        onSsoLogin={ssoLogin}
+        providerName={authConfig?.provider_name}
+        onSubmit={(token) => void handleAuthUnlock(token)}
+        onTokenChange={(token) => {
+          setApiKeyDraft(token)
+          setAuthLockError(null)
+        }}
+        password={authPassword}
+        reduceMotion={reduceMotion}
+        token={apiKeyDraft}
+      />
+    )}
     </QuotaMeterProvider>
   )
 }
@@ -3685,13 +4222,13 @@ function threadWithMessages(
   return {
     ...thread,
     messages,
-    preview: chatPreviewFromMessages(messages),
+    preview: chatPreviewFromMessages(messages) ?? thread.preview,
     updatedAt: new Date().toISOString(),
   }
 }
 
 function chatPreviewFromMessages(messages: readonly ChatMessageRecord[]) {
-  return [...messages].reverse().find((message) => message.role === 'user')?.contentMarkdown ?? 'No user message yet'
+  return [...messages].reverse().find((message) => message.role === 'user')?.contentMarkdown
 }
 
 function titleFromChatMessage(contentMarkdown: string) {
@@ -3737,7 +4274,11 @@ async function prepareCollaborationProjectExport(
         controller: localController,
         documentId: document.id,
         generation: document.collaboration?.generation,
-        requireLocal: state.editorUi.activeDocumentId === document.id,
+        // Require the local barrier exactly when a controller exists to satisfy
+        // it. The persisted UI selection is not evidence of a mounted editor:
+        // exporting from any other view leaves the last-opened document with a
+        // requirement nothing can meet, and the whole export fails there.
+        requireLocal: localController !== null,
       })
       editorDocuments[document.id] = {
         ...document,

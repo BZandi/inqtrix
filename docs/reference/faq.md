@@ -84,8 +84,12 @@ a hard provider quota), it becomes `AgentRateLimited`. See
 
 Three levels, cheapest first:
 
-1. `uv run pytest tests/ -v` — fully offline regression suite. Use `uv run pytest tests/ --collect-only -q` for the current count.
-2. `uv run python examples/provider_stacks/azure_smoke_tests/test_llm.py` — isolated Azure OpenAI validation, one call.
+1. `uv run pytest tests/ -v`, or `python -m pytest tests/ -v` after
+   `python -m pip install -e ".[dev]"` — fully offline regression suite. Add
+   `--collect-only -q` to either pytest form for the current count.
+2. `uv run python examples/provider_stacks/azure_smoke_tests/test_llm.py`, or
+   plain `python examples/provider_stacks/azure_smoke_tests/test_llm.py` after
+   the pip installation — isolated Azure OpenAI validation, one call.
 3. A single research call via the example scripts or parity CLI — real end-to-end.
 
 See [Running tests](../development/running-tests.md).

@@ -451,4 +451,14 @@ describe('confirmed collaboration projection fallback', () => {
       collaboration: { ...document.collaboration!, projectionUpdatedAt: undefined },
     })).toBeNull()
   })
+
+  it('refuses an empty body even when a confirmation timestamp is present', () => {
+    // A server document that was never opened in this session is hydrated from
+    // metadata only and carries an empty body next to a plausible timestamp.
+    // Accepting it here writes an empty file into the backup archive.
+    expect(confirmedProjectionFallback({
+      ...document,
+      contentMarkdown: '',
+    })).toBeNull()
+  })
 })

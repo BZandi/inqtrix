@@ -117,6 +117,63 @@ describe('knowledge session sync conversion', () => {
     })
   })
 
+  it('retains final-answer retrieval degradation across a session reload', () => {
+    const degradation = {
+      candidate_cap: 64,
+      final_evidence_complete: false,
+      final_top_k: 8,
+      reason: 'vector_overfetch_cap',
+      requested_candidate_pool: 40,
+      requested_top_k: 8,
+      retrieval_mode: 'hybrid',
+      returned_candidate_pool: 6,
+      returned_hits: 3,
+      stage: 'vector_candidate_pool',
+    }
+    const completed = item({
+      answer: {
+        answerMarkdown: 'Antwort mit eingeschränkter Trefferbreite.',
+        degradedStages: [],
+        quotes: [],
+        references: [],
+        refusal: false,
+        retrievalDegradations: [degradation],
+        retrievalWarnings: [{
+          code: 'chunks_require_reindex',
+          count: 2,
+          message: 'server fallback',
+          reason: 'source_unverified',
+          recommended_action: 'reindex',
+          stage: 'canonical_hydration',
+        }],
+      },
+    })
+    const payload = serverKnowledgeSessionPayload(
+      {
+        createdAt: '2026-01-01T00:00:00.000Z',
+        id: 'ks-1',
+        title: 'Session',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+      },
+      [completed],
+      null,
+    )
+    const [reloaded] = itemsFromServerSession(serverSession({
+      id: 'ks-1',
+      items_json: payload.items_json,
+    }))
+
+    expect(reloaded.answer?.retrievalDegradations).toEqual([degradation])
+    expect(reloaded.answer?.retrievalWarnings).toEqual([{
+      code: 'chunks_require_reindex',
+      count: 2,
+      message: 'server fallback',
+      reason: 'source_unverified',
+      recommended_action: 'reindex',
+      stage: 'canonical_hydration',
+    }])
+  })
+
   it('serializes payloads and fingerprints the data that affects autosave', () => {
     const session: KnowledgeSessionRecord = {
       createdAt: '2026-01-01T00:00:00.000Z',

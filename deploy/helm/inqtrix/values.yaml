@@ -6,23 +6,26 @@
 # backing services, a restricted-v2-compatible security context. Flip the
 # *.enabled flags below for a self-contained turnkey demo.
 
-# -- Container images. Set image.registry to your registry prefix (e.g.
-# ghcr.io/your-org) and push inqtrix-api / inqtrix-web there first, plus
-# inqtrix-collaboration when that module is enabled; see the "build & publish"
-# section of the deployment guide. Tag defaults to the chart appVersion when
-# left empty.
+# -- First-party container images. Production references require an immutable
+# sha256 digest. Local development may deliberately opt into tag-only images
+# with image.allowUnpinned=true. Tags remain in pinned references for readable
+# diagnostics: registry/repository:tag@sha256:...
 image:
-  registry: ""
+  registry: ghcr.io/bzandi
   pullPolicy: IfNotPresent
+  allowUnpinned: false
   api:
     repository: inqtrix-api
     tag: ""
+    digest: ""
   web:
     repository: inqtrix-web
     tag: ""
+    digest: ""
   collaboration:
     repository: inqtrix-collaboration
     tag: ""
+    digest: ""
 # -- Names of image-pull Secrets when the registry is private
 # (kubectl create secret docker-registry ...).
 imagePullSecrets: []
@@ -66,8 +69,11 @@ config:
 # feature flags, OIDC issuer/client-id, LDAP DNs, tuning -- anything non-secret).
 extraConfig: {}
 
-# -- Secret values (DB URL, session/PAT secrets, OIDC client secret, LDAP bind
-# password, S3/Qdrant/LLM keys -- the fields settings.py marks secret).
+# -- Secret values (DB URL, session/PAT/pseudonym secrets, OIDC client secret,
+# LDAP bind password, S3/Qdrant/LLM keys -- the fields settings.py marks
+# secret). INQTRIX_PSEUDONYM_PEPPER belongs here too: the Secret reaches API
+# and worker pods alike, which is exactly the sharing the stable log
+# pseudonyms require (required for oidc mode).
 secret:
   # When create=true and existingSecret is empty, the chart renders a Secret
   # from `data` below. For PRODUCTION bring your own Secret instead and set
@@ -90,6 +96,76 @@ metrics:
   # Emit prometheus.io/{scrape,port,path} pod annotations (classic scrape
   # config). Set false when you use a PodMonitor/ServiceMonitor CR instead.
   podAnnotations: true
+  # Worker-process exporter: each worker pod serves its OWN registry on this
+  # port (INQTRIX_WORKER_METRICS_PORT; no pushgateway — scrape every replica).
+  # 0 keeps the worker without an exporter. Requires metrics.enabled=true.
+  workerPort: 0
+
+# -- OpenTelemetry trace export for the agentic runs (INQTRIX_TRACING).
+# Off by default (spans then only correlate JSON log lines when the app
+# enables local mode itself). The MINIMAL enterprise path is an EXISTING
+# Langfuse server: set enabled + otlpEndpoint + headersSecret — no
+# in-cluster deployment needed. To co-deploy Langfuse, install the
+# official `langfuse` chart (repo https://langfuse.github.io/langfuse-k8s)
+# as a SEPARATE release and point otlpEndpoint at its service; recipe and
+# OpenShift notes in docs/deployment/kubernetes.md.
+observability:
+  tracing:
+    enabled: false
+    # off | local | file | otlp — the sink INQTRIX_TRACING is set to when
+    # enabled. otlp needs otlpEndpoint; the API server and the worker get
+    # identical settings (one trace spans both).
+    mode: "otlp"
+    # OTLP/HTTP base endpoint, e.g. for Langfuse:
+    # http://langfuse-web.langfuse.svc:3000/api/public/otel
+    otlpEndpoint: ""
+    # Secret carrying the FULL OTEL_EXPORTER_OTLP_HEADERS value, e.g.
+    # "Authorization=Basic <base64(pk-lf-…:sk-lf-…)>,x-langfuse-ingestion-version=4"
+    # (the second pair is required for real-time display in Langfuse).
+    headersSecret:
+      name: ""
+      key: "OTEL_EXPORTER_OTLP_HEADERS"
+    # Head-sampling ratio (INQTRIX_TRACE_SAMPLE_RATE); 1.0 keeps everything.
+    sampleRate: ""
+    # Browser base URL of the Langfuse UI (INQTRIX_TRACE_UI_URL) for the
+    # admin "open trace" deep link; empty hides the link.
+    uiUrl: ""
+    # Trace retention in days (INQTRIX_TRACE_RETENTION_DAYS), enforced by
+    # the worker's cleanup job against the Langfuse API (otlp mode only;
+    # 0 disables). Empty keeps the application default (30).
+    retentionDays: ""
+    # mode "file" with worker.enabled needs ONE spool directory that api
+    # and worker pods share, or the admin trace export never sees the
+    # worker-written run spans. Name an existing RWX PersistentVolumeClaim
+    # here; the chart then mounts it at /var/lib/inqtrix/traces in both
+    # deployments and points INQTRIX_TRACE_SPOOL_DIR at it. Leaving it
+    # empty in file mode with a worker is refused at render time.
+    spoolClaim: ""
+    # Recording DEPTH (OBSERVABILITY_PROFILE): summary | forensic.
+    # forensic additionally records prompts, raw provider responses, tool
+    # arguments and per-source search records — only meaningful with a
+    # recording sink (mode file/otlp at sampleRate 1.0); the app warns at
+    # startup otherwise. Empty keeps the application default (summary).
+    profile: ""
+    # Per-attribute content byte BACKSTOP (INQTRIX_TRACE_MAX_ATTR_BYTES).
+    # Sized so it does not fire in normal operation; raise it rather than
+    # accept truncated prompts. Empty keeps the default (1 MiB).
+    maxAttrBytes: ""
+
+  # -- Machine-readable stdout logs (INQTRIX_LOG_FORMAT=json). Recommended
+  # for container runtimes: stdout then carries the full configured level
+  # with the correlation envelope (request_id/run_id/user/trace_id), so a
+  # log line and its trace join without a lookup. Empty keeps text.
+  logFormat: ""
+
+  # -- Retention for the two durable trails the worker prunes daily.
+  # BOTH jobs live in the worker process: without worker.enabled these
+  # values describe an intent, not an enforced policy. Empty keeps the
+  # application defaults (audit 365 days, usage ledger 730 = 24 months);
+  # 0 keeps rows forever.
+  retention:
+    auditDays: ""
+    usageDays: ""
 
 # -- API server (FastAPI, python -m inqtrix). Stateless; scale via replicaCount
 # or autoscaling. Note: more than one replica requires the postgres storage
@@ -115,10 +191,20 @@ api:
   tolerations: []
   affinity: {}
 
-# -- Web UI (nginx-unprivileged serving the React bundle, reverse-proxying the
-# API on a single origin). Stateless.
+# -- Web UI (dependency-light Python web gateway serving the React bundle and
+# reverse-proxying HTTP/WebSocket traffic on one origin). Stateless.
 web:
   replicaCount: 1
+  # -- Forwarded-scheme override for the Python web gateway ("" derives it from
+  # chart-owned ingress/Route TLS settings). Set "https" when a TLS
+  # terminator the chart does not own (own LoadBalancer, Gateway API,
+  # service mesh) fronts the web Service. When INQTRIX_PUBLIC_BASE_URL is
+  # explicit, this scheme must match it; the web gateway rejects a mismatch
+  # at startup rather than forwarding contradictory origin metadata.
+  externalScheme: ""
+  # -- Extra environment for the web container (e.g. an explicit
+  # INQTRIX_PROXY_MAX_BODY_BYTES when the derived default does not fit).
+  extraEnv: []
   resources:
     requests:
       cpu: 50m
@@ -139,8 +225,8 @@ web:
   affinity: {}
 
 # -- Optional private editor collaboration service. Disabled by default. The
-# browser never reaches this Service directly: nginx and the Python launcher
-# proxy /collaboration to FastAPI, whose gateway authenticates and relays to
+# browser never reaches this Service directly: the Python web gateway proxies
+# /collaboration to FastAPI, whose gateway authenticates and relays to
 # this single-writer process. The Deployment is intentionally fixed at one
 # replica with Recreate strategy; there is no HPA, PDB, or persistence knob.
 collaboration:
@@ -195,21 +281,21 @@ migrations:
   backoffLimit: 1
   # RLS authority used by inqtrix-migrate: auto (bundled/backwards-compatible),
   # owner (portable managed-Postgres maintenance), or bypass (a dedicated
-  # BYPASSRLS role). Owner mode on upgrades additionally requires
-  # ownerMaintenanceConfirmed=true to authorize the chart's bounded pre-upgrade
-  # hook to scale API/worker/collaboration to zero and drain their pools.
+  # BYPASSRLS role). Every installed-schema upgrade additionally requires
+  # maintenanceConfirmed=true to authorize the chart's bounded pre-upgrade hook
+  # to scale API/worker/collaboration to zero and drain their pools.
   rlsMode: auto
-  ownerMaintenanceConfirmed: false
-  # Owner upgrades render a pre-upgrade hook that removes the API HPA, scales
+  maintenanceConfirmed: false
+  # Schema upgrades render a pre-upgrade hook that removes the API HPA, scales
   # API/worker/collaboration to zero, and waits for their Pods to terminate
   # before the migration hook runs. The hook revokes its temporary RoleBinding
   # before exit. The normal Helm apply restores workloads after migration and,
   # with API autoscaling, writes minReplicas once to reactivate the HPA from 0.
-  ownerMaintenanceTimeoutSeconds: 300
-  # Optional dedicated Secret containing ONLY the direct migration DSN. When
-  # empty, the hook keeps the backwards-compatible runtime/bundled database
-  # URL. Production managed-Postgres deployments should set name + key so the
-  # privileged DSN is never present in API or worker pods. The name must differ
+  maintenanceTimeoutSeconds: 300
+  # Dedicated Secret containing ONLY the direct migration DSN. It is required
+  # for an external database when rlsMode is owner or bypass; the
+  # backwards-compatible runtime URL fallback remains available only to
+  # bundled Postgres and external auto-mode migrations. The name must differ
   # from secret.existingSecret (or the chart-managed application Secret).
   databaseSecret:
     name: ""
@@ -235,6 +321,18 @@ service:
 ingress:
   enabled: false
   className: ""
+  # -- Ingress annotations are controller-specific, so the chart cannot set
+  # them for you -- but with most controllers the DEFAULTS break Inqtrix:
+  # ingress-nginx caps request bodies at 1m (every file upload > 1 MiB dies at
+  # the ingress with a bare 413 before Inqtrix is ever reached, despite the
+  # web pod's own 110m limit) and cuts responses idle for 60s (editor AI calls
+  # block up to 630s, non-streaming chat completions up to 3630s, and chat SSE
+  # emits no keepalive frames). For ingress-nginx start from:
+  #   nginx.ingress.kubernetes.io/proxy-body-size: "110m"
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "3630"
+  #   nginx.ingress.kubernetes.io/proxy-send-timeout: "3630"
+  # Raise proxy-body-size together with INQTRIX_MAX_FILE_BYTES and the
+  # timeouts together with INQTRIX_MAX_TOTAL_SECONDS.
   annotations: {}
   host: inqtrix.example.com
   path: /
@@ -246,17 +344,26 @@ ingress:
 # -- OpenShift Route. Rendered only when openshift.enabled=true AND route.enabled.
 # The stock web container serves PLAIN HTTP on 8080, so `edge` (router terminates
 # TLS, plaintext to the pod) is the only termination that works out of the box.
-# `reencrypt`/`passthrough` require the web container to serve TLS itself (not the
-# default); for `reencrypt` also set tls.destinationCACertificate below.
+# `reencrypt` and `passthrough` fail rendering in this release instead of
+# pretending to be certified.
 route:
   enabled: true
   host: ""
+  # -- Route annotations. The default raises the OpenShift router's 30-second
+  # server timeout to the backend's own HTTP wait ceiling
+  # (request_timeout_seconds = INQTRIX_MAX_TOTAL_SECONDS + 30s margin, 3630s
+  # by default): editor AI calls block up to 630s and non-streaming chat
+  # completions up to 3630s without sending a byte, and chat SSE emits no
+  # keepalive frames, so the router default would cut them all at 30s. Raise
+  # the timeout together with INQTRIX_MAX_TOTAL_SECONDS. WebSockets are
+  # unaffected (HAProxy's tunnel timeout applies after the upgrade).
+  annotations:
+    haproxy.router.openshift.io/timeout: 3630s
   tls:
     enabled: true
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
-    # PEM CA bundle for reencrypt (required by OpenShift to validate the pod's
-    # TLS cert). Leave empty for edge.
+    # Reserved for a future separately certified reencrypt mode.
     destinationCACertificate: ""
 
 # -- Object-store persistence for the local backend (single-replica / demo). When
@@ -322,11 +429,12 @@ serviceAccount:
 # starts a minimal single-pod instance AND auto-wires the matching connection
 # into the app (INQTRIX_DATABASE_URL / INQTRIX_QDRANT_URL+VECTOR_BACKEND+
 # KNOWLEDGE_ENABLED / INQTRIX_QUEUE_BACKEND+VALKEY_URL / INQTRIX_OBJECT_STORE_BACKEND+
-# S3_ENDPOINT_URL+S3_BUCKET+S3 keys) so a turnkey demo is one command. Any value you
-# set explicitly in `config`/`secret` wins over the auto-wired default. If
-# secret.existingSecret is set, the chart cannot write derived secret keys into that
-# user-managed Secret; include any bundled-service secret values there yourself
-# (database URL, Valkey URL, S3 keys, and Qdrant API key if enabled).
+# S3_ENDPOINT_URL+S3_BUCKET+S3 keys) so a turnkey demo is one command. While a
+# service is bundled, its service-specific values block is the only topology
+# and credential source; parallel config/secret overrides fail rendering.
+# If secret.existingSecret is set, the chart cannot write derived secret keys
+# into that user-managed Secret; include the connection value and matching raw
+# backing-service credential there yourself.
 #
 # All bundled services are single-pod, demo/dev ONLY (not highly available); for
 # production on any platform prefer managed instances and leave these disabled.
@@ -340,14 +448,14 @@ serviceAccount:
 # (set INQTRIX_DATABASE_URL).
 postgres:
   enabled: false
-  image: postgres:18.4-trixie
+  image: docker.io/library/postgres:18.4-trixie@sha256:8ff36f3c66371cba71d20ceedccfc3de9669a68737607888c4ef0af93abe8e39
   imagePullPolicy: IfNotPresent
   auth:
     username: inqtrix
     # Embedded verbatim into INQTRIX_DATABASE_URL, so use only URL-unreserved
     # characters [A-Za-z0-9._~-] (the chart fails the render otherwise). For an
     # arbitrary password, use an external database with secret.data.INQTRIX_DATABASE_URL.
-    password: change-me-postgres
+    password: ""
     database: inqtrix
   persistence:
     enabled: true
@@ -373,12 +481,12 @@ postgres:
 # the migrate hook keeps the DIRECT Postgres URL (DDL does not multiplex).
 # An explicit secret.data.INQTRIX_DATABASE_URL always wins — external-DB
 # deployments run their own pooler and point that URL wherever they like.
-# IMAGE NOTE (maintainer decision pending): PgBouncer has no Docker Official
-# image; edoburu/pgbouncer is the de-facto community standard (non-root,
-# env-configured). Swap the pin if another provenance is preferred.
+# The image is the CloudNativePG upstream PgBouncer package. Inqtrix supplies
+# the configuration and creates a mode-0600 userlist from the chart Secret at
+# runtime; no custom image is built.
 pgbouncer:
   enabled: false
-  image: docker.io/edoburu/pgbouncer:v1.24.1-p1
+  image: ghcr.io/cloudnative-pg/pgbouncer:1.25.1-trixie@sha256:e6ddfe22d845e603825e235dd8334b21ecd125abea2a2172478f556b8dee2bb8
   imagePullPolicy: IfNotPresent
   poolMode: transaction
   maxClientConn: 400
@@ -388,7 +496,10 @@ pgbouncer:
   maxPreparedStatements: 200
   # The image runs as its own non-root user; nothing to pin. Omitted
   # automatically under openshift.enabled like the other bundled services.
-  podSecurityContext: {}
+  podSecurityContext:
+    runAsUser: 998
+    runAsGroup: 996
+    fsGroup: 996
   resources:
     requests:
       cpu: 50m
@@ -399,14 +510,14 @@ pgbouncer:
 
 qdrant:
   enabled: false
-  image: qdrant/qdrant:v1.18.2
+  image: docker.io/qdrant/qdrant:v1.18.2@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
   imagePullPolicy: IfNotPresent
   # The chart runs the upstream image as a fixed non-root UID on vanilla
   # Kubernetes. The template therefore routes every mutable Qdrant path
   # (init marker, storage, snapshots, temp files) into the mounted storage
   # volume instead of the image-owned /qdrant directory.
-  # Optional API key. When set it is wired into both Qdrant and the app
-  # (INQTRIX_QDRANT_API_KEY); empty means no auth (acceptable in-cluster).
+  # Required when the bundled service is enabled. It is wired into both
+  # Qdrant and the app as INQTRIX_QDRANT_API_KEY.
   apiKey: ""
   persistence:
     enabled: true
@@ -427,11 +538,11 @@ qdrant:
 
 valkey:
   enabled: false
-  image: valkey/valkey:9.1.0
+  image: docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9
   imagePullPolicy: IfNotPresent
   # Embedded verbatim into INQTRIX_VALKEY_URL, so use only URL-unreserved
   # characters [A-Za-z0-9._~-] (the chart fails the render otherwise).
-  password: change-me-valkey
+  password: ""
   persistence:
     enabled: true
     size: 5Gi
@@ -458,13 +569,13 @@ valkey:
 # (a local PVC is ReadWriteOnce and not shared across pods).
 s3:
   enabled: false
-  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+  image: docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
   imagePullPolicy: IfNotPresent
   # MinIO root credentials ARE the S3 access/secret keys auto-wired into the app.
   # Unlike the DB/Valkey passwords these are sent as request credentials (not embedded
   # in a URL), so any value works; the secret key must be >= 8 characters (MinIO).
   accessKey: inqtrix
-  secretKey: change-me-minio
+  secretKey: ""
   # Bucket the app uses; created automatically on first upload.
   bucket: inqtrix-files
   # Optional CA ConfigMap for a private external S3-compatible endpoint. This

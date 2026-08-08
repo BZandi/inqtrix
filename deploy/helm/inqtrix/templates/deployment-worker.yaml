@@ -15,6 +15,11 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if and .Values.metrics.enabled .Values.metrics.podAnnotations (gt (int (.Values.metrics.workerPort | default 0)) 0) }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.metrics.workerPort | quote }}
+        prometheus.io/path: /metrics
+        {{- end }}
       labels:
         {{- include "inqtrix.labels" (dict "root" . "component" "worker") | nindent 8 }}
     spec:
@@ -36,13 +41,22 @@ spec:
           env:
             - name: INQTRIX_MIGRATION_DATABASE_URL
               value: ""
+          {{- include "inqtrix.observabilityEnv" . | nindent 12 }}
           {{- include "inqtrix.envFrom" . | nindent 10 }}
+          {{- if and .Values.metrics.enabled (gt (int (.Values.metrics.workerPort | default 0)) 0) }}
+          ports:
+            - name: metrics
+              containerPort: {{ int .Values.metrics.workerPort }}
+              protocol: TCP
+          {{- end }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           volumeMounts:
             {{- include "inqtrix.appWritableVolumeMounts" . | nindent 12 }}
+            {{- include "inqtrix.traceSpoolVolumeMount" . | nindent 12 }}
       volumes:
         {{- include "inqtrix.appWritableVolumes" . | nindent 8 }}
+        {{- include "inqtrix.traceSpoolVolume" . | nindent 8 }}
       {{- with .Values.worker.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -125,10 +125,11 @@ class _OpenAISDKEmbeddings(EmbeddingProvider):
             )
         except Exception as exc:  # noqa: BLE001 — normalized below, visibly
             log.warning(
-                "Embedding-Aufruf fehlgeschlagen (model=%s, batch=%d): %s",
+                "Embedding-Aufruf fehlgeschlagen "
+                "(model=%s, batch=%d, error_type=%s)",
                 active_model,
                 len(texts),
-                sanitize_error(exc),
+                type(exc).__name__,
             )
             raise EmbeddingProviderError(
                 f"Embedding call failed for model {active_model!r}: "

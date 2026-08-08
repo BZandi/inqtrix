@@ -38,10 +38,7 @@ from tests.storage._canonical_users import (
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 USER_ID = canonical_user_id("chat-user")
@@ -353,7 +350,7 @@ async def test_stale_parent_scope_cannot_write_or_delete_after_id_reuse(
 async def test_group_delete_orphans_thread(store) -> None:
     """The FK ``ON DELETE SET NULL`` orphans a group's threads instead of
     deleting them."""
-    await store.upsert_group(
+    group = await store.upsert_group(
         id="ctg_1", title="G", created_at=1.0, updated_at=1.0,
         created_by_user_id=USER_ID, workspace_id=None,
     )
@@ -366,7 +363,39 @@ async def test_group_delete_orphans_thread(store) -> None:
     )
     await store.delete_group(
         "ctg_1",
-        scope=ResourceScope.from_record(await store.get_group("ctg_1")),
+        scope=ResourceScope.from_record(group),
     )
     thread = await store.get_thread("ct_1")
     assert thread.group_id is None
+
+
+@pytest.mark.asyncio
+async def test_model_selection_survives_the_second_upsert(store) -> None:
+    """The tier must survive a SECOND save, not just the first INSERT.
+
+    A column missing from the ON CONFLICT update set is written once and then
+    silently frozen — the user changes their pick, the request succeeds, and
+    nothing changes. Only a second save exposes that.
+    """
+    await store.upsert_thread(
+        id="ct_pg_pick", title="T", preview="", source="api", group_id=None,
+        created_at=1.0, updated_at=1.0, created_by_user_id=USER_ID,
+        workspace_id=None,
+        model_selection='{"model":"gpt-5.4-nano","tier":null,"effort":null}',
+    )
+    second = await store.upsert_thread(
+        id="ct_pg_pick", title="T", preview="", source="api", group_id=None,
+        created_at=1.0, updated_at=2.0, created_by_user_id=USER_ID,
+        workspace_id=None,
+        model_selection='{"model":null,"tier":"high","effort":null}',
+    )
+    assert second.model_selection == '{"model":null,"tier":"high","effort":null}'
+    fetched = await store.get_thread("ct_pg_pick")
+    assert fetched.model_selection == '{"model":null,"tier":"high","effort":null}'
+
+
+@pytest.mark.asyncio
+async def test_model_selection_defaults_empty_for_legacy_writers(store) -> None:
+    """A writer that predates the column leaves '' behind, never NULL."""
+    thread = await _save(store, "ct_pg_legacy")
+    assert thread.model_selection == ""

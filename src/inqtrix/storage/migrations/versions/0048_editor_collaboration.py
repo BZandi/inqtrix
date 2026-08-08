@@ -2,7 +2,6 @@
 
 Revision ID: 0048_editor_collaboration
 Revises: 0047_resource_sync
-Create Date: 2026-07-15
 
 The binary Yjs journal is the durable body authority for collaboration-mode
 documents. Markdown remains the last confirmed projection. The collaboration

@@ -22,7 +22,10 @@ import type {
   ResearchRunStatus,
   ResearchRunSummary,
 } from '@/features/researchRuns/types'
-import type { AgentSourcePolicy } from './executionPolicy'
+import type {
+  AgentSessionModelSelection,
+  AgentSourcePolicy,
+} from './executionPolicy'
 
 // --- Pulse-track stations (the signature progress line) ---------------------
 
@@ -153,7 +156,7 @@ export type AgentArtifactRecord = {
   artifactId: string
   kind: AgentArtifactMetaWire['kind']
   title: string
-  status: AgentArtifactMetaWire['status']
+  status: AgentArtifactMetaWire['status'] | 'interrupted'
   revision: number
   updatedBy: 'agent' | 'user'
   refsCount: number
@@ -161,8 +164,18 @@ export type AgentArtifactRecord = {
   updatedAt: number
   /** Body + refs, present only after a detail fetch (list stays lean). */
   contentMarkdown?: string
+  /** Kind-specific detail payload. Undefined means the detail has not been
+   * fetched; an empty object is a fetched legacy artifact without payload. */
+  payload?: Record<string, unknown>
   refs?: Record<string, unknown>[]
   revisions?: { revision: number; createdBy: string; createdAt: number }[]
+  /** Live answer publication identity/UTF-8 cursor. Wire artifact fetches do
+   * not carry these; they exist only while SSE deltas are authoritative. */
+  publicationId?: string
+  publicationOffset?: number
+  /** The streamed body remains visible until the authoritative artifact
+   * detail (including references) replaces it after publication. */
+  publicationNeedsReconcile?: boolean
 }
 
 /** One editor patch proposed by the run (M7); mirrors the wire detail. */
@@ -390,9 +403,9 @@ export type AgentRunRecord = {
   rootRunId?: string
   question: string
   autonomy?: string
-  /** Thoroughness (plan M4): 'deep' shows the badge; unset = normal. */
+  /** Thoroughness: 'deep' shows the badge; unset = normal. */
   depth?: string
-  /** Selected Stufe (P5): schnell|gruendlich|tief; unset = legacy depth
+  /** Selected Stufe: schnell|gruendlich|tief; unset = legacy depth
    * semantics. Drives the gate's Suchtiefe options and add-task
    * defaults (the server validator stays the enforcement). */
   agentTier?: string
@@ -417,6 +430,7 @@ export type AgentRunRecord = {
   startedAt?: string
   finishedAt?: string
   elapsedSeconds?: number
+  timing?: ResearchRunSummary['timing']
   error?: string
   snapshot?: ResearchRunSnapshot
   /** Highest event sequence applied (drives `?after=` replay filtering). */
@@ -456,11 +470,25 @@ export type AgentSessionRecord = {
   runIds: string[]
   /** Persistent source availability for runs started in this session. */
   sourcePolicy: AgentSourcePolicy
+  /** The model picked in THIS session, kept so a reload returns to it rather
+   * than to the account preference. Rides `items_json` beside the source
+   * policy — no schema change. Absent means nothing was picked here and the
+   * account preference seeds the composer. */
+  modelSelection?: AgentSessionModelSelection
+  /** Client-only: true once a server response for this session carried
+   * `items_json`. The LIST endpoint is deliberately metadata-only, so before
+   * the detail fetch lands, "no pick stored" and "pick not loaded yet" are
+   * indistinguishable — and preference seeding must wait. This flag is what
+   * it waits for. Never serialized. */
+  metadataHydrated?: boolean
   /** `false` only for recipient-side views derived from shared runs. Such
    * sessions exist solely to render the Agent Desk and must never cross the
    * agent-session persistence API. Absent means persistable for backwards
    * compatibility with existing local state. */
   persistable?: boolean
+  /** Durable server-owned deletion lifecycle. The row remains visible until
+   * the terminal receipt removes it. */
+  deletion?: import('@/features/project/sessionDeletion').SessionDeletionState
 }
 
 export type AgentSessionGroupRecord = {
@@ -499,7 +527,9 @@ export function restoredAgentSessionId(
   sessions: Record<string, AgentSessionRecord>,
   runs: Record<string, AgentRunRecord>,
 ): string | null {
-  if (persistedId && sessions[persistedId]) return persistedId
+  if (persistedId && sessions[persistedId] && !sessions[persistedId].deletion) {
+    return persistedId
+  }
   // Fallback by CONVERSATION recency (latest turn, not `updatedAt` —
   // which only bumps on rename/source-policy edits) and never by list
   // position: hydration appends in server list order, which is not a
@@ -508,7 +538,7 @@ export function restoredAgentSessionId(
   let latestTime = ''
   for (const id of sessionOrder) {
     const session = sessions[id]
-    if (!session) continue
+    if (!session || session.deletion) continue
     const time = agentSessionHistoryTimeIso(session, runs)
     if (!latestId || time > latestTime) {
       latestId = session.id
@@ -683,6 +713,7 @@ export function agentArtifactFromWire(
   }
   if ('content_markdown' in wire) {
     record.contentMarkdown = wire.content_markdown
+    record.payload = wire.payload ? { ...wire.payload } : {}
     record.refs = wire.refs.map((ref) => ({ ...ref }))
     record.revisions = wire.revisions.map((revision) => ({
       revision: revision.revision,
@@ -742,6 +773,7 @@ export function agentRunFromSummary(
     startedAt: isoFromSeconds(summary.started_at),
     finishedAt: isoFromSeconds(summary.finished_at),
     elapsedSeconds: summary.elapsed_seconds ?? undefined,
+    timing: summary.timing,
     error: summary.error?.message,
     snapshot: summary.snapshot,
     lastSequence: 0,
@@ -780,6 +812,7 @@ export function mergeAgentRunSummary(
     startedAt: next.startedAt ?? current.startedAt,
     finishedAt: next.finishedAt ?? current.finishedAt,
     elapsedSeconds: next.elapsedSeconds ?? current.elapsedSeconds,
+    timing: next.timing ?? current.timing,
     error: next.error ?? current.error,
     snapshot: next.snapshot ?? current.snapshot,
     access: next.access ?? current.access,

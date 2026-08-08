@@ -13,9 +13,12 @@ _ROOT = Path(__file__).resolve().parent.parent
 
 def _node_collaboration_env_names() -> set[str]:
     """Return environment names consumed by the Node settings parser."""
-    source = (
-        _ROOT / "apps" / "collaboration-server" / "src" / "config.ts"
-    ).read_text(encoding="utf-8")
+    source = "\n".join(
+        (
+            _ROOT / "apps" / "collaboration-server" / "src" / filename
+        ).read_text(encoding="utf-8")
+        for filename in ("config.ts", "verificationFault.ts")
+    )
     return set(
         re.findall(
             r"INQTRIX_(?:API_INTERNAL_URL|COLLABORATION_[A-Z0-9_]+)",
@@ -29,15 +32,19 @@ def test_collaboration_image_uses_frozen_nonroot_node_runtime() -> None:
     dockerfile = (
         _ROOT / "deploy" / "docker" / "Dockerfile.collaboration"
     ).read_text(encoding="utf-8")
-    assert dockerfile.count("FROM node:22-bookworm-slim") == 2
-    assert "corepack pnpm install --frozen-lockfile" in dockerfile
-    assert "corepack pnpm --filter @inqtrix/collaboration-server build" in dockerfile
+    node_pin = (
+        "docker.io/library/node:22.23.1-bookworm-slim@"
+        "sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3"
+    )
+    assert dockerfile.count(f"FROM {node_pin}") == 2
+    assert "RUN npm ci" in dockerfile
+    assert "npm --workspace @inqtrix/collaboration-server run build" in dockerfile
 
-    runtime = dockerfile.split("FROM node:22-bookworm-slim AS runtime", 1)[1]
+    runtime = dockerfile.split(f"FROM {node_pin} AS runtime", 1)[1]
     assert "RUN chgrp -R 0 /app && chmod -R g=u /app" in runtime
     assert "USER 1001" in runtime
     assert 'CMD ["node", "--enable-source-maps", "dist/main.cjs"]' in runtime
-    assert "pnpm install" not in runtime
+    assert "npm ci" not in runtime
 
 
 def test_collaboration_production_artifact_is_consistently_commonjs() -> None:
@@ -122,9 +129,8 @@ def test_compose_collaboration_profile_is_private_and_credential_scoped() -> Non
 
     # API and worker load the SAME shared env file. When the operator turns
     # INQTRIX_COLLABORATION_ENABLED on there, EVERY process constructing
-    # Settings needs coherent collaboration URLs — a worker without them
-    # crash-loops on the settings validator and queued runs are never
-    # claimed (live incident 2026-07-15).
+    # Settings needs coherent collaboration URLs. A worker without them
+    # crash-loops on the settings validator and never claims queued runs.
     for service_name in ("api", "worker"):
         service_env = services[service_name]["environment"]
         assert service_env["INQTRIX_COLLABORATION_HTTP_URL"] == (
@@ -136,60 +142,261 @@ def test_compose_collaboration_profile_is_private_and_credential_scoped() -> Non
     assert "collaboration" not in services["api"]["depends_on"]
     assert "collaboration" not in services["web"]["depends_on"]
     assert services["web"]["environment"]["INQTRIX_EXTERNAL_SCHEME"] == (
-        "${INQTRIX_EXTERNAL_SCHEME:-http}"
+        "${INQTRIX_EXTERNAL_SCHEME:-}"
     )
 
 
-def test_nginx_collaboration_websocket_targets_fastapi_only() -> None:
-    """The browser upgrade uses sanitized external forwarding only at FastAPI."""
-    config = (
-        _ROOT / "deploy" / "nginx" / "inqtrix.conf.template"
+def test_web_runtime_targets_share_one_locked_gateway_contract() -> None:
+    """Python is the default edge; nginx remains an explicit build target."""
+    dockerfile = (
+        _ROOT / "deploy" / "docker" / "Dockerfile.web"
+    ).read_text(encoding="utf-8")
+    pyproject = (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    uv_lock = (_ROOT / "uv.lock").read_text(encoding="utf-8")
+    nginx_override = yaml.safe_load(
+        (
+            _ROOT / "deploy" / "compose" / "compose.web-nginx.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    compose = yaml.safe_load(
+        (_ROOT / "deploy" / "compose" / "compose.stack.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    web = compose["services"]["web"]
+
+    assert dockerfile.count(" AS ui-build") == 1
+    assert dockerfile.count(" AS gateway-build") == 1
+    assert dockerfile.count(" AS web-python") == 1
+    assert dockerfile.count(" AS web-nginx") == 1
+    assert "python:3.12.13-slim-bookworm@sha256:" in dockerfile
+    assert "COPY pyproject.toml uv.lock ./" in dockerfile
+    assert "--only-group web-gateway" in dockerfile
+    assert 'CMD ["python", "-m", "inqtrix_web_gateway"]' in dockerfile
+    assert "COPY src/inqtrix_web_gateway" in dockerfile
+    assert "nginxinc/nginx-unprivileged:" in dockerfile
+    assert "deploy/nginx/inqtrix.conf.template" in dockerfile
+    assert "web-gateway = [" in pyproject
+    assert 'name = "inqtrix"' in uv_lock
+    assert nginx_override["services"]["web"]["build"]["target"] == "web-nginx"
+    assert "target" not in web["build"]
+    assert web["environment"]["INQTRIX_BACKEND_URL"] == "http://api:5100"
+    assert web["read_only"] is True
+    assert web["user"] == "1001:0"
+    assert web["cap_drop"] == ["ALL"]
+    assert "INQTRIX_EXTERNAL_SCHEME=http" not in dockerfile
+    assert "collaboration:1234" not in dockerfile
+
+
+def test_first_party_images_pin_supported_official_runtimes() -> None:
+    """Web, API, and collaboration use exact official multiarch bases."""
+    api = (_ROOT / "deploy" / "docker" / "Dockerfile.api").read_text(
+        encoding="utf-8"
+    )
+    collaboration = (
+        _ROOT / "deploy" / "docker" / "Dockerfile.collaboration"
     ).read_text(encoding="utf-8")
     dockerfile = (
         _ROOT / "deploy" / "docker" / "Dockerfile.web"
     ).read_text(encoding="utf-8")
-    match = re.search(
-        r"location = /collaboration \{(?P<body>.*?)\n    \}",
-        config,
-        flags=re.DOTALL,
+
+    python_pin = (
+        "docker.io/library/python:3.12.13-slim-bookworm@"
+        "sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b"
     )
-    assert match is not None
-    body = match.group("body")
-    assert "proxy_pass http://inqtrix_api;" in body
-    assert "proxy_set_header Upgrade $http_upgrade;" in body
-    assert 'proxy_set_header Connection "upgrade";' in body
-    assert "proxy_set_header Host $http_host;" in body
-    assert "proxy_set_header Origin $http_origin;" in body
+    node_pin = (
+        "docker.io/library/node:22.23.1-bookworm-slim@"
+        "sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3"
+    )
+    uv_pin = (
+        "ghcr.io/astral-sh/uv:0.9.30-python3.12-bookworm-slim@"
+        "sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58"
+    )
+    assert api.count(python_pin) == 1
+    assert api.count(uv_pin) == 1
+    assert dockerfile.count(python_pin) == 1
+    assert dockerfile.count(node_pin) == 1
+    assert dockerfile.count(uv_pin) == 1
+    assert collaboration.count(node_pin) == 2
+
+
+def test_compose_supply_chain_and_database_environment_contract() -> None:
+    """Bundled images are immutable and one paired env owns DB credentials."""
+    compose = yaml.safe_load(
+        (_ROOT / "deploy" / "compose" / "compose.stack.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    services = compose["services"]
+    image_services = (
+        "postgres",
+        "pgbouncer",
+        "qdrant",
+        "valkey",
+        "seaweedfs",
+        "dex",
+        "lldap",
+    )
+    for service_name in image_services:
+        image = services[service_name]["image"]
+        assert "@sha256:" in image, f"{service_name} must be digest-pinned"
+        assert ":latest" not in image
+        assert ":stable" not in image
+
+    assert services["pgbouncer"]["image"].startswith(
+        "ghcr.io/cloudnative-pg/pgbouncer:1.25.1-trixie@sha256:"
+    )
+    assert services["lldap"]["image"].startswith(
+        "docker.io/lldap/lldap:2026-05-26-alpine-rootless@sha256:"
+    )
+    assert "secrets" not in compose
+    assert services["postgres"]["environment"]["POSTGRES_PASSWORD"] == (
+        "${INQTRIX_PG_PASSWORD:-}"
+    )
+    assert "POSTGRES_PASSWORD_FILE" not in services["postgres"]["environment"]
+    pooler = services["pgbouncer"]
+    assert pooler["profiles"] == ["pgbouncer"]
+    assert pooler["environment"]["DB_PASSWORD"] == (
+        "${INQTRIX_PG_PASSWORD:-}"
+    )
+    assert pooler["read_only"] is True
+    assert pooler["cap_drop"] == ["ALL"]
+    bootstrap = pooler["command"][0]
+    assert "umask 077" in bootstrap
+    assert "unset DB_PASSWORD" in bootstrap
+    assert "/run/secrets" not in bootstrap
+    valkey = services["valkey"]
+    assert valkey["environment"]["INQTRIX_VALKEY_PASSWORD"] == (
+        "${INQTRIX_VALKEY_PASSWORD:-}"
+    )
+    valkey_bootstrap = valkey["command"][0]
+    assert "INQTRIX_VALKEY_PASSWORD:?" in valkey_bootstrap
+    assert "change-me-valkey-password" not in valkey_bootstrap
+    assert services["qdrant"]["environment"]["QDRANT__SERVICE__API_KEY"] == (
+        "${INQTRIX_QDRANT_API_KEY:-}"
+    )
+    assert services["dex"]["environment"]["DEX_INQTRIX_CLIENT_SECRET"] == (
+        "${INQTRIX_OIDC_CLIENT_SECRET:-}"
+    )
+    assert services["lldap"]["environment"]["LLDAP_LDAP_USER_PASS"] == (
+        "${INQTRIX_LDAP_BIND_PASSWORD:-}"
+    )
+    assert services["lldap"]["environment"]["LLDAP_JWT_SECRET"] == (
+        "${INQTRIX_LLDAP_JWT_SECRET:-}"
+    )
+    assert services["lldap"]["environment"]["LLDAP_KEY_SEED"] == (
+        "${INQTRIX_LLDAP_KEY_SEED:-}"
+    )
+
+
+def test_seaweedfs_env_auth_fails_closed_without_parallel_config_file() -> None:
+    compose = yaml.safe_load(
+        (_ROOT / "deploy" / "compose" / "compose.stack.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    seaweed = compose["services"]["seaweedfs"]
+
+    assert seaweed["profiles"] == ["s3"]
+    assert seaweed["environment"] == {
+        "AWS_ACCESS_KEY_ID": "${INQTRIX_S3_ACCESS_KEY:-}",
+        "AWS_SECRET_ACCESS_KEY": "${INQTRIX_S3_SECRET_KEY:-}",
+    }
+    bootstrap = seaweed["command"][0]
+    assert "AWS_ACCESS_KEY_ID:?" in bootstrap
+    assert "AWS_SECRET_ACCESS_KEY:?" in bootstrap
+    assert "-s3.config" not in bootstrap
+    assert all(
+        "s3.json" not in str(volume)
+        for volume in seaweed.get("volumes", ())
+    )
+    assert not (
+        _ROOT / "deploy" / "compose" / ("seaweedfs-" + "s3.json")
+    ).exists()
+
+
+def test_dex_uses_one_browser_and_compose_resolvable_issuer() -> None:
+    compose = yaml.safe_load(
+        (_ROOT / "deploy" / "compose" / "compose.stack.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    dex = compose["services"]["dex"]
+    config = yaml.safe_load(
+        (_ROOT / "deploy" / "compose" / "dex-config.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert config["issuer"] == "http://dex.localhost:5556/dex"
+    assert dex["networks"]["default"]["aliases"] == ["dex.localhost"]
+    assert dex["ports"] == ["127.0.0.1:5556:5556"]
+    assert "INQTRIX_DEX_PORT" not in (
+        _ROOT / "deploy" / "compose" / "compose.stack.yaml"
+    ).read_text(encoding="utf-8")
+
+
+def test_direct_tls_override_reuses_existing_application_services() -> None:
+    """Direct TLS configures the existing web, API, and worker services."""
+    override = yaml.safe_load(
+        (
+            _ROOT
+            / "deploy"
+            / "compose"
+            / "compose.web-tls.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    services = override["services"]
+    assert set(services) == {"api", "worker", "web"}
+    for service in services.values():
+        assert "image" not in service
+        assert "build" not in service
+        assert "ports" not in service
+
+    public_origin = (
+        "${INQTRIX_PUBLIC_BASE_URL:?set the exact https public origin}"
+    )
+    api_environment = services["api"]["environment"]
+    assert api_environment["INQTRIX_PUBLIC_BASE_URL"] == public_origin
+    assert api_environment["INQTRIX_OIDC_INSECURE_DEV_COOKIES"] == "false"
     assert (
-        "proxy_set_header X-Forwarded-Proto ${INQTRIX_EXTERNAL_SCHEME};"
-        in body
+        api_environment["INQTRIX_EDITOR_GUEST_LINKS_ALLOW_INSECURE_HTTP"]
+        == "false"
     )
-    assert "proxy_set_header X-Forwarded-Host $http_host;" in body
-    assert "$http_x_forwarded_proto" not in config
-    assert "ENV INQTRIX_EXTERNAL_SCHEME=http" in dockerfile
-    assert "collaboration:1234" not in body
+    assert (
+        services["worker"]["environment"]["INQTRIX_PUBLIC_BASE_URL"]
+        == public_origin
+    )
+
+    web = services["web"]
+    assert web["environment"]["INQTRIX_PUBLIC_BASE_URL"] == public_origin
+    assert web["environment"]["INQTRIX_EXTERNAL_SCHEME"] == "https"
+    assert web["environment"]["RESEARCH_DESK_SSL_CERTFILE"] == (
+        "/run/inqtrix-tls/tls.crt"
+    )
+    assert web["environment"]["RESEARCH_DESK_SSL_KEYFILE"] == (
+        "/run/inqtrix-tls/tls.key"
+    )
+    assert web["environment"]["RESEARCH_DESK_SSL_KEYFILE_PASSWORD"] == (
+        "${RESEARCH_DESK_SSL_KEYFILE_PASSWORD:-}"
+    )
+    assert len(web["volumes"]) == 2
+    assert all(volume["read_only"] is True for volume in web["volumes"])
 
 
 def test_instance_probe_uses_the_same_public_fastapi_proxy_path() -> None:
-    """nginx and Vite route the release probe to FastAPI, never to Node/SPA."""
-    config = (
-        _ROOT / "deploy" / "nginx" / "inqtrix.conf.template"
+    """Python gateway and Vite route the probe to FastAPI, never Node/SPA."""
+    http_proxy = (
+        _ROOT / "src" / "inqtrix_web_gateway" / "http_proxy.py"
     ).read_text(encoding="utf-8")
-    match = re.search(
-        r"location = /collaboration/instance \{(?P<body>.*?)\n    \}",
-        config,
-        flags=re.DOTALL,
+    websocket_proxy = (
+        _ROOT / "src" / "inqtrix_web_gateway" / "websocket_proxy.py"
+    ).read_text(encoding="utf-8")
+    assert '@app.get("/collaboration/instance")' in http_proxy
+    assert '@app.websocket("/collaboration")' in websocket_proxy
+    assert "collaboration:1234" not in (
+        http_proxy + websocket_proxy
     )
-    assert match is not None
-    body = match.group("body")
-    assert "proxy_pass http://inqtrix_api;" in body
-    assert "proxy_set_header Host $http_host;" in body
-    assert (
-        "proxy_set_header X-Forwarded-Proto ${INQTRIX_EXTERNAL_SCHEME};"
-        in body
-    )
-    assert "proxy_set_header X-Forwarded-Host $http_host;" in body
-    assert "collaboration:1234" not in body
 
     vite = (
         _ROOT / "apps" / "research-desk" / "vite.config.ts"

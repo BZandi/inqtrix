@@ -1,4 +1,4 @@
-"""Real PostgreSQL traversal tests for the irreversible v0.2 cutover.
+"""Real PostgreSQL traversal tests for the irreversible identity cutover.
 
 Each test owns an isolated schema in a disposable database.  The legacy
 fixtures are created by Alembic itself through revision 0044; no hand-written
@@ -22,16 +22,15 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from inqtrix.storage.db import build_engine
 from inqtrix.storage.migrate import build_alembic_config
+from inqtrix.storage.migration_contract import SCHEMA_HEAD_REVISION
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
+# 0044 is a frozen historical point and stays a literal. The head is derived,
+# so adding a migration cannot leave this test pinning a stale revision.
 _LEGACY_REVISION = "0044_agent_task_cancellation"
-_HEAD_REVISION = "0047_resource_sync"
 _TENANT_ID = "cutover-test"
 
 
@@ -41,10 +40,14 @@ async def _set_search_path(
     *,
     local: bool,
 ) -> None:
+    # Keep the migration namespace exclusive.  SQLAlchemy's PostgreSQL
+    # ``has_table(..., schema=None)`` check follows the complete search path;
+    # including ``public`` would therefore make a populated public schema look
+    # like this fresh test schema already owns the historical tables.  The
+    # subsequent unqualified policy DDL would then mutate public instead of the
+    # isolated fixture.  PostgreSQL still searches ``pg_catalog`` implicitly.
     qualifier = "LOCAL " if local else ""
-    await connection.execute(
-        text(f'SET {qualifier}search_path TO "{schema}", public')
-    )
+    await connection.execute(text(f'SET {qualifier}search_path TO "{schema}"'))
 
 
 async def _upgrade_schema(
@@ -57,6 +60,7 @@ async def _upgrade_schema(
     def upgrade(sync_connection: object) -> None:
         config = build_alembic_config(TEST_DATABASE_URL)
         config.attributes["connection"] = sync_connection
+        config.attributes["version_table_schema"] = schema
         command.upgrade(config, revision)
 
     async with engine.connect() as connection:
@@ -126,12 +130,12 @@ async def legacy_schema(
 async def test_fresh_install_traverses_frozen_history_to_head(
     isolated_schema: tuple[AsyncEngine, str],
 ) -> None:
-    """A new database must traverse every immutable revision to v0.2 head."""
+    """A new database must traverse every immutable revision to current head."""
     engine, schema = isolated_schema
 
     await _upgrade_schema(engine, schema, "head")
 
-    assert await _current_revision(engine, schema) == _HEAD_REVISION
+    assert await _current_revision(engine, schema) == SCHEMA_HEAD_REVISION
     async with engine.begin() as connection:
         await _set_search_path(connection, schema, local=True)
         columns = {
@@ -228,7 +232,7 @@ async def _seed_supported_cutover_data(
 
 
 @pytest.mark.asyncio
-async def test_0044_supported_authorities_and_shares_reach_0047(
+async def test_0044_supported_authorities_and_shares_reach_current_head(
     legacy_schema: tuple[AsyncEngine, str],
 ) -> None:
     """Sessions, PATs and supported direct shares preserve their identity."""
@@ -237,7 +241,7 @@ async def test_0044_supported_authorities_and_shares_reach_0047(
 
     await _upgrade_schema(engine, schema, "head")
 
-    assert await _current_revision(engine, schema) == _HEAD_REVISION
+    assert await _current_revision(engine, schema) == SCHEMA_HEAD_REVISION
     async with engine.begin() as connection:
         await _set_search_path(connection, schema, local=True)
         session_row = (

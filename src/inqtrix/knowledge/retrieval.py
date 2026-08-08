@@ -10,13 +10,38 @@ dense search.
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Sequence
 from typing import Any, Callable
 
 from inqtrix.knowledge.stores.ports import (
     KnowledgeProviderContext,
     RetrievalCandidate,
+    RetrievalCandidateBatch,
 )
 from inqtrix.providers.base import observe_provider_retries
+
+
+def _project_final_batch(
+    candidates: list[RetrievalCandidate],
+    *,
+    source_batch: RetrievalCandidateBatch,
+    final_top_k: int,
+) -> RetrievalCandidateBatch:
+    """Bind candidate-pool diagnostics to the independent final hit width."""
+
+    final_candidates = candidates[:final_top_k]
+    return RetrievalCandidateBatch(
+        final_candidates,
+        degradations=tuple(
+            degradation.with_final_result(
+                final_top_k=final_top_k,
+                returned_hits=len(final_candidates),
+            )
+            for degradation in source_batch.degradations
+        ),
+        exclusions=source_batch.exclusions,
+    )
 
 
 async def retrieve(
@@ -28,7 +53,7 @@ async def retrieve(
     use_reranker: bool = True,
     rerank_candidate_depth: int | None = None,
     on_provider_retry: Callable[[dict[str, Any]], None] | None = None,
-) -> list[RetrievalCandidate]:
+) -> RetrievalCandidateBatch:
     """Run the full retrieval pipeline for one query.
 
     Stages: query embedding (with the scope's collection model) →
@@ -50,16 +75,6 @@ async def retrieve(
             with an event surface forward them there (no silent
             fallbacks). ``None`` keeps the historical behaviour.
     """
-    embedding_model = knowledge.embeddings.default_model
-    if collection_ids:
-        scoped_collection = await knowledge.store.get_collection(
-            collection_ids[0]
-        )
-        embedding_model = scoped_collection.embedding_model
-    query_embedding = await asyncio.to_thread(
-        knowledge.embeddings.embed_query, query, model=embedding_model
-    )
-
     reranker = knowledge.reranker if use_reranker else None
     candidate_depth = (
         rerank_candidate_depth
@@ -71,25 +86,88 @@ async def retrieve(
     )
 
     store = knowledge.store
-    if getattr(store, "supports_hybrid", False):
-        candidates = await store.hybrid_search(
-            query_text=query,
-            query_embedding=query_embedding,
-            collection_ids=collection_ids,
-            top_k=retrieve_top_k,
-            embedding_model=embedding_model,
-        )
+    # One vector cannot be compared across embedding spaces.  Resolve the
+    # concrete collection scope into model-homogeneous groups, run the SAME
+    # canonical store pipeline for each group, then fuse ranks before the
+    # shared reranker/final projection.  This keeps mixed-model coverage in
+    # the Knowledge subsystem instead of silently discarding collections at
+    # an API or Agent adapter.
+    if collection_ids == []:
+        return RetrievalCandidateBatch()
+    if collection_ids is None:
+        scoped_collections = await store.list_collections()
     else:
-        candidates = await store.search(
-            query_embedding=query_embedding,
-            collection_ids=collection_ids,
-            top_k=retrieve_top_k,
-            embedding_model=embedding_model,
+        scoped_collections = [
+            await store.get_collection(collection_id)
+            for collection_id in collection_ids
+        ]
+    model_scopes: dict[str, list[str]] = {}
+    for collection in scoped_collections:
+        model_scopes.setdefault(collection.embedding_model, []).append(
+            collection.id
+        )
+    if not model_scopes:
+        return RetrievalCandidateBatch()
+
+    group_batches: list[RetrievalCandidateBatch] = []
+    for embedding_model, scoped_ids in model_scopes.items():
+        query_embedding = await asyncio.to_thread(
+            knowledge.embeddings.embed_query, query, model=embedding_model
+        )
+        search_started = time.monotonic()
+        if getattr(store, "supports_hybrid", False):
+            candidates = await store.hybrid_search(
+                query_text=query,
+                query_embedding=query_embedding,
+                collection_ids=scoped_ids,
+                top_k=retrieve_top_k,
+                embedding_model=embedding_model,
+            )
+        else:
+            candidates = await store.search(
+                query_embedding=query_embedding,
+                collection_ids=scoped_ids,
+                top_k=retrieve_top_k,
+                embedding_model=embedding_model,
+            )
+        _observe_retrieval_step("hybrid_search", search_started)
+        group_batches.append(
+            candidates
+            if isinstance(candidates, RetrievalCandidateBatch)
+            else RetrievalCandidateBatch(candidates)
         )
 
-    if reranker is None or len(candidates) <= 1:
-        return candidates[:top_k]
-    candidate_texts = [candidate.chunk.text for candidate in candidates]
+    if len(group_batches) == 1:
+        merged_candidates = list(group_batches[0])
+    else:
+        # Scores from different embedding spaces are not assumed comparable.
+        # Round-robin rank fusion gives every selected model group a bounded
+        # opportunity to contribute; a configured cross-encoder then supplies
+        # the single final relevance scale.
+        merged_candidates = interleave_candidates(
+            group_batches,
+            limit=retrieve_top_k,
+        )
+    batch = RetrievalCandidateBatch(
+        merged_candidates,
+        degradations=tuple(
+            degradation
+            for group in group_batches
+            for degradation in group.degradations
+        ),
+        exclusions=tuple(
+            exclusion
+            for group in group_batches
+            for exclusion in group.exclusions
+        ),
+    )
+    if reranker is None or len(batch) <= 1:
+        return _project_final_batch(
+            list(batch),
+            source_batch=batch,
+            final_top_k=top_k,
+        )
+    candidate_texts = [candidate.chunk.text for candidate in batch]
 
     def _rerank_observed() -> list[Any]:
         # Observer binding, the call, and the thread-local cleanup must all
@@ -105,22 +183,28 @@ async def retrieve(
                     # cannot bleed them into a later request.
                     consume()
 
+    rerank_started = time.monotonic()
     results = await asyncio.to_thread(_rerank_observed)
-    return [
-        RetrievalCandidate(
-            chunk=candidates[result.index].chunk,
-            score=result.relevance_score,
-            document_title=candidates[result.index].document_title,
-        )
-        for result in results
-    ]
+    _observe_retrieval_step("rerank", rerank_started)
+    return _project_final_batch(
+        [
+            RetrievalCandidate(
+                chunk=batch[result.index].chunk,
+                score=result.relevance_score,
+                document_title=batch[result.index].document_title,
+            )
+            for result in results
+        ],
+        source_batch=batch,
+        final_top_k=top_k,
+    )
 
 
 def interleave_candidates(
-    result_lists: list[list[RetrievalCandidate]],
+    result_lists: Sequence[Sequence[RetrievalCandidate]],
     *,
     limit: int,
-) -> list[RetrievalCandidate]:
+) -> RetrievalCandidateBatch:
     """Round-robin merge of per-sub-query result lists, capped at *limit*.
 
     The decomposition merge: taking one candidate per list in rotation
@@ -149,15 +233,29 @@ def interleave_candidates(
                 break
         if not progressed:
             break
-    return merged
+    return RetrievalCandidateBatch(
+        merged,
+        degradations=tuple(
+            degradation
+            for candidates in result_lists
+            if isinstance(candidates, RetrievalCandidateBatch)
+            for degradation in candidates.degradations
+        ),
+        exclusions=tuple(
+            exclusion
+            for candidates in result_lists
+            if isinstance(candidates, RetrievalCandidateBatch)
+            for exclusion in candidates.exclusions
+        ),
+    )
 
 
 def merge_candidates(
-    primary: list[RetrievalCandidate],
-    secondary: list[RetrievalCandidate],
+    primary: Sequence[RetrievalCandidate],
+    secondary: Sequence[RetrievalCandidate],
     *,
     limit: int,
-) -> list[RetrievalCandidate]:
+) -> RetrievalCandidateBatch:
     """Union two candidate lists, first occurrence wins, capped at *limit*.
 
     Used by the second retrieval pass: the original ranking stays
@@ -172,4 +270,30 @@ def merge_candidates(
         merged.append(candidate)
         if len(merged) >= limit:
             break
-    return merged
+    batches = (primary, secondary)
+    return RetrievalCandidateBatch(
+        merged,
+        degradations=tuple(
+            degradation
+            for candidates in batches
+            if isinstance(candidates, RetrievalCandidateBatch)
+            for degradation in candidates.degradations
+        ),
+        exclusions=tuple(
+            exclusion
+            for candidates in batches
+            if isinstance(candidates, RetrievalCandidateBatch)
+            for exclusion in candidates.exclusions
+        ),
+    )
+
+
+def _observe_retrieval_step(step: str, started: float) -> None:
+    """retrieval_duration histogram feed (hybrid_search | rerank)."""
+    from inqtrix.observability.metrics_defs import active_metrics
+
+    metrics = active_metrics()
+    if metrics is not None:
+        metrics.observe_retrieval_step(
+            step=step, duration_seconds=time.monotonic() - started
+        )

@@ -67,7 +67,23 @@ def build_router(container: "AppContainer") -> APIRouter:
             settings,
             public_origin=public_origin,
         ):
-            log.warning("Collaboration WebSocket rejected an invalid Origin.")
+            # Name both sides. An origin is an address, not an identity, so
+            # logging it does not weaken pseudonymization — and without it the
+            # operator cannot tell a misconfigured base URL from a real
+            # cross-site attempt.
+            log.warning(
+                "Collaboration WebSocket rejected an invalid Origin: "
+                "presented=%s expected one of=%s",
+                websocket.headers.get("origin", "") or "(none)",
+                ", ".join(
+                    sorted(
+                        {
+                            *settings.allowed_origins,
+                            *([public_origin] if public_origin else []),
+                        }
+                    )
+                ) or "(none configured)",
+            )
             await websocket.accept()
             await websocket.close(code=4403, reason="origin_rejected")
             return
@@ -161,7 +177,14 @@ async def _relay_node_to_browser(
             if len(payload) > settings.max_frame_bytes:
                 await _close_browser(browser, 1009, "message_too_big")
                 return
-            await browser.send_bytes(bytes(payload))
+            try:
+                await browser.send_bytes(bytes(payload))
+            except WebSocketDisconnect:
+                return
+            except RuntimeError as exc:
+                if _browser_send_after_close(exc):
+                    return
+                raise
     except ConnectionClosed as exc:
         await _close_browser(browser, exc.code, exc.reason)
 
@@ -182,6 +205,18 @@ def _safe_close_code(code: int) -> int:
     if 4000 <= code <= 4999:
         return code
     return 1011
+
+
+def _browser_send_after_close(error: RuntimeError) -> bool:
+    """Recognize the ASGI race produced by an ordinary browser disconnect."""
+    message = str(error)
+    return (
+        "websocket.send" in message
+        and (
+            "websocket.close" in message
+            or "response already completed" in message
+        )
+    )
 
 
 def _origin_allowed(

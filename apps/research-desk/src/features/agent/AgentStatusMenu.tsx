@@ -10,8 +10,10 @@ import { OptionMenuHeader, optionMenuContentClassName } from '@/components/ui/op
 import { StatusRow, SummaryGroup, type StatusRowTone } from '@/components/ui/status-summary'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { composerIconButtonClassName } from '@/features/composer/ComposerIconButton'
+import type { AgentTierId } from '@/features/researchRuns/types'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { effortLevelLabel } from '@/lib/modelCard'
+import { cn } from '@/lib/utils'
 import type {
   AgentOverview,
   AgentToolUseCounts,
@@ -56,6 +58,7 @@ export function AgentStatusMenu({
   overview,
   responseFormValue,
   responseForm,
+  tier = null,
   autonomyMode,
   execution = null,
   executionDirective = null,
@@ -66,7 +69,7 @@ export function AgentStatusMenu({
   autonomyHint: string
   /** Display label of the selected permission mode (header value). */
   autonomyLabel: string
-  /** Live composer depth toggle (plan M4): true = Deep selected. */
+  /** Live composer depth toggle: true = Deep selected. */
   depthDeep?: boolean
   disabled: boolean
   /** Account preference `enable_agent_memory` (live). */
@@ -79,6 +82,8 @@ export function AgentStatusMenu({
   responseFormValue: string
   /** Raw selected values are needed to preview directive overrides. */
   responseForm: 'auto' | 'chat' | 'canvas'
+  /** Published thoroughness tier; null on legacy depth-only servers. */
+  tier?: AgentTierId | null
   autonomyMode: string
   execution?: AgentExecutionSnapshot | null
   executionDirective?: AgentExecutionDirective | null
@@ -131,6 +136,40 @@ export function AgentStatusMenu({
       : effectiveMode === 'agent_kernel'
         ? o.routeAutomatic
         : o.brainMission
+  const kernelLimitKey = tier === 'schnell'
+    ? 'schnell'
+    : effectiveDepthDeep
+      ? 'deep'
+      : 'normal'
+  const depthLimits = overview.limits?.kernel[kernelLimitKey]
+  const tokenLimits = overview.limits?.tokens
+  const liveLimits = acceptedExecution?.limits ?? {}
+  const limitValue = (
+    key: string,
+    fallback: { limit: number; ceiling?: number } | null,
+  ): string => {
+    const live = liveLimits[key]
+    if (live) {
+      if (live.used !== null) {
+        return (live.extendable ? o.limitUsageExtendable : o.limitUsageHard)
+          .replace('{used}', String(live.used))
+          .replace('{limit}', String(live.limit))
+          .replace('{ceiling}', String(live.ceiling))
+      }
+      return live.extendable
+        ? o.limitExtendable
+          .replace('{limit}', String(live.limit))
+          .replace('{ceiling}', String(live.ceiling))
+        : o.limitHard.replace('{limit}', String(live.limit))
+    }
+    if (!fallback) return o.limitUnavailable
+    const ceiling = Math.max(fallback.limit, fallback.ceiling ?? fallback.limit)
+    return ceiling > fallback.limit
+      ? o.limitExtendable
+        .replace('{limit}', String(fallback.limit))
+        .replace('{ceiling}', String(ceiling))
+      : o.limitHard.replace('{limit}', String(fallback.limit))
+  }
 
   const sourceValue = (
     id: 'web_search' | 'knowledge_search',
@@ -189,7 +228,12 @@ export function AgentStatusMenu({
         </DropdownMenuTrigger>
         <TooltipContent>{o.title}</TooltipContent>
       </Tooltip>
-      <DropdownMenuContent align="end" className={optionMenuContentClassName} side="top" sideOffset={8}>
+      <DropdownMenuContent
+        align="end"
+        className={cn(optionMenuContentClassName, 'overflow-y-auto overflow-x-hidden')}
+        side="top"
+        sideOffset={8}
+      >
         <OptionMenuHeader count={0} title={o.title} value={autonomyLabel} />
         <div className="py-1">
           <SummaryGroup label={o.groupExecution}>
@@ -236,6 +280,89 @@ export function AgentStatusMenu({
                 : { tone: 'muted' as const, value: o.stateOff })}
             />
           </SummaryGroup>
+          {overview.limits ? (
+            <>
+              <DropdownMenuSeparator className="mx-0 my-1" />
+              <SummaryGroup label={o.groupLimits}>
+                {effectiveDirective === 'quick_web' ? (
+                  <StatusRow
+                    label={o.rowWebSearches}
+                    value={limitValue('web_searches', {
+                      limit: overview.limits.directives.quick_web.web_searches,
+                    })}
+                  />
+                ) : effectiveMode === 'agent_kernel' && depthLimits ? (
+                  <>
+                    <StatusRow
+                      label={o.rowToolCalls}
+                      value={limitValue('tool_calls', {
+                        limit: depthLimits.tool_calls,
+                        ceiling: depthLimits.tool_calls_ceiling,
+                      })}
+                    />
+                    <StatusRow
+                      label={o.rowSteps}
+                      value={limitValue('steps', {
+                        limit: depthLimits.steps,
+                        ceiling: depthLimits.steps_ceiling,
+                      })}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <StatusRow
+                      label={o.rowDiscoveryCalls}
+                      value={limitValue('discovery_tool_calls', {
+                        limit: overview.limits.mission.discovery_tool_calls,
+                      })}
+                    />
+                    <StatusRow
+                      label={o.rowPlanTasks}
+                      value={limitValue('plan_tasks', {
+                        limit: overview.limits.mission.plan_tasks,
+                      })}
+                    />
+                    <StatusRow
+                      label={o.rowReplanRounds}
+                      value={limitValue('replan_rounds', {
+                        limit: overview.limits.mission.replan_rounds,
+                      })}
+                    />
+                    <StatusRow
+                      label={o.rowClarificationRounds}
+                      value={limitValue('clarification_rounds', {
+                        limit: overview.limits.mission.clarification_rounds,
+                      })}
+                    />
+                    <StatusRow
+                      label={o.rowParallelChildren}
+                      value={o.limitHard.replace(
+                        '{limit}',
+                        String(overview.limits.mission.parallel_children),
+                      )}
+                    />
+                    <StatusRow
+                      label={o.rowResearchRounds}
+                      value={o.limitHard.replace(
+                        '{limit}',
+                        String(overview.limits.research.rounds),
+                      )}
+                    />
+                  </>
+                )}
+                <StatusRow
+                  label={o.rowTokens}
+                  tone={tokenLimits?.enabled ? 'warning' : 'muted'}
+                  value={tokenLimits?.enabled
+                    ? limitValue('tokens', { limit: tokenLimits.limit })
+                    : o.limitDisabled}
+                />
+              </SummaryGroup>
+              <div className="px-2.5 pb-1 pt-1.5 t-meta-sm text-muted-foreground">
+                {o.limitExplanation}
+              </div>
+            </>
+          ) : null}
           {overview.approvals ? (
             <>
               <DropdownMenuSeparator className="mx-0 my-1" />

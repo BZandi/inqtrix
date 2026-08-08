@@ -42,10 +42,11 @@ Resolve plan  =  requested profile ∩ operator ceiling (env)
 | Grounding (quote check) | ON | ON | ON | ON |
 | Typical LLM calls | 1 | 2 | 2–4 | 4–7 |
 
-Grounding stays on everywhere: it is deterministic (no LLM call) and
-disabling it would silently un-verify citations. `schnell` saves the
-gate call, the rerank roundtrip, and any second retrieval pass — that
-is the entire latency win.
+Grounding stays on everywhere: verification is deterministic (no extra LLM
+call) and fail-closed. A malformed quote block or one unverifiable labelled
+quote terminates the answer with a typed, visible cause; it never becomes a
+plain-answer fallback. `schnell` saves the gate call, the rerank roundtrip,
+and any second retrieval pass — that is the entire latency win.
 
 `auto` routes per question with zero-cost heuristics (strong
 enumeration markers, multiple question marks, length) and NEVER picks
@@ -144,9 +145,17 @@ over golden tiers and profiles:
 ```bash
 INQTRIX_EVAL_GOLDEN_SET=dora INQTRIX_EVAL_KNOWLEDGE_PROFILE=gruendlich \
   uv run --env-file .env pytest tests/eval/test_answer_eval.py -v
+
+# Standard pip/plain-Python environment:
+python -m pip install -e ".[dev]"
+set -a
+. ./.env
+set +a
+INQTRIX_EVAL_GOLDEN_SET=dora INQTRIX_EVAL_KNOWLEDGE_PROFILE=gruendlich \
+  python -m pytest tests/eval/test_answer_eval.py -v
 ```
 
 Baselines are keyed `(model, tier, profile)`; tiers without
 `no_evidence` queries report `abstention_rate: null` and skip that
-floor. The `dora_holdout` tier is never tuned against — release-gate
-only.
+floor. The `dora_holdout` tier is never tuned against and runs only as
+a held-out overfitting-regression gate.

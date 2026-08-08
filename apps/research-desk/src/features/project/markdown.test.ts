@@ -253,6 +253,11 @@ describe('serializeFileAsset / parseFileAsset', () => {
       pageCount: 3,
       parseStatus: 'partial',
       parseWarning: 'Document shortened',
+      deletionError: 'Storage unavailable',
+      deletionOperationId: 'del-1',
+      deletionStage: 'delete_failed',
+      lifecycleStatus: 'delete_failed',
+      serverSynced: true,
       sizeBytes: 42,
       textTruncated: true,
     })
@@ -337,6 +342,30 @@ describe('project file export plan', () => {
     expect(paths.some((path) => path.includes('doc-shared'))).toBe(false)
   })
 
+  it('round-trips server provenance and a local recovery boundary', () => {
+    const recoveryDocument = makeEditorDocument('recovery-document', {
+      recovery: {
+        capturedAt: '2026-01-03T00:00:00.000Z',
+        originalDocumentId: 'deleted-server-document',
+        reason: 'remote_deleted',
+      },
+      revision: 0,
+      serverSynced: false,
+    })
+
+    const parsed = parseEditorDocument(serializeEditorDocument(
+      recoveryDocument,
+      { editorComments: {} },
+    ).contents)
+
+    expect(parsed.document).toMatchObject({
+      id: recoveryDocument.id,
+      recovery: recoveryDocument.recovery,
+      revision: 0,
+      serverSynced: false,
+    })
+  })
+
   it('round-trips a collaboration export with entirely detached document and comment identities', () => {
     const document = makeEditorDocument('live-document', {
       access: { mode: 'owner', permission: 'edit' },
@@ -370,6 +399,17 @@ describe('project file export plan', () => {
         documentId: document.id,
         id: 'live-comment-1',
         kind: 'collect',
+        suggestionDraft: {
+          anchorVersion: 1,
+          createdAt: '2026-01-01T13:01:00.000Z',
+          groupId: 'private-group',
+          patchId: '00000000-0000-4000-8000-000000000003',
+          proposedText: 'PRIVATE PROVIDER RESULT MUST NOT BE EXPORTED',
+          publicationCommandId: '00000000-0000-4000-8000-000000000002',
+          revision: 1,
+          suggestionId: 'private-suggestion',
+          updatedAt: '2026-01-01T13:01:00.000Z',
+        },
         status: 'open',
         updatedAt: '2026-01-01T13:05:00.000Z',
       },
@@ -392,12 +432,20 @@ describe('project file export plan', () => {
       },
     ]
 
-    const parsed = parseEditorDocument(serializeEditorDocument(document, {
+    const serialized = serializeEditorDocument(document, {
       editorComments: Object.fromEntries(comments.map((comment) => [comment.id, comment])),
-    }).contents)
+    }).contents
+    const parsed = parseEditorDocument(serialized)
+
+    expect(serialized).not.toContain('PRIVATE PROVIDER RESULT MUST NOT BE EXPORTED')
+    expect(serialized).not.toContain('suggestionDraft')
 
     expect(parsed.document.id).not.toBe(document.id)
     expect(parsed.document.id).toMatch(/^editor-doc-/)
+    expect(parsed.importIdentity?.documentId).toEqual({
+      sourceId: document.id,
+      targetId: parsed.document.id,
+    })
     expect(parsed.document.contentMarkdown).toBe(document.contentMarkdown)
     expect(parsed.document.contentMode).toBeUndefined()
     expect(parsed.document.collaboration).toBeUndefined()
@@ -411,6 +459,11 @@ describe('project file export plan', () => {
     expect(parsed.comments.every((comment) => comment.id.startsWith('editor-comment-'))).toBe(true)
     expect(parsed.comments.every((comment) => !comments.some((source) => source.id === comment.id))).toBe(true)
     expect(parsed.comments.every((comment) => comment.documentId === parsed.document.id)).toBe(true)
+    expect(parsed.comments.every((comment) => comment.suggestionDraft === undefined)).toBe(true)
+    expect(parsed.importIdentity?.commentIds).toEqual(comments.map((comment, index) => ({
+      sourceId: comment.id,
+      targetId: parsed.comments[index].id,
+    })))
     expect(parsed.comments.map((comment) => ({
       anchor: comment.anchor,
       commentMarkdown: comment.commentMarkdown,
@@ -528,5 +581,70 @@ describe('project manifest vector indexes', () => {
       { fileId: 'f1', state: 'embedded' },
       { fileId: 'f2', state: 'pending' },
     ])
+  })
+})
+
+describe('model selection is not project data', () => {
+  it('never writes the model selection into the manifest', () => {
+    // The account preferences own this value and carry a load-time
+    // precedence rule (a loaded file must not bleed into the live account
+    // row). The ui block has no such rule, so persisting it here would build
+    // a second store that silently wins whenever a project is opened.
+    const state = createEmptyProjectState()
+    state.ui.selectedChatModelTier = 'high'
+    state.ui.selectedChatModel = 'claude-opus-4-8'
+    state.ui.selectedChatEffort = 'high'
+    state.ui.selectedAgentModelTier = 'fast'
+    state.ui.selectedAgentModel = 'claude-haiku-4-5'
+    state.ui.selectedAgentEffort = 'low'
+
+    const manifest = serializeProjectManifest(state)
+
+    expect(manifest.contents).not.toContain('claude-opus-4-8')
+    expect(manifest.contents).not.toContain('claude-haiku-4-5')
+    const ui = (parseProjectManifest(manifest.contents) as {
+      ui?: Record<string, unknown>
+    }).ui
+    expect(ui?.selectedChatModelTier).toBeNull()
+    expect(ui?.selectedChatModel).toBeNull()
+    expect(ui?.selectedChatEffort).toBeNull()
+    expect(ui?.selectedAgentModelTier).toBeNull()
+    expect(ui?.selectedAgentModel).toBeNull()
+    expect(ui?.selectedAgentEffort).toBeNull()
+  })
+})
+
+describe('chat thread file round-trip keeps the model pick', () => {
+  it('serializes and parses model_selection as the thread\'s own property', () => {
+    // In file-backed projects the thread file IS the durable home of the
+    // pick — losing it here would silently strip the selection on every
+    // export/import cycle.
+    const file = serializeChatThread({
+      createdAt: '2026-08-07T10:00:00.000Z',
+      id: 'ct_file',
+      messages: [],
+      modelSelection: { model: 'gpt-5.4-nano', tier: null, effort: null },
+      preview: '',
+      source: 'api',
+      title: 'T',
+      updatedAt: '2026-08-07T10:00:00.000Z',
+    })
+    const parsed = parseChatThread(file.contents)
+    expect(parsed.modelSelection).toEqual({
+      model: 'gpt-5.4-nano',
+      tier: null,
+      effort: null,
+    })
+
+    const plain = serializeChatThread({
+      createdAt: '2026-08-07T10:00:00.000Z',
+      id: 'ct_plain',
+      messages: [],
+      preview: '',
+      source: 'api',
+      title: 'T',
+      updatedAt: '2026-08-07T10:00:00.000Z',
+    })
+    expect(parseChatThread(plain.contents).modelSelection).toBeUndefined()
   })
 })

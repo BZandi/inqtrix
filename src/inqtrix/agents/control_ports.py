@@ -35,9 +35,9 @@ a newer one (user edit or replan); at most one version per run is not
 superseded/rejected."""
 
 APPROVAL_KINDS = ("discovery", "plan", "patch", "replan", "tool")
-"""What the run is asking permission for (plan decision E16).
+"""What the run is asking permission for.
 
-``tool`` is the kernel's per-call policy gate (M2): the payload carries
+``tool`` is the kernel's per-call policy gate: the payload carries
 ``actions: [{tool, args, summary}]`` with the web query VERBATIM in
 ``args`` — the args ARE the approval content the user reviews. Edit
 decisions are allowed for exactly one action (the HITL
@@ -67,18 +67,26 @@ ARTIFACT_KINDS = (
     "editor_patch",
     "answer",
     "deliverable",
+    "context_archive",
 )
 """``answer`` is the run-local chat-form deliverable (M1): rendered
 inline in the agent timeline instead of the session memo canvas. Added
 to the DB CHECK by migration 0039 together with the structured
-clarification columns (one migration, plan M1).
+clarification columns in one migration.
 
 ``deliverable`` is a kernel canvas document (M2, ``write_canvas``):
 session-scoped and (session_id, artifact_id)-addressed like the memo,
 but a session may hold SEVERAL — the artifact registry in the session
 context keeps them distinguishable (K2). Its ``payload.deliverable_kind``
 carries the format hint (memo|email|talking_points|generic). Added to
-the DB CHECK by migration 0040."""
+the DB CHECK by migration 0040.
+
+``context_archive`` is the kernel's run-local compaction archive: evicted
+transcript history and offloaded bulk tool results, appended in order.
+Session-less, one per run (``art_<run12>_ctx``), readable by the model via
+``read_canvas`` — the durable half of ledger-grounded compaction, so
+compacting can never destroy retrievable context or break a citation.
+Added to the DB CHECK by migration 0050."""
 
 ARTIFACT_STATUSES = ("writing", "ready")
 """``writing`` locks the artifact against user edits (E13: the canvas is
@@ -92,7 +100,13 @@ hold several of them, so they are always addressed by ``artifact_id``.
 """
 
 RUN_SINGLETON_ARTIFACT_KINDS = frozenset(
-    {"evidence_bundle", "critic_report", "editor_patch", "answer"}
+    {
+        "evidence_bundle",
+        "critic_report",
+        "editor_patch",
+        "answer",
+        "context_archive",
+    }
 )
 """Session-less diagnostic kinds addressed by ``(run_id, kind)``.
 
@@ -195,6 +209,31 @@ class ArtifactRevisionConflict(Exception):
     def __init__(self, current_revision: int) -> None:
         super().__init__(f"artifact is at revision {current_revision}")
         self.current_revision = current_revision
+
+
+class ArtifactPublicationFenced(Exception):
+    """A durable answer write belongs to a superseded run attempt.
+
+    Artifact revision CAS protects the document row; this separate fence
+    binds the write to the durable run claim.  It prevents a reclaimed worker
+    from advancing the answer artifact after a newer attempt owns the run.
+    """
+
+    def __init__(
+        self,
+        *,
+        expected_attempt: int,
+        current_attempt: int | None,
+        status: str,
+    ) -> None:
+        self.expected_attempt = expected_attempt
+        self.current_attempt = current_attempt
+        self.status = status
+        super().__init__(
+            "answer publication attempt was fenced "
+            f"(expected={expected_attempt}, current={current_attempt}, "
+            f"status={status})"
+        )
 
 
 @dataclass(frozen=True)
@@ -964,8 +1003,9 @@ class AgentControlStore(Protocol):
         updated_by: str,
         artifact_id: str | None = None,
         expected_revision: int | None = None,
+        expected_run_attempt: int | None = None,
     ) -> ArtifactRecord:
-        """Create or advance an artifact (agent write path, M5).
+        """Create or advance an artifact through the agent write path.
 
         Upsert key: explicit ``artifact_id`` when given, else
         ``(session_id, kind)`` for session-scoped kinds, else
@@ -973,8 +1013,8 @@ class AgentControlStore(Protocol):
         appends a revision row; the run anchor moves to *run_id*.
 
         Args:
-            expected_revision: Optimistic-concurrency guard (decision E13,
-                the agent's symmetric half). ``None`` (default) advances
+            expected_revision: Optimistic-concurrency guard for the
+                agent's write path. ``None`` (default) advances
                 unconditionally — correct for write-once per-run kinds
                 (evidence bundles, critic reports) the user never edits.
                 An int makes the write conditional against an EXISTING row:
@@ -985,6 +1025,11 @@ class AgentControlStore(Protocol):
                 concurrently-inserted row is a conflict, not a silent
                 advance (closes the fresh-session insert race). When no row
                 exists the value is irrelevant: the insert proceeds.
+            expected_run_attempt: Optional durable worker claim fence.  When
+                set, the artifact mutation and the assertion that the run is
+                still ``running`` under this exact attempt occur in one
+                transaction.  In-memory execution has no reclaiming workers
+                and therefore leaves it ``None``.
         """
         ...
 
@@ -993,8 +1038,8 @@ class AgentControlStore(Protocol):
     ) -> ArtifactRecord | None:
         """The current session-scoped artifact of *kind*, or ``None``.
 
-        The cross-run read behind session-memo lineage (decision E15):
-        a follow-up turn is a NEW run, so :meth:`get_artifact` (run-scoped)
+        This cross-run read supports session-memo lineage: a follow-up
+        turn is a NEW run, so :meth:`get_artifact` (run-scoped)
         cannot reach the prior turn's memo — this resolves it by the
         durable ``(session_id, kind)`` key and returns the LATEST revision
         with its body, so the agent continues from (and never clobbers)

@@ -1,17 +1,17 @@
-"""Postgres integration tests for the skill repository (plan M3 `3.1`).
+"""Postgres integration tests for the skill repository.
 
 Gated like the sibling suites: a disposable database via
 ``INQTRIX_TEST_DATABASE_URL``, operations under the restricted app
-role. Pins the CRUD roundtrip over the FULL field set (JSONB points and
-tool lists included), absence semantics, the compare-and-set update
-distinction, and migration 0041 being applied at all.
+role. Pins canonical-owner integrity, the CRUD roundtrip over the full
+field set (JSONB points and tool lists included), non-disclosing
+authorization failures, and the compare-and-set update distinction.
 """
 
 from __future__ import annotations
 
 import os
 import time
-import uuid
+from dataclasses import replace
 
 import pytest
 import pytest_asyncio
@@ -26,15 +26,19 @@ from inqtrix.content.skills import (
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.migrate import run_migrations
 from inqtrix.storage.skills_postgres import PostgresSkillRepository
+from tests.storage._canonical_users import (
+    canonical_user_id,
+    ensure_canonical_users,
+)
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
+OWNER_ID = canonical_user_id("skill-owner")
+STRANGER_ID = canonical_user_id("skill-stranger")
+MISSING_OWNER_ID = canonical_user_id("skill-missing-owner")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -51,6 +55,10 @@ async def repository():
     async with factory() as session:
         async with session.begin():
             await session.execute(text("DELETE FROM skill_templates"))
+            await ensure_canonical_users(
+                session,
+                (OWNER_ID, STRANGER_ID),
+            )
     yield PostgresSkillRepository(session_factory=factory, app_role=APP_ROLE)
     await engine.dispose()
 
@@ -60,7 +68,7 @@ def record(**overrides) -> SkillRecord:
     base = dict(
         id=new_skill_id(),
         tenant_id="default",
-        owner_user_id=uuid.uuid4(),
+        owner_user_id=OWNER_ID,
         label="sprechzettel",
         title="Sprechzettel",
         description="Kompakter Sprechzettel.",
@@ -103,15 +111,20 @@ async def test_crud_roundtrip_full_field_set(repository):
     assert [item.id for item in listed] == [created.id]
 
     updated = await repository.update(
-        SkillRecord(**{**created.__dict__, "title": "Neuer Titel"}),
+        replace(created, title="Neuer Titel"),
         expected_revision=created.revision,
+        actor_user_id=OWNER_ID,
     )
     assert updated.title == "Neuer Titel"
     assert updated.updated_at > created.updated_at
     assert updated.revision == created.revision + 1
     assert updated.clarification_points == created.clarification_points
 
-    await repository.delete(created.id, tenant_id="default")
+    await repository.delete(
+        created.id,
+        tenant_id="default",
+        actor_user_id=OWNER_ID,
+    )
     with pytest.raises(SkillNotFound):
         await repository.get(created.id, tenant_id="default")
 
@@ -124,26 +137,74 @@ async def test_absence_and_foreign_tenant_raise_alike(repository):
     with pytest.raises(SkillNotFound):
         await repository.get(created.id, tenant_id="tenant-x")
     with pytest.raises(SkillNotFound):
-        await repository.delete("sk_missing", tenant_id="default")
+        await repository.delete(
+            "sk_missing",
+            tenant_id="default",
+            actor_user_id=OWNER_ID,
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_requires_a_live_canonical_owner(repository):
+    candidate = record(owner_user_id=MISSING_OWNER_ID)
+
+    with pytest.raises(SkillNotFound):
+        await repository.create(candidate)
+    with pytest.raises(SkillNotFound):
+        await repository.get(candidate.id, tenant_id="default")
+
+
+@pytest.mark.asyncio
+async def test_ownerless_record_roundtrips_in_unscoped_mode(repository):
+    created = await repository.create(record(owner_user_id=None))
+
+    assert (
+        await repository.get(created.id, tenant_id="default")
+    ).owner_user_id is None
+
+
+@pytest.mark.asyncio
+async def test_actor_cannot_mutate_or_delete_another_owners_skill(repository):
+    created = await repository.create(record(title="owner value"))
+
+    with pytest.raises(SkillNotFound):
+        await repository.update(
+            replace(created, title="stranger value"),
+            expected_revision=created.revision,
+            actor_user_id=STRANGER_ID,
+        )
+    with pytest.raises(SkillNotFound):
+        await repository.delete(
+            created.id,
+            tenant_id="default",
+            actor_user_id=STRANGER_ID,
+        )
+
+    stored = await repository.get(created.id, tenant_id="default")
+    assert stored.title == "owner value"
+    assert stored.revision == created.revision
 
 
 @pytest.mark.asyncio
 async def test_matching_precondition_updates_stale_one_conflicts(repository):
     created = await repository.create(record(title="v0"))
     advanced = await repository.update(
-        SkillRecord(**{**created.__dict__, "title": "v1"}),
+        replace(created, title="v1"),
         expected_revision=created.revision,
+        actor_user_id=OWNER_ID,
     )
     assert advanced.title == "v1"
 
     with pytest.raises(SkillConflict) as exc_info:
         await repository.update(
-            SkillRecord(**{**created.__dict__, "title": "stale"}),
+            replace(created, title="stale"),
             expected_revision=created.revision,
+            actor_user_id=OWNER_ID,
         )
     assert exc_info.value.current_revision == advanced.revision
     with pytest.raises(SkillNotFound):
         await repository.update(
             record(id="sk_missing", title="ghost"),
             expected_revision=created.revision,
+            actor_user_id=OWNER_ID,
         )

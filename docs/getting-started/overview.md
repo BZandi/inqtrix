@@ -31,12 +31,12 @@ Inqtrix is **not** a general-purpose agent framework; the graph topology, strate
 
 | Mode | Optional files | Where models are defined | How to start |
 |------|----------------|--------------------------|--------------|
-| Python library via `.env` or process env | `.env` | environment variables | `uv run python main.py` |
-| Python library via `AgentConfig` | none | Python code | `uv run python main.py` |
-| HTTP server in env-only mode | `.env` | environment variables | `uv run python -m inqtrix` |
-| Research Desk UI (against a running server) | none | on the server | `pnpm run ui:dev` |
-| Stack mode (one command: API + web + Postgres) | `deploy/.env.stack` | environment variables | [Stack quickstart](stack-quickstart.md) |
-| Platform components (S3, Qdrant, Valkey, Dex profiles) | `.env` + compose | environment variables | [Platform components](platform-components.md) |
+| Python library via `.env` or process env | `.env` | environment variables | `uv run python main.py` or `python main.py` after pip install |
+| Python library via `AgentConfig` | none | Python code | `uv run python main.py` or `python main.py` after pip install |
+| HTTP server in env-only mode | `.env` | environment variables | `uv run python -m inqtrix` or `python -m inqtrix` after pip install |
+| Research Desk UI (against a running server) | none | on the server | `npm run ui:dev` |
+| Stack mode (one command: API + web + Postgres) | `deploy/.env.stack` + `deploy/.env.stack.secrets` | visible configuration + companion credentials | [Stack quickstart](stack-quickstart.md) |
+| Platform components (managed or bundled S3, Qdrant, Valkey, Dex) | `.env` + Compose | environment variables; profiles only for bundled services | [Platform components](platform-components.md) |
 
 `main.py` only exists when you author a library script yourself. The HTTP server boots directly via `python -m inqtrix`; no user-supplied `main.py` is required.
 

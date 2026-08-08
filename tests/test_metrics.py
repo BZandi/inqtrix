@@ -143,3 +143,409 @@ def test_record_admission_rejected_is_noop_when_disabled(monkeypatch):
     monkeypatch.setattr(metrics_module, "_admission_counter", None)
     # Must not raise even though metrics were never set up.
     metrics_module.record_admission_rejected("queue_full")
+
+
+def test_call_metrics_feed_from_provider_wrapper(monkeypatch):
+    """The C0 wrapper feeds llm counters/histograms/tokens —
+    independent of tracing state, labeled by canonical model + feature."""
+    from prometheus_client import CollectorRegistry, generate_latest
+
+    from inqtrix.observability import metrics_defs
+    from inqtrix.observability.context import bind_feature, reset_feature
+    from inqtrix.observability.provider_tracing import instrument_llm
+    from tests.test_provider_tracing import SUMMARY, FakeLLM
+
+    registry = CollectorRegistry()
+    holder = metrics_defs.build_call_metrics(registry)
+    monkeypatch.setattr(metrics_defs, "_active", holder)
+
+    llm = instrument_llm(FakeLLM(), provider_name="fake", policy=SUMMARY)
+    token = bind_feature("knowledge")
+    try:
+        llm.complete_with_metadata("hallo")
+    finally:
+        reset_feature(token)
+
+    text = generate_latest(registry).decode()
+    assert _sample_value(
+        text,
+        "inqtrix_llm_requests_total",
+        provider="fake",
+        model="fake-1",
+        operation="text_completion",
+        outcome="success",
+    ) == 1.0
+    assert _sample_value(
+        text,
+        "inqtrix_llm_tokens_total",
+        model="fake-1",
+        feature="knowledge",
+        token_type="input",
+    ) > 0
+    # No run ids or question text anywhere in the exposition.
+    assert "hallo" not in text
+
+
+def test_call_metrics_error_outcome(monkeypatch):
+    from prometheus_client import CollectorRegistry, generate_latest
+
+    from inqtrix.observability import metrics_defs
+    from inqtrix.observability.provider_tracing import instrument_llm
+    from tests.test_provider_tracing import SUMMARY, FakeLLM
+
+    registry = CollectorRegistry()
+    monkeypatch.setattr(
+        metrics_defs, "_active", metrics_defs.build_call_metrics(registry)
+    )
+
+    class _BoomLLM(FakeLLM):
+        def complete_with_metadata(self, *args, **kwargs):
+            raise TimeoutError("provider timed out")
+
+    llm = instrument_llm(_BoomLLM(), provider_name="fake", policy=SUMMARY)
+    with pytest.raises(TimeoutError):
+        llm.complete_with_metadata("x")
+    text = generate_latest(registry).decode()
+    assert _sample_value(
+        text,
+        "inqtrix_llm_requests_total",
+        provider="fake",
+        model="unknown",
+        operation="text_completion",
+        outcome="timeout",
+    ) == 1.0
+
+
+def test_retrieval_indexing_and_worker_job_feeds(monkeypatch):
+    """2: the retrieval/indexing/worker seams feed the shared holder."""
+    from prometheus_client import CollectorRegistry, generate_latest
+
+    from inqtrix.observability import metrics_defs
+
+    registry = CollectorRegistry()
+    monkeypatch.setattr(
+        metrics_defs, "_active", metrics_defs.build_call_metrics(registry)
+    )
+
+    import time as time_module
+
+    from inqtrix.knowledge.retrieval import _observe_retrieval_step
+    from inqtrix.services.indexing_service import _count_indexed_document
+    from inqtrix.worker.indexing_loop import _count_worker_job
+
+    _observe_retrieval_step("rerank", time_module.monotonic())
+    _count_indexed_document("completed")
+    _count_worker_job("indexing", "terminal")
+
+    text = generate_latest(registry).decode()
+    assert _sample_value(
+        text,
+        "inqtrix_retrieval_duration_seconds_count",
+        step="rerank",
+    ) == 1.0
+    assert _sample_value(
+        text, "inqtrix_indexing_documents_total", outcome="completed"
+    ) == 1.0
+    assert _sample_value(
+        text, "inqtrix_worker_jobs_total", loop="indexing", outcome="terminal"
+    ) == 1.0
+
+
+def test_retrieval_step_noop_without_active_metrics():
+    """No holder published (metrics off) → seams stay silent no-ops."""
+    import time as time_module
+
+    from inqtrix.knowledge.retrieval import _observe_retrieval_step
+    from inqtrix.observability import metrics_defs
+    from inqtrix.services.indexing_service import _count_indexed_document
+
+    previous = metrics_defs._active
+    metrics_defs._active = None
+    try:
+        _observe_retrieval_step("hybrid_search", time_module.monotonic())
+        _count_indexed_document("failed")
+    finally:
+        metrics_defs._active = previous
+
+
+def test_worker_metrics_off_while_metrics_enabled_warns_once(monkeypatch, caplog):
+    """Metrics globally on but the worker port left at 0 is a silent
+    half-configuration: the API exports series while the worker — where
+    every run, LLM call and retrieval step happens — silently exports
+    none. Warn once per process so the gap is visible without spamming.
+    """
+    from types import SimpleNamespace
+
+    from inqtrix.worker import metrics as worker_metrics
+
+    monkeypatch.setattr(worker_metrics, "_off_while_enabled_warned", False)
+    settings = SimpleNamespace(
+        queue=SimpleNamespace(worker_metrics_port=0),
+        server=SimpleNamespace(metrics_enabled=True),
+    )
+
+    with caplog.at_level("WARNING", logger="inqtrix"):
+        assert worker_metrics.start_worker_metrics(settings) is False
+        assert worker_metrics.start_worker_metrics(settings) is False
+
+    warnings = [
+        rec for rec in caplog.records
+        if "INQTRIX_WORKER_METRICS_PORT" in rec.message
+    ]
+    assert len(warnings) == 1, "the gap must be announced exactly once"
+    assert "INQTRIX_METRICS_ENABLED=true" in warnings[0].message
+
+
+def test_worker_metrics_fully_off_stays_silent(monkeypatch, caplog):
+    """Metrics off everywhere is a deliberate default, not a
+    misconfiguration — it must not produce a warning."""
+    from types import SimpleNamespace
+
+    from inqtrix.worker import metrics as worker_metrics
+
+    monkeypatch.setattr(worker_metrics, "_off_while_enabled_warned", False)
+    settings = SimpleNamespace(
+        queue=SimpleNamespace(worker_metrics_port=0),
+        server=SimpleNamespace(metrics_enabled=False),
+    )
+
+    with caplog.at_level("WARNING", logger="inqtrix"):
+        assert worker_metrics.start_worker_metrics(settings) is False
+
+    assert not [
+        rec for rec in caplog.records
+        if "INQTRIX_WORKER_METRICS_PORT" in rec.message
+    ]
+
+
+def test_worker_metrics_bind_failure_stays_off(monkeypatch, caplog):
+    """An unbindable port logs ERROR, never crashes the
+    worker, and leaves the holder unset (no phantom series)."""
+    import socket
+    from types import SimpleNamespace
+
+    from inqtrix.observability import metrics_defs
+    from inqtrix.worker.metrics import start_worker_metrics
+
+    blocker = socket.socket()
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("0.0.0.0", 0))
+    blocker.listen(1)
+    port = blocker.getsockname()[1]
+    monkeypatch.setattr(metrics_defs, "_active", None)
+    settings = SimpleNamespace(
+        queue=SimpleNamespace(worker_metrics_port=port),
+        server=SimpleNamespace(metrics_enabled=True),
+    )
+    try:
+        with caplog.at_level("ERROR", logger="inqtrix"):
+            assert start_worker_metrics(settings) is False
+    finally:
+        blocker.close()
+    assert metrics_defs.active_metrics() is None
+    assert any("nicht binden" in rec.message for rec in caplog.records)
+
+
+def test_metric_model_label_fallback_cap(monkeypatch):
+    """Non-catalog model labels are admission-capped;
+    an unbounded spray collapses to "other" instead of minting series."""
+    from inqtrix.observability import metrics_defs
+
+    monkeypatch.setattr(metrics_defs, "_fallback_model_labels", set())
+    monkeypatch.setattr(metrics_defs, "_fallback_cap_warned", False)
+    names = [
+        f"unknownmodel{chr(97 + i % 26)}{chr(97 + i // 26)}"
+        for i in range(metrics_defs._FALLBACK_MODEL_LABEL_LIMIT + 10)
+    ]
+    labels = [metrics_defs.metric_model_label(name) for name in names]
+    assert "other" in labels
+    assert len(set(labels)) <= metrics_defs._FALLBACK_MODEL_LABEL_LIMIT + 1
+    # An early-admitted label stays stable after the cap engaged.
+    assert metrics_defs.metric_model_label(names[0]) == labels[0] != "other"
+
+
+def test_queue_wait_observed_only_by_runs_loop():
+    """Run_queue_wait is a RUN metric — the shared base
+    loop and the indexing loop must not feed it."""
+    from inqtrix.worker.indexing_loop import IndexingWorkerLoop
+    from inqtrix.worker.loop import BaseWorkerLoop, WorkerLoop
+
+    assert BaseWorkerLoop._observes_queue_wait is False
+    assert WorkerLoop._observes_queue_wait is True
+    assert IndexingWorkerLoop._observes_queue_wait is False
+
+
+def test_fenced_run_handle_records_terminal_outcome():
+    """The landed terminal is the honest segment outcome;
+    a fenced write leaves it None so the loop skips the observation."""
+    import threading
+
+    from inqtrix.worker.loop import FencedRunHandle
+
+    class _Store:
+        def complete(self, run_id, result, snapshot=None, fence_attempt=None):
+            return True
+
+        def fail(self, run_id, message, error_type="server_error", fence_attempt=None):
+            return True
+
+        def mark_cancelled(self, run_id, reason="cancelled", fence_attempt=None):
+            return False
+
+        def emit(self, *args, **kwargs):
+            pass
+
+    handle = FencedRunHandle(_Store(), "run_x", threading.Event(), 1)
+    assert handle.terminal_outcome is None
+    handle.complete({})
+    assert handle.terminal_outcome == "completed"
+
+    handle2 = FencedRunHandle(_Store(), "run_y", threading.Event(), 1)
+    handle2.fail("boom")
+    assert handle2.terminal_outcome == "failed"
+
+    fenced = FencedRunHandle(_Store(), "run_z", threading.Event(), 1)
+    fenced.cancel()
+    assert fenced.terminal_landed is False
+    assert fenced.terminal_outcome is None
+
+
+def test_map_cancellable_propagates_feature_context():
+    """Research fan-out threads must inherit the submitting
+    thread's contextvars (feature label) via copy_context."""
+    from inqtrix.nodes import _map_cancellable
+    from inqtrix.observability.context import (
+        bind_feature,
+        current_feature,
+        reset_feature,
+    )
+
+    token = bind_feature("research")
+    try:
+        results = _map_cancellable(
+            {},
+            lambda item: current_feature(),
+            ["a", "b", "c"],
+            max_workers=2,
+            operation_label="test",
+        )
+    finally:
+        reset_feature(token)
+    assert results == ["research", "research", "research"]
+
+
+def test_document_revision_job_counts_single_failed_sample(monkeypatch):
+    """The primary ingest path counts exactly one
+    failed sample at the shared chokepoint — in-process and worker alike
+    — and pause-class errors stay uncounted."""
+    from types import SimpleNamespace
+
+    from prometheus_client import CollectorRegistry, generate_latest
+
+    import inqtrix.services.indexing_service as indexing_service
+    from inqtrix.knowledge.contextualize import (
+        ContextualizationDependencyError,
+    )
+    from inqtrix.observability import metrics_defs
+
+    registry = CollectorRegistry()
+    monkeypatch.setattr(
+        metrics_defs, "_active", metrics_defs.build_call_metrics(registry)
+    )
+
+    def _boom_steps(handle, *, counted, **kwargs):
+        raise RuntimeError("pipeline exploded")
+
+    monkeypatch.setattr(
+        indexing_service, "_run_document_revision_steps", _boom_steps
+    )
+    with pytest.raises(RuntimeError):
+        indexing_service.execute_document_revision_job(
+            SimpleNamespace(),
+            knowledge_service=SimpleNamespace(),
+            document_id="kd_x",
+            revision_id="rev_x",
+        )
+    text = generate_latest(registry).decode()
+    assert _sample_value(
+        text, "inqtrix_indexing_documents_total", outcome="failed"
+    ) == 1.0
+
+    def _pause_steps(handle, *, counted, **kwargs):
+        raise ContextualizationDependencyError(
+            error_type="contextualization_provider_timeout"
+        )
+
+    monkeypatch.setattr(
+        indexing_service, "_run_document_revision_steps", _pause_steps
+    )
+    with pytest.raises(ContextualizationDependencyError):
+        indexing_service.execute_document_revision_job(
+            SimpleNamespace(),
+            knowledge_service=SimpleNamespace(),
+            document_id="kd_x",
+            revision_id="rev_x",
+        )
+    text = generate_latest(registry).decode()
+    assert _sample_value(
+        text, "inqtrix_indexing_documents_total", outcome="failed"
+    ) == 1.0  # unchanged: the pause did not count
+
+    def _late_failure_steps(handle, *, counted, **kwargs):
+        counted["completed"] = True
+        metrics_defs.active_metrics().count_indexed_documents(
+            outcome="completed"
+        )
+        raise RuntimeError("terminal write failed after completion")
+
+    monkeypatch.setattr(
+        indexing_service, "_run_document_revision_steps", _late_failure_steps
+    )
+    with pytest.raises(RuntimeError):
+        indexing_service.execute_document_revision_job(
+            SimpleNamespace(),
+            knowledge_service=SimpleNamespace(),
+            document_id="kd_x",
+            revision_id="rev_x",
+        )
+    text = generate_latest(registry).decode()
+    assert _sample_value(
+        text, "inqtrix_indexing_documents_total", outcome="failed"
+    ) == 1.0  # no second failed sample for a completed document
+    assert _sample_value(
+        text, "inqtrix_indexing_documents_total", outcome="completed"
+    ) == 1.0
+
+
+def test_map_cancellable_plain_path_cancels_queued_on_failure():
+    """The no-cancel-event path keeps ex.map's
+    cancel-queued-remainder semantics after the contextvars fix."""
+    import threading
+
+    from inqtrix.nodes import _map_cancellable
+
+    executed: list[int] = []
+    release = threading.Event()
+    lock = threading.Lock()
+
+    def fn(item):
+        with lock:
+            executed.append(item)
+        if item == 0:
+            raise RuntimeError("first item fails")
+        release.wait(timeout=5)
+        return item
+
+    with pytest.raises(RuntimeError, match="first item fails"):
+        try:
+            _map_cancellable(
+                {},
+                fn,
+                list(range(8)),
+                max_workers=2,
+                operation_label="test",
+            )
+        finally:
+            release.set()
+    # ex.map parity: the queued remainder was cancelled, not executed.
+    assert len(executed) < 8

@@ -8,6 +8,14 @@ precedence: config > extraConfig > derived).
 {{- if and (eq (.Values.config.INQTRIX_STORAGE_BACKEND | toString) "postgres") (not .Values.postgres.enabled) (not .Values.secret.existingSecret) (not (hasKey .Values.secret.data "INQTRIX_DATABASE_URL")) }}
 {{- fail "INQTRIX_STORAGE_BACKEND is \"postgres\" but no database is configured. Set ONE of: --set postgres.enabled=true (bundled demo DB), --set secret.existingSecret=<name> (a Secret carrying INQTRIX_DATABASE_URL), or --set-string secret.data.INQTRIX_DATABASE_URL=<url>. For a stateless trial: --set config.INQTRIX_STORAGE_BACKEND=memory --set migrations.enabled=false." }}
 {{- end }}
+{{- if .Values.s3.enabled }}
+{{- $explicitS3Keys := list "INQTRIX_OBJECT_STORE_BACKEND" "INQTRIX_S3_AUTH_MODE" "INQTRIX_S3_ENDPOINT_URL" "INQTRIX_S3_BUCKET" "INQTRIX_S3_ADDRESSING_STYLE" "INQTRIX_S3_BUCKET_PROVISIONING" }}
+{{- range $key := $explicitS3Keys }}
+{{- if or (hasKey $.Values.config $key) (hasKey $.Values.extraConfig $key) }}
+{{- fail (printf "bundled MinIO topology is derived from s3.*; do not also set config/extraConfig.%s" $key) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- /* Effective replica count: static replicaCount, or the autoscaler ceiling
        when enabled; a worker pod counts as one more sharer of the object store. */}}
 {{- $apiReplicas := int .Values.api.replicaCount }}
@@ -56,6 +64,19 @@ precedence: config > extraConfig > derived).
 {{- $publicScheme := ternary "https" "http" .Values.route.tls.enabled }}
 {{- $_ := set $derived "INQTRIX_PUBLIC_BASE_URL" (printf "%s://%s" $publicScheme .Values.route.host) }}
 {{- end }}
+{{- /* Behind the chart-owned edge every request reaches the API with TWO
+       X-Forwarded-For hops: the ingress controller / OpenShift router writes
+       the client address, then the Python web gateway appends its peer.
+       The login rate limiter reads the address trusted_proxy_hops from the
+       right; the app default of 1 would therefore key every client on the
+       edge pod IP, collapsing all users into one lockout bucket (a third
+       party spraying failed logins at a victim's email would lock the victim
+       out). The chart knows its own two-hop topology, so it sets the depth in
+       the derived layer; explicit config/extraConfig still wins (e.g. 3 with
+       an additional cloud load balancer in front). */}}
+{{- if or (and .Values.ingress.enabled (not .Values.openshift.enabled)) (and .Values.openshift.enabled .Values.route.enabled) }}
+{{- $_ := set $derived "INQTRIX_TRUSTED_PROXY_HOPS" "2" }}
+{{- end }}
 {{- if .Values.qdrant.enabled }}
 {{- $_ := set $derived "INQTRIX_KNOWLEDGE_ENABLED" "true" }}
 {{- $_ := set $derived "INQTRIX_VECTOR_BACKEND" "qdrant" }}
@@ -83,8 +104,14 @@ precedence: config > extraConfig > derived).
 {{- end }}
 {{- /* Prometheus /metrics: the image bakes in the metrics extra, so this flag
        alone mounts the endpoint (scrape wiring lives on the api pod annotations). */}}
+{{- if and (gt (int (.Values.metrics.workerPort | default 0)) 0) (not .Values.metrics.enabled) }}
+{{- fail "metrics.workerPort requires metrics.enabled=true (the worker exporter is gated by INQTRIX_METRICS_ENABLED; a silently dropped port would hide the misconfiguration)" }}
+{{- end }}
 {{- if .Values.metrics.enabled }}
 {{- $_ := set $derived "INQTRIX_METRICS_ENABLED" "true" }}
+{{- if gt (int (.Values.metrics.workerPort | default 0)) 0 }}
+{{- $_ := set $derived "INQTRIX_WORKER_METRICS_PORT" (printf "%d" (int .Values.metrics.workerPort)) }}
+{{- end }}
 {{- end }}
 {{- /* Collaboration stays absent from the default ConfigMap. Enabling the
        module wires FastAPI only to the private ClusterIP Service; the browser

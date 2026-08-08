@@ -35,7 +35,9 @@ import type {
 } from '@/features/project/types'
 import { isoFromUnixSeconds, unixSecondsFromIso } from '@/lib/time'
 
-const VALID_STATUS: ReadonlySet<string> = new Set(['error', 'indexing', 'ready', 'stale'])
+const VALID_STATUS: ReadonlySet<string> = new Set([
+  'delete_failed', 'deleting', 'error', 'indexing', 'ready', 'stale',
+])
 const VALID_MEMBER_STATE: ReadonlySet<string> = new Set(['pending', 'embedded', 'skipped'])
 const VALID_RESULT: ReadonlySet<string> = new Set(['cancelled', 'error', 'ok'])
 
@@ -167,8 +169,27 @@ export function vectorIndexChanged(
 ): boolean {
   // Never push an in-flight reindex (defer until it reaches a terminal status);
   // otherwise push on any updatedAt change (or a first sight).
-  if (current.status === 'indexing') return false
+  if (current.status === 'indexing' || current.status === 'deleting' || current.status === 'delete_failed') return false
   return previous === undefined || previous.updatedAt !== current.updatedAt
+}
+
+/** Debounce override for the vector-index autosave: membership GROWTH flushes
+ * immediately (delay 0), everything else keeps the regular debounce. New
+ * members are a structural change whose loss window should be as small as the
+ * upload's — a reload right after adding documents must find them on the
+ * server. Pure so the trigger is unit-testable. */
+export function autosaveDelayForVectorIndexes(
+  previous: Record<string, VectorIndexRecord>,
+  next: Record<string, VectorIndexRecord>,
+  debounceMs: number,
+): number {
+  for (const [id, record] of Object.entries(next)) {
+    const before = previous[id]
+    if (before ? record.members.length > before.members.length : record.members.length > 0) {
+      return 0
+    }
+  }
+  return debounceMs
 }
 
 // -- whole-project push (the explicit import) ------------------------------ #

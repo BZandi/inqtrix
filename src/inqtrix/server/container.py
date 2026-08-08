@@ -172,6 +172,7 @@ def build_platform_persistence_bundle(
                 restrict_to_workspace_members=(
                     settings.sharing.restrict_to_workspace_members
                 ),
+                sharing_enabled=settings.sharing.enabled,
             ),
             file_registry=PostgresFileRegistry(
                 session_factory=session_factory,
@@ -186,6 +187,7 @@ def build_platform_persistence_bundle(
                 restrict_to_workspace_members=(
                     settings.sharing.restrict_to_workspace_members
                 ),
+                sharing_enabled=settings.sharing.enabled,
             ),
             skills=PostgresSkillRepository(
                 session_factory=session_factory,
@@ -193,6 +195,7 @@ def build_platform_persistence_bundle(
                 restrict_to_workspace_members=(
                     settings.sharing.restrict_to_workspace_members
                 ),
+                sharing_enabled=settings.sharing.enabled,
             ),
             user_event_store=PostgresUserEventStore(
                 session_factory=session_factory,
@@ -208,7 +211,8 @@ def build_platform_persistence_bundle(
     store = MemoryIdentityStore(
         restrict_to_workspace_members=(
             settings.sharing.restrict_to_workspace_members
-        )
+        ),
+        sharing_enabled=settings.sharing.enabled,
     )
     return PlatformPersistence(
         permissions=AuthorizationService(
@@ -218,6 +222,7 @@ def build_platform_persistence_bundle(
             restrict_to_workspace_members=(
                 settings.sharing.restrict_to_workspace_members
             ),
+            sharing_enabled=settings.sharing.enabled,
         ),
         file_registry=MemoryFileRegistry(),
         audit=store,
@@ -227,6 +232,57 @@ def build_platform_persistence_bundle(
         skills=MemorySkillRepository(),
         user_event_store=MemoryUserEventStore(),
     )
+
+
+def build_run_thread_persistence(
+    settings: Settings,
+    bundle: PlatformPersistence | None,
+    *,
+    already_loop_agnostic: bool,
+) -> PlatformPersistence | None:
+    """The platform bundle that RUN THREADS may drive.
+
+    Run threads execute an algorithm synchronously and reach these
+    repositories through ``run_coro_sync`` / ``asyncio.run`` — one fresh,
+    immediately closed event loop per call. :mod:`inqtrix.sync_bridge`
+    documents the invariant that every store reached that way must sit on
+    a loop-agnostic NullPool engine; a pooled asyncpg connection cached on
+    a dead loop fails with "Future attached to a different loop" on the
+    next checkout, and poisons the pool for whoever draws it next.
+
+    The API cannot simply switch its shared bundle to NullPool: the same
+    repositories serve the HTTP request path, whose one persistent loop is
+    exactly what pooling is for. So the two consumers get two engines —
+    the same reasoning ``build_run_store`` already applies ("two pools
+    here are correctness, not waste").
+
+    Returns *bundle* unchanged wherever a second engine would be wrong:
+
+    * ``already_loop_agnostic`` — the worker's bundle IS NullPool, so it
+      is already the run-thread bundle; a third engine would be waste.
+    * ``memory`` — no engines and no loops, and a second memory store
+      would be an EMPTY parallel identity universe: every scoped run
+      would resolve against zero memberships.
+    * injected persistence (*bundle* is ``None``) — the integrator passed
+      their own objects and owns their loop discipline; shadowing them
+      would silently authorize against a different universe than the
+      request path.
+
+    Args:
+        bundle: The request-path bundle, or ``None`` when the caller
+            injected ``permissions``/``file_service`` directly.
+        already_loop_agnostic: Whether *bundle* was itself built with
+            ``null_pool=True`` (the worker's case).
+
+    Returns:
+        The bundle run threads may drive — either *bundle* itself or a
+        second, NullPool-backed one.
+    """
+    if bundle is None or already_loop_agnostic:
+        return bundle
+    if settings.storage.backend != "postgres":
+        return bundle
+    return build_platform_persistence_bundle(settings, null_pool=True)
 
 
 def build_platform_persistence(
@@ -278,7 +334,10 @@ def build_run_store(settings: Settings) -> "RunStorePort":
     """
     _require_valid_queue_storage(settings)
     if settings.storage.backend != "postgres":
-        return RunStore.from_settings(settings.server)
+        return RunStore.from_settings(
+            settings.server,
+            audit_service_starts=settings.observability.audit_service_starts,
+        )
 
     import os
     import socket
@@ -326,6 +385,8 @@ def build_run_store(settings: Settings) -> "RunStorePort":
         restrict_to_workspace_members=(
             settings.sharing.restrict_to_workspace_members
         ),
+        sharing_enabled=settings.sharing.enabled,
+        audit_service_starts=settings.observability.audit_service_starts,
     )
 
 
@@ -379,6 +440,93 @@ def build_indexing_store(settings: Settings) -> Any:
         restrict_to_workspace_members=(
             settings.sharing.restrict_to_workspace_members
         ),
+        sharing_enabled=settings.sharing.enabled,
+    )
+
+
+def build_deletion_store(settings: Settings) -> Any:
+    """Build the aggregate-deletion operation store.
+
+    Memory deployments execute in-process. Postgres persists operation
+    receipts and stage transitions; Valkey adds worker dispatch while the
+    Postgres row remains authoritative.
+    """
+
+    from inqtrix.runs.deletion_operations import DeletionOperationStore
+
+    _require_valid_queue_storage(settings)
+    if settings.storage.backend != "postgres":
+        return DeletionOperationStore()
+
+    import os
+    import socket
+
+    from inqtrix.runs.deletion_postgres import PostgresDeletionOperationStore
+    from inqtrix.storage.db import build_engine
+
+    if not settings.storage.database_url.strip():
+        raise RuntimeError(
+            "INQTRIX_STORAGE_BACKEND=postgres verlangt eine gesetzte "
+            "INQTRIX_DATABASE_URL."
+        )
+    queue = None
+    if settings.queue.backend == "valkey":
+        from inqtrix.runs.deletion_queue import ValkeyDeletionQueue
+
+        queue = ValkeyDeletionQueue(url=settings.queue.valkey_url)
+    return PostgresDeletionOperationStore(
+        engine=build_engine(
+            settings.storage.database_url,
+            **settings.storage.pool_kwargs(),
+        ),
+        app_role=settings.storage.app_role,
+        queue=queue,
+        max_concurrent=settings.server.deletion_max_concurrent,
+        completed_ttl_seconds=(
+            settings.server.deletion_receipt_retention_seconds
+        ),
+        worker_id=f"api-{socket.gethostname()}-{os.getpid()}",
+        restrict_to_workspace_members=(
+            settings.sharing.restrict_to_workspace_members
+        ),
+        sharing_enabled=settings.sharing.enabled,
+    )
+
+
+def build_upload_store(settings: Settings, *, asset_store: Any) -> Any:
+    """Build the original-file upload operation ledger and durable outbox."""
+
+    _require_valid_queue_storage(settings)
+    if settings.storage.backend != "postgres":
+        from inqtrix.runs.upload_operations import MemoryUploadOperationStore
+
+        return MemoryUploadOperationStore(assets=asset_store)
+
+    import os
+    import socket
+
+    from inqtrix.runs.upload_postgres import PostgresUploadOperationStore
+    from inqtrix.storage.db import build_engine
+
+    if not settings.storage.database_url.strip():
+        raise RuntimeError(
+            "INQTRIX_STORAGE_BACKEND=postgres verlangt eine gesetzte "
+            "INQTRIX_DATABASE_URL."
+        )
+    queue = None
+    if settings.queue.backend == "valkey":
+        from inqtrix.runs.upload_queue import ValkeyUploadQueue
+
+        queue = ValkeyUploadQueue(url=settings.queue.valkey_url)
+    return PostgresUploadOperationStore(
+        engine=build_engine(
+            settings.storage.database_url,
+            **settings.storage.pool_kwargs(),
+        ),
+        app_role=settings.storage.app_role,
+        queue=queue,
+        max_concurrent=settings.server.max_concurrent,
+        worker_id=f"api-{socket.gethostname()}-{os.getpid()}",
     )
 
 
@@ -436,6 +584,7 @@ def build_editor_store(settings: Settings) -> Any:
         restrict_to_workspace_members=(
             settings.sharing.restrict_to_workspace_members
         ),
+        sharing_enabled=settings.sharing.enabled,
     )
 
 
@@ -676,6 +825,7 @@ def build_agent_control_store(settings: Settings) -> Any:
         restrict_to_workspace_members=(
             settings.sharing.restrict_to_workspace_members
         ),
+        sharing_enabled=settings.sharing.enabled,
     )
 
 
@@ -861,6 +1011,15 @@ def build_knowledge_context(
             ),
             timeout=settings.agent.reasoning_timeout,
         )
+    # Same instrumentation chokepoint as the LLM/search providers:
+    # embedding batches and queries get gen_ai spans + duration; no-op
+    # without the observability extra.
+    from inqtrix.observability.content import build_content_policy
+    from inqtrix.observability.provider_tracing import instrument_embeddings
+
+    embeddings = instrument_embeddings(
+        embeddings, policy=build_content_policy(settings)
+    )
     if settings.storage.backend == "postgres":
         # Postgres-canonical tier: collections/documents/chunks live
         # relationally (source of truth), the vectors in the vector index
@@ -898,6 +1057,7 @@ def build_knowledge_context(
             restrict_to_workspace_members=(
                 settings.sharing.restrict_to_workspace_members
             ),
+            sharing_enabled=settings.sharing.enabled,
         )
     elif settings.knowledge.vector_backend == "qdrant":
         from inqtrix.knowledge.stores.qdrant_store import QdrantKnowledgeStore
@@ -988,7 +1148,16 @@ def build_knowledge_context(
             )
         from inqtrix.knowledge.contextualize import LLMChunkContextualizer
 
-        contextualizer = LLMChunkContextualizer(llm)
+        contextualizer = LLMChunkContextualizer(
+            llm,
+            timeout=settings.agent.reasoning_timeout,
+            circuit_cooldown_seconds=(
+                settings.knowledge.contextualization_circuit_cooldown_seconds
+            ),
+            circuit_probe_lease_seconds=(
+                settings.knowledge.contextualization_circuit_probe_lease_seconds
+            ),
+        )
 
     return KnowledgeProviderContext(
         embeddings=embeddings,
@@ -1067,6 +1236,8 @@ class AppContainer:
     patch phase. ``None`` only in hand-built test containers."""
     editor_collaboration_service: Any = None
     """Optional Postgres-backed editor collaboration orchestration."""
+    editor_guest_link_service: Any = None
+    """Optional HTTPS-only account-less editor link orchestration."""
     agent_control_service: Any = None
     """Agent run control orchestration (plans/approvals/clarifications/
     artifacts, M4); ``None`` only in hand-built test containers."""
@@ -1076,12 +1247,20 @@ class AppContainer:
     knowledge_sessions_service: Any = None
     document_parser: Any = None
     vector_index_service: Any = None
+    asset_deletion_service: Any = None
+    upload_operation_service: Any = None
+    upload_reconciler: Any = None
     account_preferences_service: Any = None
     user_event_store: Any = None
     session_factory: Any | None = None
     """Canonical HTTP-loop session factory used by DB readiness checks."""
     agent_memory_service: Any = None
     capability_registry: Any = None
+    run_user_lookup: Any = None
+    """Actor directory that RUN THREADS may probe. On Postgres this is
+    loop-agnostic (NullPool), unlike ``auth_provider.users``, whose pooled
+    engine belongs to the HTTP loop. The worker reads it instead of
+    building its own — one definition, and the wiring cannot drift."""
     object_store_backend: str = "none"
     stacks: dict[str, Any] | None = None
     default_stack: str = ""
@@ -1099,6 +1278,8 @@ def build_container(
     default_stack: str = "",
     run_store: "RunStorePort | None" = None,
     indexing_store: Any = None,
+    deletion_store: Any = None,
+    upload_store: Any = None,
     registry: AlgorithmRegistry | None = None,
     knowledge: KnowledgeProviderContext | None = None,
     permissions: AuthorizationService | None = None,
@@ -1212,22 +1393,36 @@ def build_container(
         if needs_persistence
         else None
     )
+    # An injected object store wins over the env enum dispatch — the
+    # Enterprise-Austausch seam for a custom blob backend (the other
+    # stores ride run_store=/knowledge=/permissions=). Resolved only when
+    # a FileService actually gets built here: with an injected
+    # file_service the env dispatch must stay untouched (it may have no
+    # blob configuration at all). The one resolved instance is shared
+    # with the run-thread FileService — the blob backend is not
+    # loop-affine, so a second one would be waste.
+    active_object_store = object_store_impl
     if needs_persistence:
         assert bundle is not None
         active_permissions = permissions or bundle.permissions
-        active_file_service = file_service or FileService(
-            registry=bundle.file_registry,
-            # An injected object store wins over the env enum dispatch — the
-            # Enterprise-Austausch seam for a custom blob backend (the other
-            # stores ride run_store=/knowledge=/permissions=).
-            object_store=object_store_impl or build_object_store(settings),
-            permissions=active_permissions,
-            max_file_bytes=settings.storage.max_file_bytes,
-            document_parser=document_parser,
-        )
+        if file_service is None:
+            if active_object_store is None:
+                active_object_store = build_object_store(settings)
+            active_file_service = FileService(
+                registry=bundle.file_registry,
+                object_store=active_object_store,
+                permissions=active_permissions,
+                max_file_bytes=settings.storage.max_file_bytes,
+                document_parser=document_parser,
+            )
+        else:
+            active_file_service = file_service
     else:
         active_permissions = permissions
         active_file_service = file_service
+    bind_pat_audit = getattr(auth_provider, "bind_pat_audit", None)
+    if callable(bind_pat_audit):
+        bind_pat_audit(active_permissions.audit_sink)
     active_workspace_admin = workspace_admin or (
         bundle.workspace_admin if bundle is not None else None
     )
@@ -1248,6 +1443,7 @@ def build_container(
         active_workspace_admin.restrict_to_workspace_members = (
             settings.sharing.restrict_to_workspace_members
         )
+        active_workspace_admin.sharing_enabled = settings.sharing.enabled
         if bundle is None or bundle.user_event_store is None:
             raise RuntimeError(
                 "The in-memory identity backend requires a user-event store "
@@ -1357,6 +1553,9 @@ def build_container(
             max_document_chars=settings.knowledge.max_document_chars,
             parser=document_parser,
             invalidator=resource_invalidator,
+            generation_rollback_retention_seconds=(
+                settings.knowledge.generation_rollback_retention_seconds
+            ),
         )
     from inqtrix.services.prompt_template_service import (
         PromptTemplateService,
@@ -1405,6 +1604,90 @@ def build_container(
         durable=settings.storage.backend == "postgres",
         invalidator=resource_invalidator,
     )
+
+    # The run-thread lane. Everything a run thread drives through
+    # run_coro_sync/asyncio.run must sit on a loop-agnostic engine; the
+    # request path keeps the pooled one. On the worker, the memory backend
+    # and injected persistence these all collapse back to the request-path
+    # objects (see build_run_thread_persistence).
+    run_bundle = build_run_thread_persistence(
+        settings, bundle, already_loop_agnostic=platform_persistence_null_pool
+    )
+    run_permissions = active_permissions
+    run_file_service = active_file_service
+    run_skill_service = skill_service
+    if run_bundle is not None and run_bundle is not bundle:
+        from inqtrix.user_events import ResourceInvalidator
+
+        # Injection wins PER OBJECT, exactly as on the request path: an
+        # integrator who passed permissions= or file_service= owns that
+        # object's loop discipline, and shadowing it with a settings-built
+        # twin would authorize runs against a different universe than the
+        # requests. Only the objects this container built itself get the
+        # NullPool twin.
+        if permissions is None:
+            run_permissions = run_bundle.permissions
+        if file_service is None:
+            run_file_service = FileService(
+                registry=run_bundle.file_registry,
+                object_store=active_object_store,
+                permissions=run_permissions,
+                max_file_bytes=settings.storage.max_file_bytes,
+                document_parser=document_parser,
+            )
+        run_skill_service = SkillService(
+            repository=run_bundle.skills,
+            authorization=run_permissions,
+            durable=settings.storage.backend == "postgres",
+            invalidator=(
+                ResourceInvalidator(
+                    shares=run_bundle.workspace_admin,
+                    events=run_bundle.user_event_store,
+                )
+                if run_bundle.user_event_store is not None
+                else None
+            ),
+        )
+    # One directory for every run-thread actor probe. On Postgres this is
+    # the loop-agnostic one (the worker's bundle already is; the API's
+    # run_bundle is the NullPool twin) — never auth_provider.users, whose
+    # pooled engine belongs to the HTTP loop and also serves login.
+    run_user_lookup = provider_users
+    if run_bundle is not None and run_bundle.session_factory is not None:
+        from inqtrix.storage.auth_postgres import PostgresUserDirectory
+
+        run_user_lookup = PostgresUserDirectory(
+            session_factory=run_bundle.session_factory,
+            app_role=settings.storage.app_role,
+        )
+    # A serving API proves cookie authentication through its injected
+    # provider. The queue worker deliberately has no HTTP auth provider, but
+    # it loads the same deployment settings and owns a canonical,
+    # loop-agnostic Postgres user directory. Treat that deployment mode and
+    # directory as the worker's composition witness so enabling sharing or
+    # guest links cannot crash-loop every worker replica.
+    deployment_auth_mode = auth_provider.mode
+    if platform_persistence_null_pool or settings.collaboration.enabled:
+        from inqtrix.auth.principal import resolve_auth_mode
+
+        deployment_auth_mode = resolve_auth_mode(
+            settings.auth, settings.server
+        )
+    cookie_auth_available = auth_provider.mode in {
+        "oidc",
+        "local",
+        "ldap",
+    } or (
+        platform_persistence_null_pool
+        and deployment_auth_mode in {"oidc", "local", "ldap"}
+    )
+    sharing_users = provider_users
+    if (
+        sharing_users is None
+        and platform_persistence_null_pool
+        and deployment_auth_mode in {"oidc", "local", "ldap"}
+    ):
+        sharing_users = run_user_lookup
     collaboration_store = None
     collaboration_users = None
     if settings.collaboration.enabled:
@@ -1419,11 +1702,6 @@ def build_container(
         # so the env-resolved mode is the truthful witness there — without
         # it, enabling collaboration crash-looped every worker replica and
         # queued runs were never claimed.
-        from inqtrix.auth.principal import resolve_auth_mode
-
-        deployment_auth_mode = resolve_auth_mode(
-            settings.auth, settings.server
-        )
         if (
             auth_provider.mode not in {"oidc", "local", "ldap"}
             and deployment_auth_mode not in {"oidc", "local", "ldap"}
@@ -1463,6 +1741,8 @@ def build_container(
             restrict_to_workspace_members=(
                 settings.sharing.restrict_to_workspace_members
             ),
+            sharing_enabled=settings.sharing.enabled,
+            guest_links_enabled=settings.editor_guest_links.enabled,
         )
     # Editor persistence is constructed before sharing because editor
     # documents reuse the platform ShareService owner/title resolver maps.
@@ -1475,17 +1755,21 @@ def build_container(
         durable=settings.storage.backend == "postgres",
         authorization=active_permissions,
         collaboration_store=collaboration_store,
+        invalidator=resource_invalidator,
     )
     share_service = None
     # Sharing needs scoped principals + a user mirror — every cookie-session
-    # mode qualifies (oidc/local/ldap), not just oidc. The single-operator
-    # none/apikey modes are deliberately excluded: their unscoped principal
-    # has no identity to share with or as (use local for single-user-with-
-    # sharing). ADR-AUTH-4 withdrawn — no static-principal rescoping.
+    # mode qualifies (oidc/local/ldap), not just oidc. Serving processes use
+    # their auth provider's directory; the non-serving worker uses the
+    # canonical NullPool directory selected above. The single-operator
+    # none/apikey modes remain excluded: their unscoped principal has no
+    # identity to share with or as (use local for single-user-with-sharing).
+    # Static principals remain unscoped; there is no implicit rescoping.
     if (
-        auth_provider.mode in {"oidc", "local", "ldap"}
+        settings.sharing.enabled
+        and cookie_auth_available
         and active_workspace_admin is not None
-        and provider_users is not None
+        and sharing_users is not None
     ):
         from inqtrix.auth.shares import ShareService
 
@@ -1496,7 +1780,7 @@ def build_container(
             return active_run_store.title(resource_id)
 
         async def _user_exists(tenant_id: str, user_id: uuid.UUID) -> bool:
-            return await provider_users.has_user_id(
+            return await sharing_users.has_user_id(
                 tenant_id=tenant_id, user_id=user_id
             )
 
@@ -1594,6 +1878,81 @@ def build_container(
             invalidator=resource_invalidator,
             unsupported_resource_types=tuple(unsupported_share_types),
         )
+
+    editor_guest_link_store = None
+    if settings.editor_guest_links.enabled:
+        from urllib.parse import urlsplit
+
+        if not settings.sharing.enabled:
+            raise RuntimeError(
+                "INQTRIX_EDITOR_GUEST_LINKS_ENABLED=true requires "
+                "INQTRIX_SHARING_ENABLED=true."
+            )
+        if not settings.collaboration.enabled:
+            raise RuntimeError(
+                "INQTRIX_EDITOR_GUEST_LINKS_ENABLED=true requires "
+                "INQTRIX_COLLABORATION_ENABLED=true."
+            )
+        if settings.storage.backend != "postgres":
+            raise RuntimeError(
+                "INQTRIX_EDITOR_GUEST_LINKS_ENABLED=true requires "
+                "INQTRIX_STORAGE_BACKEND=postgres."
+            )
+        if share_service is None:
+            raise RuntimeError(
+                "INQTRIX_EDITOR_GUEST_LINKS_ENABLED=true requires cookie-based "
+                "OIDC, local, or LDAP authentication and direct sharing."
+            )
+        if not settings.queue.valkey_url.strip():
+            raise RuntimeError(
+                "INQTRIX_EDITOR_GUEST_LINKS_ENABLED=true requires "
+                "INQTRIX_VALKEY_URL for shared password throttling."
+            )
+        public_scheme = urlsplit(settings.server.public_base_url).scheme.lower()
+        if public_scheme != "https":
+            if not settings.editor_guest_links.allow_insecure_http:
+                raise RuntimeError(
+                    "INQTRIX_EDITOR_GUEST_LINKS_ENABLED=true requires an "
+                    "HTTPS INQTRIX_PUBLIC_BASE_URL. For local development "
+                    "over plain HTTP, explicitly opt in with "
+                    "INQTRIX_EDITOR_GUEST_LINKS_ALLOW_INSECURE_HTTP=true "
+                    "(guest tokens and passwords then cross the wire "
+                    "unencrypted — never in production)."
+                )
+            if public_scheme != "http":
+                # The opt-in never covers a missing/broken base URL: the
+                # guest origin check and link generation both derive
+                # from it, so an empty URL would 403 every guest.
+                raise RuntimeError(
+                    "INQTRIX_EDITOR_GUEST_LINKS_ALLOW_INSECURE_HTTP=true "
+                    "still requires an absolute http(s) "
+                    "INQTRIX_PUBLIC_BASE_URL."
+                )
+            log.warning(
+                "Editor-Gastlinks laufen ueber UNVERSCHLUESSELTES HTTP "
+                "(INQTRIX_EDITOR_GUEST_LINKS_ALLOW_INSECURE_HTTP): "
+                "Gast-Tokens, Passwoerter und Sitzungen sind auf dem "
+                "Netzwerkpfad mitlesbar — niemals in Produktion "
+                "verwenden."
+            )
+        if settings.editor_guest_links.token_hmac_secret in {
+            settings.auth.session_secret,
+            settings.collaboration.secret,
+        }:
+            raise RuntimeError(
+                "INQTRIX_EDITOR_GUEST_LINK_TOKEN_SECRET must not reuse "
+                "INQTRIX_SESSION_SECRET or INQTRIX_COLLABORATION_SECRET."
+            )
+        assert bundle is not None
+        assert bundle.session_factory is not None
+        from inqtrix.storage.editor_guest_link_postgres import (
+            PostgresEditorGuestLinkStore,
+        )
+
+        editor_guest_link_store = PostgresEditorGuestLinkStore(
+            session_factory=bundle.session_factory,
+            app_role=settings.storage.app_role,
+        )
     # Quota service: only when enabled AND a multi-user mode
     # (oidc/local/ldap). The single-operator none/apikey/demo modes are
     # never metered — unscoped principals would bypass anyway, and not
@@ -1621,6 +1980,7 @@ def build_container(
     # on) meters the per-document embedding spend. None keeps deployments
     # without knowledge byte-identical (no reindex surface).
     indexing_service = None
+    active_indexing_store = None
     if knowledge_service is not None:
         from inqtrix.services.execution_dependency_authority import (
             CollectionEditAuthorizer,
@@ -1628,6 +1988,27 @@ def build_container(
         from inqtrix.services.indexing_service import IndexingService
 
         active_indexing_store = indexing_store or build_indexing_store(settings)
+        contextualizer = active_knowledge.contextualizer
+        circuit = getattr(
+            active_indexing_store,
+            "contextualization_circuit",
+            None,
+        )
+        bind_contextualization_circuit = getattr(
+            contextualizer,
+            "bind_circuit_breaker",
+            None,
+        )
+        if (
+            contextualizer is not None
+            and callable(bind_contextualization_circuit)
+        ):
+            if circuit is None:
+                raise RuntimeError(
+                    "Contextualization requires an indexing-store circuit "
+                    "authority."
+                )
+            bind_contextualization_circuit(circuit)
         bind_indexing_authority = getattr(
             active_indexing_store, "bind_authority_coordinator", None
         )
@@ -1638,9 +2019,9 @@ def build_container(
             job_store=active_indexing_store,
             quota_service=quota_service,
             authority=CollectionEditAuthorizer(
-                authorization=active_permissions,
+                authorization=run_permissions,
                 knowledge_service=knowledge_service,
-                user_lookup=getattr(auth_provider, "users", None),
+                user_lookup=run_user_lookup,
             ),
         )
     # Project-persistence tier (M6a): chat history becomes server-persistent
@@ -1674,9 +2055,33 @@ def build_container(
             node=collaboration_node,
             settings=settings.collaboration,
             users=collaboration_users,
+            guest_links=editor_guest_link_store,
         )
         editor_persistence_service.bind_collaboration_projector(
             editor_collaboration_service.flush_projection
+        )
+    editor_guest_link_service = None
+    if settings.editor_guest_links.enabled:
+        assert editor_guest_link_store is not None
+        assert editor_collaboration_service is not None
+        from inqtrix.auth.guest_ratelimit import (
+            ValkeyGuestLinkRateLimiter,
+        )
+        from inqtrix.services.editor_guest_link_service import (
+            EditorGuestLinkService,
+        )
+
+        editor_guest_link_service = EditorGuestLinkService(
+            store=editor_guest_link_store,
+            collaboration=editor_collaboration_service,
+            settings=settings.editor_guest_links,
+            public_base_url=settings.server.public_base_url,
+            rate_limiter=ValkeyGuestLinkRateLimiter(
+                url=settings.queue.valkey_url,
+                max_attempts=5,
+                window_seconds=5 * 60,
+                lockout_seconds=15 * 60,
+            ),
         )
     # Editor patches (M7): the persisted proposal/decision lifecycle over
     # the documents above; collaboration patches delegate their Yjs mutation
@@ -1692,24 +2097,111 @@ def build_container(
     )
     from inqtrix.services.asset_records_service import AssetRecordsService
 
+    asset_store = build_asset_store(settings)
+    vector_store = build_vector_index_store(settings)
+    shared_source_authority = None
+    if settings.storage.backend != "postgres":
+        from inqtrix.source_authority import MemorySourceLifecycleAuthority
+
+        shared_source_authority = (
+            getattr(active_knowledge.store, "source_lifecycle_authority", None)
+            if active_knowledge is not None
+            else None
+        ) or MemorySourceLifecycleAuthority()
+        for source_consumer in (asset_store, vector_store):
+            bind_source_authority = getattr(
+                source_consumer, "bind_source_lifecycle_authority", None
+            )
+            if callable(bind_source_authority):
+                bind_source_authority(shared_source_authority)
+        if active_knowledge is not None:
+            bind_knowledge_source_authority = getattr(
+                active_knowledge.store,
+                "bind_source_lifecycle_authority",
+                None,
+            )
+            if callable(bind_knowledge_source_authority):
+                bind_knowledge_source_authority(shared_source_authority)
+
     asset_records_service = AssetRecordsService(
-        store=build_asset_store(settings),
+        store=asset_store,
         durable=settings.storage.backend == "postgres",
     )
+    active_deletion_store = deletion_store or build_deletion_store(settings)
+    if shared_source_authority is not None:
+        bind_deletion_source_authority = getattr(
+            active_deletion_store,
+            "bind_source_lifecycle_authority",
+            None,
+        )
+        if callable(bind_deletion_source_authority):
+            bind_deletion_source_authority(shared_source_authority)
+    # Memory tier: deletion index rows (asset.delete_*) land in the
+    # in-memory audit trail via the coordinator, mirroring the
+    # Postgres store's in-transaction writes.
+    if memory_authority is not None:
+        bind_deletion_audit = getattr(
+            active_deletion_store, "bind_authority_coordinator", None
+        )
+        if callable(bind_deletion_audit):
+            bind_deletion_audit(memory_authority)
     from inqtrix.services.knowledge_sessions_service import (
         KnowledgeSessionsService,
     )
 
     knowledge_sessions_service = KnowledgeSessionsService(
         store=build_knowledge_session_store(settings),
+        run_store=active_run_store,
         durable=settings.storage.backend == "postgres",
     )
     from inqtrix.services.vector_index_service import VectorIndexService
 
     vector_index_service = VectorIndexService(
-        store=build_vector_index_store(settings),
+        store=vector_store,
         durable=settings.storage.backend == "postgres",
     )
+    from inqtrix.services.upload_operation_service import (
+        UploadOperationService,
+        UploadReconciler,
+    )
+
+    active_upload_store = upload_store or build_upload_store(
+        settings, asset_store=asset_store
+    )
+    upload_operation_service = UploadOperationService(
+        operations=active_upload_store,
+        files=run_file_service,
+        assets=asset_records_service,
+        quota=quota_service,
+        max_attempts=settings.queue.worker_max_attempts,
+        # file.uploaded index rows — one chokepoint for sync
+        # and worker-deferred uploads alike. getattr-defensive: injected
+        # permission doubles (enterprise seams) carry no sink, and
+        # telemetry never imposes one.
+        audit=getattr(active_permissions, "audit_sink", None),
+    )
+    upload_reconciler = None
+    if settings.queue.backend != "valkey":
+        upload_reconciler = UploadReconciler(service=upload_operation_service)
+    from inqtrix.services.asset_deletion_service import AssetDeletionService
+
+    asset_deletion_service = AssetDeletionService(
+        assets=asset_records_service,
+        operation_store=active_deletion_store,
+        files=run_file_service,
+        knowledge=knowledge_service,
+        vector_indexes=vector_index_service,
+        indexing_jobs=active_indexing_store,
+        quota=quota_service,
+        uploads=upload_operation_service,
+    )
+    if knowledge_service is not None:
+        knowledge_service.bind_collection_deletion(
+            active_check=active_deletion_store.has_collection_deletion
+        )
+        knowledge_service.bind_document_deletion(
+            active_check=active_deletion_store.has_document_deletion
+        )
     from inqtrix.services.account_preferences_service import (
         AccountPreferencesService,
     )
@@ -1774,30 +2266,38 @@ def build_container(
         runtime=runtime,
         run_store=active_run_store,
         quota_service=quota_service,
-        user_lookup=getattr(auth_provider, "users", None),
+        answer_artifact_store=agent_control_store,
         dependency_authorizer=ExecutionDependencyAuthorizer(
-            authorization=active_permissions,
+            authorization=run_permissions,
             knowledge_service=knowledge_service,
-            skill_service=skill_service,
+            skill_service=run_skill_service,
+            user_lookup=run_user_lookup,
         ),
     )
     capability_registry_instance = build_capability_registry(
         knowledge_service=knowledge_service,
-        file_service=active_file_service,
+        # Capabilities are invoked only from run threads (the HTTP routers
+        # touch .ids()/.manifest(), which are pure metadata), so the
+        # registry rides the loop-agnostic FileService.
+        file_service=run_file_service,
         editor_service=editor_persistence_service,
-        # Web instant uses the default stack's search provider; multi-
-        # stack per-request resolution is a later concern (wave-1
-        # capabilities are read-only discovery tools).
+        # Web instant uses the default stack's search provider. The
+        # registered capabilities are read-only discovery tools.
         search_provider=getattr(providers, "search", None),
         editor_patch_service=editor_patch_service,
     )
-    # Workspace-agent registration (M5, decision E8): only with a real
-    # checkpointer (Postgres) or the explicit volatile escape — a missing
+    # The workspace agent registers only with a real checkpointer
+    # (Postgres) or the explicit volatile escape. A missing
     # gate keeps mode=workspace_agent a loud 400 listing available modes,
     # and /v1/capabilities reports features.workspace_agent=false.
     from inqtrix.agents.checkpointing import build_checkpointer_handle
 
     agent_checkpointer = build_checkpointer_handle(settings)
+    asset_deletion_service.bind_session_deletion(
+        agent_sessions=agent_sessions_service,
+        knowledge_sessions=knowledge_sessions_service,
+        agent_checkpointer=agent_checkpointer,
+    )
     if agent_checkpointer is not None and "workspace_agent" not in (
         active_registry.ids()
     ):
@@ -1811,15 +2311,15 @@ def build_container(
                 capability_registry=capability_registry_instance,
                 checkpointer=agent_checkpointer,
                 platform=settings.agent_platform,
-                permission_service=active_permissions,
+                permission_service=run_permissions,
                 knowledge_service=knowledge_service,
                 editor_patch_service=editor_patch_service,
                 editor_persistence_service=editor_persistence_service,
                 agent_memory_service=agent_memory_service,
-                skill_service=skill_service,
+                skill_service=run_skill_service,
             )
         )
-    # Cognitive-kernel registration (plan M2, ADR-PLAT-2): opt-in via
+    # Cognitive-kernel registration: opt-in via
     # INQTRIX_AGENT_KERNEL_ENABLED and additionally gated on the same
     # checkpointer rule plus native tool calling on the default LLM —
     # a failed gate WARNS instead of silently dropping the mode.
@@ -1855,10 +2355,11 @@ def build_container(
                     checkpointer=agent_checkpointer,
                     platform=settings.agent_platform,
                     capability_registry=capability_registry_instance,
-                    permission_service=active_permissions,
+                    permission_service=run_permissions,
                     run_service=run_service,
                     resolver=resolver,
-                    skill_service=skill_service,
+                    skill_service=run_skill_service,
+                    agent_memory_service=agent_memory_service,
                 )
             )
     from inqtrix.auth.principal_generation import bind_principal_generation
@@ -1904,17 +2405,22 @@ def build_container(
         editor_persistence_service=editor_persistence_service,
         editor_patch_service=editor_patch_service,
         editor_collaboration_service=editor_collaboration_service,
+        editor_guest_link_service=editor_guest_link_service,
         asset_records_service=asset_records_service,
         knowledge_sessions_service=knowledge_sessions_service,
         agent_control_service=agent_control_service,
         agent_sessions_service=agent_sessions_service,
         document_parser=document_parser,
         vector_index_service=vector_index_service,
+        asset_deletion_service=asset_deletion_service,
+        upload_operation_service=upload_operation_service,
+        upload_reconciler=upload_reconciler,
         account_preferences_service=account_preferences_service,
         user_event_store=(bundle.user_event_store if bundle is not None else None),
         session_factory=(bundle.session_factory if bundle is not None else None),
         agent_memory_service=agent_memory_service,
         capability_registry=capability_registry_instance,
+        run_user_lookup=run_user_lookup,
         object_store_backend=active_object_store_backend,
         stacks=stacks,
         default_stack=default_stack,

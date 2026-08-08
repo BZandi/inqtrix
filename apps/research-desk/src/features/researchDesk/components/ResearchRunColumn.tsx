@@ -1,6 +1,6 @@
 import { PanelBottomOpen, Users } from '@/components/icons'
 import { AnimatePresence, motion } from 'motion/react'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { PanelToggle } from '@/components/ui/panel-toggle'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -10,6 +10,12 @@ import { partitionJobsByAccess } from '@/features/sharing/shareModel'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { appMotion } from '@/motion/transitions'
 import type { JobFilter, ResearchJob } from '../types'
+import {
+  browserResearchDraftStorage,
+  saveResearchDraftRecovery,
+  takeResearchDraftRecovery,
+} from '../researchDraftRecovery'
+import type { ResearchSubmissionOutcome } from '../researchSubmission'
 import {
   Composer,
   buildComposerRequest,
@@ -21,6 +27,7 @@ import { ResearchJobCard } from './ResearchJobCard'
 type ResearchRunColumnProps = {
   activeFilter: JobFilter
   allJobs: ResearchJob[]
+  authenticatedUserId: string | null
   cancelErrorByRunId: Record<string, string>
   cancelSubmittingRunIds: ReadonlySet<string>
   expandedJobId: string | null
@@ -32,7 +39,8 @@ type ResearchRunColumnProps = {
   jobs: ResearchJob[]
   onActiveFilterChange: (filter: JobFilter) => void
   onCancelJob: (jobId: string) => void
-  onComposerSubmit: (request: CreateResearchRunRequest) => void
+  onAuthenticationRequired: () => void
+  onComposerSubmit: (request: CreateResearchRunRequest) => Promise<ResearchSubmissionOutcome>
   onComposerVisibleChange: (isComposerVisible: boolean) => void
   onReportVisibleChange: (isVisible: boolean) => void
   onResearchQuestionChange: (question: string) => void
@@ -51,6 +59,7 @@ type ResearchRunColumnProps = {
 export function ResearchRunColumn({
   activeFilter,
   allJobs,
+  authenticatedUserId,
   cancelErrorByRunId,
   cancelSubmittingRunIds,
   expandedJobId,
@@ -59,6 +68,7 @@ export function ResearchRunColumn({
   isSubmitDisabled,
   jobs,
   onActiveFilterChange,
+  onAuthenticationRequired,
   onCancelJob,
   onComposerSubmit,
   onComposerVisibleChange,
@@ -76,18 +86,73 @@ export function ResearchRunColumn({
   shareCountByRunId,
 }: ResearchRunColumnProps) {
   const { t } = useLocale()
-  // Seed the question from the session-scoped shell draft so it survives a view
-  // switch (this column unmounts on switch); the lazy initializer restores it on
-  // remount. Form settings stay ephemeral by design -- only the typed question is
-  // worth preserving.
+  // The shell keeps ordinary navigation drafts in memory. Auth recovery is the
+  // narrower exception: after a rejected write, the complete form is restored
+  // once for the same user across the mandatory account-boundary reload.
   const [composerForm, setComposerForm] = useState(() => ({
     ...defaultComposerFormState,
     question: researchQuestion,
   }))
+  const composerFormRef = useRef(composerForm)
+  composerFormRef.current = composerForm
+  const submissionPendingRef = useRef(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submissionError, setSubmissionError] = useState<string | null>(null)
   // Mirror question edits (and the submit-time clear) back up to the shell.
   useEffect(() => {
     onResearchQuestionChange(composerForm.question)
   }, [composerForm.question, onResearchQuestionChange])
+  useEffect(() => {
+    if (!authenticatedUserId) return
+    const storage = browserResearchDraftStorage()
+    if (!storage) return
+    const recovered = takeResearchDraftRecovery(storage, authenticatedUserId)
+    if (recovered) setComposerForm(recovered)
+  }, [authenticatedUserId])
+  const submitComposerRequest = useCallback(async (
+    request: CreateResearchRunRequest,
+  ): Promise<boolean> => {
+    if (isSubmitDisabled || submissionPendingRef.current) return false
+    submissionPendingRef.current = true
+    setIsSubmitting(true)
+    setSubmissionError(null)
+    try {
+      const outcome = await onComposerSubmit(request)
+      if (outcome.status === 'accepted') return true
+
+      setSubmissionError(outcome.message)
+      if (outcome.recoverability === 'login') {
+        if (authenticatedUserId) {
+          const storage = browserResearchDraftStorage()
+          const currentForm = composerFormRef.current
+          const recoveryForm = currentForm.question.trim()
+            ? currentForm
+            : { ...currentForm, question: request.question }
+          const stored = storage
+            ? saveResearchDraftRecovery(storage, authenticatedUserId, recoveryForm)
+            : false
+          if (!stored) {
+            console.warn('Research auth-recovery draft could not be stored in this browser tab.')
+          }
+        }
+        onAuthenticationRequired()
+      }
+      return false
+    } catch (error) {
+      console.warn('Research submission recovery failed.', error)
+      setSubmissionError(t.composer.submitFailed)
+      return false
+    } finally {
+      submissionPendingRef.current = false
+      setIsSubmitting(false)
+    }
+  }, [
+    authenticatedUserId,
+    isSubmitDisabled,
+    onAuthenticationRequired,
+    onComposerSubmit,
+    t.composer.submitFailed,
+  ])
   const { own: ownJobs, shared: sharedJobs } = partitionJobsByAccess(jobs)
 
   return (
@@ -109,9 +174,9 @@ export function ResearchRunColumn({
       />
       {allJobs.length === 0 ? (
         <ResearchEmptyState
-          disabled={isSubmitDisabled}
-          onSuggestionSelect={(question) => onComposerSubmit(
-            buildComposerRequest(composerForm, question, selectedStack),
+          disabled={isSubmitDisabled || isSubmitting}
+          onSuggestionSelect={(question) => void submitComposerRequest(
+            buildComposerRequest(composerFormRef.current, question, selectedStack),
           )}
         />
       ) : null}
@@ -184,13 +249,15 @@ export function ResearchRunColumn({
         {isComposerVisible ? (
           <Composer
             form={composerForm}
+            isSubmitting={isSubmitting}
             key="composer"
             onHide={() => onComposerVisibleChange(false)}
-            onSubmit={onComposerSubmit}
+            onSubmit={submitComposerRequest}
             reduceMotion={reduceMotion}
             selectedStack={selectedStack}
             setForm={setComposerForm}
-            submitDisabled={isSubmitDisabled}
+            submitDisabled={isSubmitDisabled || isSubmitting}
+            submissionError={submissionError}
           />
         ) : (
           <motion.div

@@ -131,7 +131,7 @@ Illustrative queries:
    variable**, not persisted on state. Flattens `EvidenceRecord.claims[]`
    into raw claim rows for the consolidator.
 8. `strategies.source_tiering.quality_from_urls(all_citations)` -- tier counts + quality score (see [source-tiering.md](../scoring-and-stopping/source-tiering.md)).
-9. `strategies.claim_consolidation.consolidate(local_raw_claims)` -- branch-decision verification basis per [claims.md](../scoring-and-stopping/claims.md#status-determination).
+9. `strategies.claim_consolidation.consolidate(local_raw_claims)` -- deterministic verification from provider-grounded supports, source tiers, and contradictions per [claims.md](../scoring-and-stopping/claims.md#status-determination). Unknown tiers stay in the evidence path.
 10. `strategies.claim_consolidation.materialize(consolidated)` with profile caps `materialize_max_total` (24 COMPACT / 48 DEEP).
 11. `strategies.claim_consolidation.quality_metrics(consolidated_claims)` -- weighted average per [claims.md](../scoring-and-stopping/claims.md#claim-quality-score).
 12. `project_claim_verification_to_evidence(evidence_ledger, consolidated_claims)` -- writes `verification_status` / `verification_basis` / `supporting_evidence_ids` back onto each `EvidenceRecord.claims[n]` so the ledger is self-describing.
@@ -146,7 +146,7 @@ round = 1 (incremented)
 evidence_ledger = [12 EvidenceRecords; 8 report-eligible]
 consolidated_claims = [
   {claim_id: "...", status: "verified", verification_basis: "verified_cross_checked", support_count: 3},
-  {claim_id: "...", status: "verified", verification_basis: "verified_quality_source", support_count: 1},
+  {claim_id: "...", status: "verified", verification_basis: "verified_primary", support_count: 1, source_urls: ["https://issuer.example/filing"]},
   {claim_id: "...", status: "contested", verification_basis: "contested", support_count: 2, contradict_count: 1},
   {claim_id: "...", status: "unverified", verification_basis: "weak_evidence"},
   ...
@@ -363,7 +363,8 @@ und sind in dieser Uebersicht nicht enthalten.
 5. **TRANSPARENZPFLICHT** -- fires (`unverified_count=8 > verified_count=5`, depth_gap active). Tells the LLM to add a "Unsicherheiten / Offene Punkte" sub-section in the Risiken section.
 6. **Section style block** (`_build_section_answer_style`) -- the only part that changes per call. Example for section 3 of 6 (Analyse): `"Aktueller Abschnitt: 3/6 -- **Analyse** ..."`.
 7. **EVIDENZ-UEBERSICHT** -- the `overview.markdown` from Phase 5b embedded verbatim.
-8. **ZITATIONS-REGELN** -- `[E1](URL)` format, allowlist-only, inline, no separate Quellen list.
+8. **ZITATIONS-REGELN** -- inline Markdown links labelled `E1` whose targets
+   are in the allowlist, no separate Quellen list.
 
 ### Phase 5d — Section-by-section LLM calls
 

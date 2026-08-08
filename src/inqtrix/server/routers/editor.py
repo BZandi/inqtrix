@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from inqtrix.auth.principal import Principal
+from inqtrix.observability.context import bound_thread_call
 from inqtrix.exceptions import AgentStructuredOutputError
 from inqtrix.quota.models import QuotaDimension
 from inqtrix.server.editor_instructions import (
@@ -81,7 +82,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, "Ungueltiger JSON-Body", "invalid_request_error")
 
         try:
-            workspace_id_from_request(req, body)
+            workspace_id = workspace_id_from_request(req, body)
             resolved = resolver.resolve(body)
             suggest_request = parse_editor_suggest_payload(
                 body,
@@ -127,7 +128,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 result, consumed = await asyncio.wait_for(
                     loop.run_in_executor(
                         None,
-                        partial(
+                        bound_thread_call(partial(
                             run_editor_suggest,
                             suggest_request,
                             llm=llm,
@@ -138,7 +139,11 @@ def build_router(container: "AppContainer") -> APIRouter:
                             ),
                             timeout_seconds=timeout,
                             base_warnings=warnings,
-                        ),
+                        ), usage_subject=(
+                            principal.tenant_id,
+                            principal.user_id,
+                            workspace_id,
+                        )),
                     ),
                     timeout=wait_timeout,
                 )
@@ -150,10 +155,17 @@ def build_router(container: "AppContainer") -> APIRouter:
                 )
                 return error_response(504, "Editor-Vorschlag Timeout", "timeout_error")
             except (EditorSuggestError, AgentStructuredOutputError) as exc:
-                log.warning("Editor-Vorschlag konnte nicht geparst werden: %s", exc)
+                log.warning(
+                    "Editor-Vorschlag konnte nicht geparst werden "
+                    "(error_type=%s)",
+                    type(exc).__name__,
+                )
                 return error_response(502, str(exc), "server_error")
             except Exception as exc:  # noqa: BLE001 — provider failures map to 502
-                log.error("Editor-Vorschlag Fehler: %s", exc)
+                log.error(
+                    "Editor-Vorschlag Fehler (error_type=%s)",
+                    type(exc).__name__,
+                )
                 return error_response(
                     502,
                     f"Editor-Vorschlag Fehler: {sanitize_error(exc)}",
@@ -177,7 +189,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(400, "Ungueltiger JSON-Body", "invalid_request_error")
 
         try:
-            workspace_id_from_request(req, body)
+            workspace_id = workspace_id_from_request(req, body)
             resolved = resolver.resolve(body)
             instruct_request = parse_editor_instruct_payload(
                 body,
@@ -217,7 +229,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 result, consumed = await asyncio.wait_for(
                     loop.run_in_executor(
                         None,
-                        partial(
+                        bound_thread_call(partial(
                             run_editor_instruct,
                             instruct_request,
                             llm=llm,
@@ -228,7 +240,11 @@ def build_router(container: "AppContainer") -> APIRouter:
                             ),
                             timeout_seconds=timeout,
                             base_warnings=warnings,
-                        ),
+                        ), usage_subject=(
+                            principal.tenant_id,
+                            principal.user_id,
+                            workspace_id,
+                        )),
                     ),
                     timeout=wait_timeout,
                 )
@@ -242,10 +258,17 @@ def build_router(container: "AppContainer") -> APIRouter:
             except EditorDocumentTooLarge as exc:
                 return error_response(400, str(exc), "invalid_request_error")
             except (EditorInstructError, AgentStructuredOutputError) as exc:
-                log.warning("Editor-Anweisung konnte nicht geparst werden: %s", exc)
+                log.warning(
+                    "Editor-Anweisung konnte nicht geparst werden "
+                    "(error_type=%s)",
+                    type(exc).__name__,
+                )
                 return error_response(502, str(exc), "server_error")
             except Exception as exc:  # noqa: BLE001 — provider failures map to 502
-                log.error("Editor-Anweisung Fehler: %s", exc)
+                log.error(
+                    "Editor-Anweisung Fehler (error_type=%s)",
+                    type(exc).__name__,
+                )
                 return error_response(
                     502,
                     f"Editor-Anweisung Fehler: {sanitize_error(exc)}",

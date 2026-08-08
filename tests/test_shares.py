@@ -20,6 +20,7 @@ from inqtrix.auth.memory_authority import (
     MemoryResourceSnapshot,
 )
 from inqtrix.auth.permissions import (
+    AuditEntry,
     AuthorizationService,
     SharePermission,
     WorkspaceRole,
@@ -591,3 +592,35 @@ class TestListings:
         )
 
         assert await service.inbox(RECIPIENT) == ()
+
+
+class TestAuditOutcomeInvariant:
+    """A denial must never be recorded as a success."""
+
+    def test_denied_action_forces_the_denied_outcome(self):
+        """Derived at construction so no writer can get it wrong.
+
+        Both denial writers built ``AuditEntry`` directly and inherited the
+        ``success`` default, so an auditor filtering the panel by outcome saw
+        one denial instead of every denial.
+        """
+        entry = AuditEntry(
+            tenant_id="default",
+            actor_user_id=OWNER_ID,
+            action="authz.denied",
+            resource_type="run",
+            resource_id="run_owned",
+        )
+
+        assert entry.outcome == "denied"
+
+    def test_an_explicit_outcome_on_a_non_denial_is_untouched(self):
+        entry = AuditEntry(
+            tenant_id="default",
+            actor_user_id=OWNER_ID,
+            action="share.granted",
+            resource_type="run",
+            resource_id="run_owned",
+        )
+
+        assert entry.outcome == "success"

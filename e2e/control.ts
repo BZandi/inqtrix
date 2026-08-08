@@ -12,7 +12,7 @@ export type FixtureOperationState = {
   state: 'armed' | 'failed' | 'outage' | 'ready' | 'triggered'
 }
 
-type ControlPath =
+export type ControlPath =
   | 'armGatewayOutage'
   | 'armLostAck'
   | 'armOutage'
@@ -20,6 +20,15 @@ type ControlPath =
   | 'restart'
   | 'restore'
 type FetchImplementation = typeof fetch
+
+const CONTROL_REQUEST_TIMEOUT_MS = 5_000
+const CONTROL_RECOVERY_TIMEOUT_MS = 45_000
+
+export function controlRequestTimeoutMs(path: ControlPath): number {
+  return path === 'restart' || path === 'restore'
+    ? CONTROL_RECOVERY_TIMEOUT_MS
+    : CONTROL_REQUEST_TIMEOUT_MS
+}
 
 export class CollaborationFixtureControlClient {
   private readonly authorization: string
@@ -116,19 +125,23 @@ export class CollaborationFixtureControlClient {
     body: Record<string, string>,
   ): Promise<FixtureOperationState> {
     let response: Response
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      Authorization: this.authorization,
+      'Content-Type': 'application/json',
+    }
+    if (this.fixture.runId) {
+      headers['X-Inqtrix-Verification-Run-Id'] = this.fixture.runId
+    }
     try {
       response = await this.fetchImplementation(
         new URL(this.fixture.paths[path], this.fixture.baseURL),
         {
           body: JSON.stringify(body),
-          headers: {
-            Accept: 'application/json',
-            Authorization: this.authorization,
-            'Content-Type': 'application/json',
-          },
+          headers,
           method: 'POST',
           redirect: 'error',
-          signal: AbortSignal.timeout(5_000),
+          signal: AbortSignal.timeout(controlRequestTimeoutMs(path)),
         },
       )
     } catch {

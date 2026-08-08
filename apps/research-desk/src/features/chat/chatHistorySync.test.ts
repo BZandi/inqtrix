@@ -5,7 +5,7 @@ import type {
   ServerChatThread,
   ServerChatThreadGroup,
 } from '@/api/inqtrixClient'
-import type { ChatMessageRecord } from '@/features/project/types'
+import type { ChatMessageRecord, ChatThreadRecord } from '@/features/project/types'
 import {
   fingerprintThread,
   groupRecordFromServer,
@@ -14,7 +14,9 @@ import {
   serverGroupPayload,
   serverMessagePayload,
   serverThreadPayload,
+  threadModelSelectionFromWire,
   shouldFetchMessageBaselineBeforePush,
+  shouldLoadServerChatMessages,
   threadNeedsSync,
   threadRecordFromServer,
 } from './chatHistorySync'
@@ -147,6 +149,32 @@ describe('chatHistorySync converters', () => {
   })
 })
 
+describe('lazy message hydration guard', () => {
+  const emptyThread = { messages: [] }
+  const populatedThread = {
+    messages: [{
+      contentMarkdown: 'Question',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      id: 'cm_1',
+      role: 'user' as const,
+    }],
+  }
+
+  it('does not read a newly-created local empty thread before its first PUT', () => {
+    expect(shouldLoadServerChatMessages(emptyThread, false, false)).toBe(false)
+  })
+
+  it('loads an empty hydrated server thread exactly until it resolves', () => {
+    expect(shouldLoadServerChatMessages(emptyThread, true, false)).toBe(true)
+    expect(shouldLoadServerChatMessages(emptyThread, true, true)).toBe(false)
+  })
+
+  it('does not fetch when local messages or no thread already own the state', () => {
+    expect(shouldLoadServerChatMessages(populatedThread, true, false)).toBe(false)
+    expect(shouldLoadServerChatMessages(undefined, true, false)).toBe(false)
+  })
+})
+
 describe('thread fingerprint diff', () => {
   const base = {
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -183,7 +211,7 @@ describe('thread fingerprint diff', () => {
     expect(threadNeedsSync(previous, next)).toBe(false)
   })
 
-  it('flags a local-newer thread for push when seeded with the SERVER fingerprint (P1 regression)', () => {
+  it('flags a local-newer thread for push when seeded with the server fingerprint', () => {
     // Hydration seeds synced state with WHAT THE SERVER HOLDS (the server
     // record). If the local copy is newer, the diff must fire so the newer
     // local thread is pushed UP — seeding with the LOCAL value (the old bug)
@@ -238,5 +266,54 @@ describe('message delete diff', () => {
     expect(shouldFetchMessageBaselineBeforePush(undefined, [message('cm_retry')])).toBe(true)
     expect(shouldFetchMessageBaselineBeforePush(undefined, [])).toBe(false)
     expect(shouldFetchMessageBaselineBeforePush(new Set(['cm_old']), [message('cm_retry')])).toBe(false)
+  })
+})
+
+describe('chat thread model stickiness (wire)', () => {
+  const record: ChatThreadRecord = {
+    createdAt: '2026-08-07T10:00:00.000Z',
+    id: 'ct_1',
+    messages: [],
+    preview: '',
+    source: 'api',
+    title: 'T',
+    updatedAt: '2026-08-07T10:00:00.000Z',
+  }
+
+  it('rides every save as a whole-row field', () => {
+    // The endpoint knows no PATCH: an omitted field is reset to '' by the
+    // next unrelated title/preview save.
+    const withPick = serverThreadPayload(
+      { ...record, modelSelection: { model: 'gpt-5.4-nano', tier: null, effort: null } },
+      null,
+    )
+    expect(JSON.parse(withPick.model_selection)).toEqual({
+      model: 'gpt-5.4-nano',
+      tier: null,
+      effort: null,
+    })
+    expect(serverThreadPayload({ ...record }, null).model_selection).toBe('')
+  })
+
+  it('round-trips through the server record', () => {
+    const { record: parsed } = threadRecordFromServer({
+      id: 'ct_1',
+      title: 'T',
+      preview: '',
+      source: 'api',
+      group_id: null,
+      created_at: 1_700_000_000,
+      updated_at: 1_700_000_000,
+      model_selection: '{"model":null,"tier":"fast","effort":null}',
+    })
+    expect(parsed.modelSelection).toEqual({ model: null, tier: 'fast', effort: null })
+  })
+
+  it('treats absent, empty and garbage as no pick', () => {
+    expect(threadModelSelectionFromWire(undefined)).toBeNull()
+    expect(threadModelSelectionFromWire('')).toBeNull()
+    expect(threadModelSelectionFromWire('{broken')).toBeNull()
+    // An unknown tier from a future build must not be pinned.
+    expect(threadModelSelectionFromWire('{"tier":"turbo"}')).toBeNull()
   })
 })

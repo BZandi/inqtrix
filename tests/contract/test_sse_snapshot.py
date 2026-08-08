@@ -100,8 +100,10 @@ def test_successful_run_event_sequence_snapshot(monkeypatch):
         "inqtrix.run.started",
         "inqtrix.run.snapshot",       # companion of node.started
         "inqtrix.node.started",
+        "inqtrix.answer.started",
         "inqtrix.output_text.delta",  # "Zwei "
         "inqtrix.output_text.delta",  # "Worte."
+        "inqtrix.answer.ready",
         "inqtrix.run.snapshot",       # companion of run.completed
         "inqtrix.run.completed",
     ]
@@ -120,8 +122,15 @@ def test_successful_run_event_sequence_snapshot(monkeypatch):
         "active_round": 0,
     }
 
-    deltas = [event["data"]["delta"] for event in events[5:7]]
-    assert "".join(deltas) == "Zwei Worte."
+    publication = events[5]["data"]
+    deltas = [event["data"] for event in events[6:8]]
+    assert all(
+        delta["publication_id"] == publication["publication_id"]
+        for delta in deltas
+    )
+    assert [delta["offset"] for delta in deltas] == [0, 5]
+    assert "".join(delta["delta"] for delta in deltas) == "Zwei Worte."
+    assert events[8]["data"]["bytes"] == len("Zwei Worte.".encode("utf-8"))
 
     completed = events[-1]
     assert completed["data"]["status"] == "completed"

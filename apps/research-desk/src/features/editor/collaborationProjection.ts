@@ -284,6 +284,10 @@ export function confirmedProjectionFallback(
   if (document.contentMode !== 'collaboration' || !confirmedAt) return null
   const parsed = new Date(confirmedAt)
   if (Number.isNaN(parsed.getTime())) return null
+  // A document hydrated from metadata alone carries an empty body until it is
+  // opened. Exporting that as a confirmed state writes an empty file under a
+  // plausible timestamp, which is worse for a backup than refusing outright.
+  if (document.contentMarkdown.length === 0) return null
   return { confirmedAt: parsed.toISOString(), markdown: document.contentMarkdown }
 }
 

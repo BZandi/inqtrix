@@ -144,7 +144,7 @@ export function PromptLibraryWorkspace({
     onShareRule: (rule: ChatRuleRecord) => void
     onShareSkill: (skill: SkillInfo) => void
   } | null
-  /** Skill library handle (plan M3); null hides the Skills tab
+  /** Skill library handle; null hides the Skills tab
    * (feature off or server absent). */
   skillsApi?: SkillsApiHandle | null
   state: ProjectState
@@ -817,7 +817,7 @@ export function PromptLibraryWorkspace({
                           {contextPackPlaceholder}
                         </span>
                       ) : null}
-                      <span className="t-hint ml-auto shrink-0 tabular-nums text-muted-foreground/70">
+                      <span className="t-hint ml-auto shrink-0 tabular-nums text-muted-foreground">
                         {t.promptLibrary.charCount.replace('{count}', draft.contentMarkdown.length.toLocaleString(locale))}
                       </span>
                       <TextImproveButton

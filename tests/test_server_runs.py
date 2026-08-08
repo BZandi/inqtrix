@@ -33,9 +33,7 @@ INTRUDER = uuid.UUID("99999999-9999-4999-8999-999999999999")
 
 def _visible_to(user_id: uuid.UUID) -> UserContext:
     """Build the canonical-user context required for owned runs."""
-    return UserContext(
-        principal=Principal(user_id=user_id, kind="oidc_session")
-    )
+    return UserContext(principal=Principal(user_id=user_id, kind="oidc_session"))
 
 
 def _wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
@@ -76,9 +74,9 @@ def test_from_settings_uses_native_run_limits() -> None:
     store = RunStore.from_settings(settings)
 
     assert store._max_concurrent == 1
-    assert store.submit(question="q", stack_name="default", work=lambda handle: handle.complete({}))[
-        "status"
-    ] in {"queued", "running", "completed"}
+    assert store.submit(
+        question="q", stack_name="default", work=lambda handle: handle.complete({})
+    )["status"] in {"queued", "running", "completed"}
 
 
 @pytest.mark.parametrize(
@@ -186,7 +184,10 @@ def test_list_and_get_can_filter_by_workspace_id() -> None:
     summaries = store.list(workspace_id="ws_browser_a")
 
     assert [summary["run_id"] for summary in summaries] == [run_a["run_id"]]
-    assert store.get(run_a["run_id"], workspace_id="ws_browser_a")["workspace_id"] == "ws_browser_a"
+    assert (
+        store.get(run_a["run_id"], workspace_id="ws_browser_a")["workspace_id"]
+        == "ws_browser_a"
+    )
     with pytest.raises(RunNotFound):
         store.get(run_b["run_id"], workspace_id="ws_browser_a")
 
@@ -215,6 +216,82 @@ def test_delete_removes_terminal_run_for_owner() -> None:
     # Delete is not idempotent: a repeat is a clean 404, not a crash.
     with pytest.raises(RunNotFound):
         store.delete(run_id, workspace_id="ws_owner", requester_user_id=OWNER_1)
+
+
+def test_project_child_run_outcome_needs_visible_to_for_owned_child() -> None:
+    """An owned run is invisible to a ``visible_to=None`` projection.
+
+    The RLS visibility twin: ``visible_to=None`` sees only ownerless rows
+    (``created_by_user_id IS NULL``), so projecting an authenticated
+    user's child WITHOUT the owner context yields ``child_row_missing``.
+    Regression for the live bug where the kernel child-report paths
+    dropped ``visible_to`` and silently lost completed children on every
+    authenticated run — the unit harness's ownerless runs masked it, so
+    this test PINS the contract the kernel/mission both depend on.
+    """
+    from inqtrix.agents.scheduler import project_child_run_outcome
+
+    store = _store(max_concurrent=2, max_queue_size=4)
+    # A plain owned run stands in for the child row: the projector reads
+    # purely by run_id, so the visibility gating it exercises is identical
+    # (kind is not part of the read authorization).
+    child = store.submit(
+        question="child",
+        stack_name="default",
+        work=lambda handle: handle.complete(
+            {
+                "answer": "Kindbericht [W1]",
+                "references": [
+                    {
+                        "label": "W1",
+                        "url": "https://example.com/q",
+                        "title": "Quelle",
+                    }
+                ],
+            }
+        ),
+        created_by_user_id=OWNER_1,
+        created_by_tenant_id="default",
+    )
+    child_id = child["run_id"]
+    ctx = _visible_to(OWNER_1)
+    _wait_until(lambda: store.get(child_id, visible_to=ctx)["status"] == "completed")
+
+    # Without the owner context the owned child is hidden -> the exact
+    # live symptom (child_row_missing), NOT the true outcome.
+    blind = project_child_run_outcome(store, child_id, 1)
+    assert blind is not None
+    assert blind.status == "failed"
+    assert blind.failure_reason == "child_row_missing"
+    # With the owner context, the real completed outcome comes through.
+    seen = project_child_run_outcome(store, child_id, 1, visible_to=ctx)
+    assert seen is not None
+    assert seen.status == "completed"
+
+
+def test_owned_run_handle_reads_elapsed_time_without_public_visibility() -> None:
+    store = _store(max_concurrent=1, max_queue_size=1)
+    observed: list[float] = []
+
+    def work(handle: RunHandle) -> None:
+        observed.append(handle.total_elapsed_seconds())
+        handle.complete({"answer": "done"})
+
+    summary = store.submit(
+        question="owned timing",
+        stack_name="default",
+        work=work,
+        created_by_user_id=OWNER_1,
+        created_by_tenant_id="default",
+    )
+    owner = _visible_to(OWNER_1)
+    _wait_until(
+        lambda: store.get(summary["run_id"], visible_to=owner)["status"] == "completed"
+    )
+
+    assert observed and observed[0] >= 0.0
+    with pytest.raises(RunNotFound):
+        store.get(summary["run_id"])
 
 
 def test_delete_refuses_non_owner_and_cross_workspace() -> None:
@@ -246,12 +323,8 @@ def test_delete_refuses_non_owner_and_cross_workspace() -> None:
         )
     assert [
         s["run_id"]
-        for s in store.list(
-            workspace_id="ws_owner", visible_to=_visible_to(OWNER_1)
-        )
-    ] == [
-        imported["run_id"]
-    ]
+        for s in store.list(workspace_id="ws_owner", visible_to=_visible_to(OWNER_1))
+    ] == [imported["run_id"]]
 
 
 def test_delete_allows_legacy_run_without_recorded_owner() -> None:
@@ -346,15 +419,12 @@ def test_import_completed_run_persists_and_is_idempotent() -> None:
     # Lists + scopes to the owner's workspace, and the body is fetchable.
     assert [
         s["run_id"]
-        for s in store.list(
-            workspace_id="ws_owner", visible_to=_visible_to(OWNER_1)
-        )
-    ] == [
-        first["run_id"]
-    ]
-    assert store.result(
-        first["run_id"], visible_to=_visible_to(OWNER_1)
-    )["answer"] == "the report body"
+        for s in store.list(workspace_id="ws_owner", visible_to=_visible_to(OWNER_1))
+    ] == [first["run_id"]]
+    assert (
+        store.result(first["run_id"], visible_to=_visible_to(OWNER_1))["answer"]
+        == "the report body"
+    )
     # Re-importing the OWNER's own run is an idempotent no-op (one row).
     again = store.import_completed_run(
         source_run_id="local_report_1",
@@ -388,12 +458,14 @@ def test_import_completed_run_scopes_source_id_to_owner() -> None:
         created_by_tenant_id="default",
     )
     assert other["run_id"] != owner_a["run_id"]
-    assert store.result(
-        owner_a["run_id"], visible_to=_visible_to(OWNER_A)
-    )["answer"] == "owner A body"
-    assert store.result(
-        other["run_id"], visible_to=_visible_to(OWNER_B)
-    )["answer"] == "owner B body"
+    assert (
+        store.result(owner_a["run_id"], visible_to=_visible_to(OWNER_A))["answer"]
+        == "owner A body"
+    )
+    assert (
+        store.result(other["run_id"], visible_to=_visible_to(OWNER_B))["answer"]
+        == "owner B body"
+    )
 
 
 def test_import_after_retention_allocates_a_new_server_id() -> None:
@@ -713,9 +785,7 @@ def test_one_active_root_agent_run_per_session() -> None:
         kind="agent",
         session_id="sess-exclusive",
     )
-    _wait_until(
-        lambda: store.get(next_run["run_id"])["status"] == "completed"
-    )
+    _wait_until(lambda: store.get(next_run["run_id"])["status"] == "completed")
 
 
 def test_waiting_lifecycle_parks_resumes_and_completes() -> None:
@@ -730,15 +800,19 @@ def test_waiting_lifecycle_parks_resumes_and_completes() -> None:
         handle.complete({"answer": "resumed"})
 
     summary = store.submit(
-        question="agentlauf", stack_name="default", work=segmented_work
+        question="agentlauf",
+        stack_name="default",
+        work=segmented_work,
+        kind="agent",
     )
     run_id = summary["run_id"]
-    _wait_until(
-        lambda: store.get(run_id)["status"] == "waiting_for_approval"
-    )
+    _wait_until(lambda: store.get(run_id)["status"] == "waiting_for_approval")
     # The auto-complete safety net must NOT complete a parked run.
     time.sleep(0.05)
-    assert store.get(run_id)["status"] == "waiting_for_approval"
+    waiting_summary = store.get(run_id)
+    assert waiting_summary["status"] == "waiting_for_approval"
+    first_started_at = waiting_summary["started_at"]
+    assert waiting_summary["timing"]["segment_count"] == 1
 
     resumed = store.resume_run(run_id)
 
@@ -746,8 +820,13 @@ def test_waiting_lifecycle_parks_resumes_and_completes() -> None:
     # summary may already say running (same tolerance as submit).
     assert resumed["status"] in {"queued", "running"}
     _wait_until(lambda: store.get(run_id)["status"] == "completed")
+    completed = store.get(run_id)
     assert calls["count"] == 2
     assert store.result(run_id)["answer"] == "resumed"
+    assert completed["started_at"] == first_started_at
+    assert completed["timing"]["segment_count"] == 2
+    assert completed["timing"]["resume_count"] == 1
+    assert completed["timing"]["waiting_seconds"] > 0
 
     subscription = store.subscribe(run_id)
     try:
@@ -759,6 +838,23 @@ def test_waiting_lifecycle_parks_resumes_and_completes() -> None:
             if event["type"] == "inqtrix.run.queued"
         ]
         assert queued_events[-1]["data"].get("resumed") is True
+        started_events = [
+            event
+            for event in subscription.replay
+            if event["type"] == "inqtrix.run.started"
+        ]
+        resumed_events = [
+            event
+            for event in subscription.replay
+            if event["type"] == "inqtrix.run.resumed"
+        ]
+        assert len(started_events) == 1
+        assert len(resumed_events) == 1
+        assert resumed_events[0]["data"]["segment_ordinal"] == 2
+        assert (
+            resumed_events[0]["data"]["segment_id"]
+            != started_events[0]["data"]["segment_id"]
+        )
     finally:
         subscription.close()
 
@@ -809,18 +905,14 @@ def test_worker_write_methods_accept_fence_attempt_for_port_parity() -> None:
 
     # Accepted and reaches the RUNNING guard (RunActive), not a TypeError.
     with pytest.raises(RunActive):
-        store.mark_waiting(
-            run_id, status=RunStatus.WAITING_FOR_INPUT, fence_attempt=7
-        )
+        store.mark_waiting(run_id, status=RunStatus.WAITING_FOR_INPUT, fence_attempt=7)
 
 
 def test_execution_request_body_is_immutable_after_submission() -> None:
     """Control validation reads the admitted request, never caller aliases."""
     store = _store()
     request_payload = {
-        "body": {
-            "knowledge_filters": {"collection_ids": ["kc_initial"]}
-        }
+        "body": {"knowledge_filters": {"collection_ids": ["kc_initial"]}}
     }
     summary = store.submit(
         question="q",
@@ -829,19 +921,13 @@ def test_execution_request_body_is_immutable_after_submission() -> None:
         request_payload=request_payload,
     )
 
-    request_payload["body"]["knowledge_filters"]["collection_ids"].append(
-        "kc_late"
-    )
+    request_payload["body"]["knowledge_filters"]["collection_ids"].append("kc_late")
     first_read = store.execution_request_body(summary["run_id"])
-    assert first_read["knowledge_filters"]["collection_ids"] == [
-        "kc_initial"
-    ]
+    assert first_read["knowledge_filters"]["collection_ids"] == ["kc_initial"]
 
     first_read["knowledge_filters"]["collection_ids"].append("kc_other")
     second_read = store.execution_request_body(summary["run_id"])
-    assert second_read["knowledge_filters"]["collection_ids"] == [
-        "kc_initial"
-    ]
+    assert second_read["knowledge_filters"]["collection_ids"] == ["kc_initial"]
 
 
 def test_resume_requires_a_waiting_run() -> None:
@@ -953,8 +1039,7 @@ def test_children_lists_direct_children_newest_first() -> None:
     )
     for summary in (first, second, unrelated):
         _wait_until(
-            lambda run_id=summary["run_id"]: store.get(run_id)["status"]
-            == "completed"
+            lambda run_id=summary["run_id"]: store.get(run_id)["status"] == "completed"
         )
 
     children = store.children(parent["run_id"])
@@ -964,9 +1049,7 @@ def test_children_lists_direct_children_newest_first() -> None:
         first["run_id"],
     ]
     release_parent.set()
-    _wait_until(
-        lambda: store.get(parent["run_id"])["status"] == "completed"
-    )
+    _wait_until(lambda: store.get(parent["run_id"])["status"] == "completed")
 
 
 def test_nested_children_use_canonical_root_and_cancel_recursively() -> None:
@@ -1015,8 +1098,7 @@ def test_nested_children_use_canonical_root_and_cancel_recursively() -> None:
     release.set()
     for run in (root, child, grandchild):
         _wait_until(
-            lambda run_id=run["run_id"]: store.get(run_id)["status"]
-            == "cancelled"
+            lambda run_id=run["run_id"]: store.get(run_id)["status"] == "cancelled"
         )
 
 
@@ -1070,9 +1152,7 @@ def test_origin_key_submit_or_find_is_atomic_in_memory() -> None:
     assert len(store.children(root["run_id"])) == 1
     store.cancel(root["run_id"])
     release.set()
-    _wait_until(
-        lambda: store.get(root["run_id"])["status"] == "cancelled"
-    )
+    _wait_until(lambda: store.get(root["run_id"])["status"] == "cancelled")
 
 
 def test_child_submit_racing_root_cancel_cannot_leave_active_descendant() -> None:
@@ -1137,9 +1217,7 @@ def test_child_submit_racing_root_cancel_cannot_leave_active_descendant() -> Non
     else:
         assert store.children(root["run_id"]) == []
     release.set()
-    _wait_until(
-        lambda: store.get(root["run_id"])["status"] == "cancelled"
-    )
+    _wait_until(lambda: store.get(root["run_id"])["status"] == "cancelled")
 
 
 def test_waiting_ttl_auto_cancels_with_approval_timeout() -> None:
@@ -1297,11 +1375,7 @@ def test_list_page_walks_the_full_history_without_gaps() -> None:
             work=lambda handle: handle.complete({}),
         )
         ids.append(summary["run_id"])
-    _wait_until(
-        lambda: all(
-            store.get(rid)["status"] == "completed" for rid in ids
-        )
-    )
+    _wait_until(lambda: all(store.get(rid)["status"] == "completed" for rid in ids))
 
     seen: list[str] = []
     after = None
@@ -1417,11 +1491,97 @@ def test_child_projection_is_bounded_and_preserves_parent_snapshot() -> None:
     assert projected[-1]["data"]["task_id"] == "task-1"
     assert projected[-1]["data"]["attempt"] == 2
     assert projected[-1]["data"]["snapshot"]["current_node"] == "search"
-    assert store.get(parent["run_id"])["snapshot"]["current_node"] == (
-        "agent_execute"
+    assert store.get(parent["run_id"])["snapshot"]["current_node"] == ("agent_execute")
+
+    store.emit(
+        child["run_id"],
+        "inqtrix.knowledge.grounding.checked",
+        {
+            "status": "rejected_quote",
+            "failure_code": "knowledge_grounding_quote_unverified",
+            "marker": "_knowledge_grounding_parsed",
+            "format_repaired": False,
+            "quotes_total": 2,
+            "quotes_verified": 1,
+            # Outside the registered event schema: it must not cross either
+            # the child audit sanitizer or the bounded parent projection.
+            "quote_text": "private source passage",
+        },
     )
+    projected = projected_events()
+    grounding = projected[-1]["data"]
+    assert grounding["event_type"] == "inqtrix.knowledge.grounding.checked"
+    assert grounding["status"] == "rejected_quote"
+    assert grounding["failure_code"] == (
+        "knowledge_grounding_quote_unverified"
+    )
+    assert grounding["metrics"] == {
+        "quotes_total": 2,
+        "quotes_verified": 1,
+    }
+    assert "quote_text" not in grounding
+
+    store.emit(
+        child["run_id"],
+        "inqtrix.knowledge.retrieval.degraded",
+        {
+            "reason": "vector_overfetch_cap",
+            "retrieval_mode": "hybrid",
+            "stage": "vector_candidate_pool",
+            "requested_candidate_pool": 40,
+            "returned_candidate_pool": 12,
+            "final_top_k": 8,
+            "final_evidence_complete": False,
+            "requested_top_k": 8,
+            "returned_hits": 3,
+            "candidate_cap": 64,
+            "query": "private user query",
+            "source_ids": ["private-source"],
+        },
+    )
+    projected = projected_events()
+    retrieval = projected[-1]["data"]
+    assert retrieval["event_type"] == "inqtrix.knowledge.retrieval.degraded"
+    assert retrieval["reason"] == "vector_overfetch_cap"
+    assert retrieval["retrieval_mode"] == "hybrid"
+    assert retrieval["stage"] == "vector_candidate_pool"
+    assert retrieval["requested_candidate_pool"] == 40
+    assert retrieval["returned_candidate_pool"] == 12
+    assert retrieval["final_top_k"] == 8
+    assert retrieval["final_evidence_complete"] is False
+    assert retrieval["requested_top_k"] == 8
+    assert retrieval["returned_hits"] == 3
+    assert retrieval["candidate_cap"] == 64
+    assert "query" not in retrieval
+    assert "source_ids" not in retrieval
+
+    store.emit(
+        child["run_id"],
+        "inqtrix.knowledge.retrieval.warning",
+        {
+            "code": "chunks_require_reindex",
+            "message": "Treffer müssen neu indiziert werden.",
+            "reason": "source_unverified",
+            "stage": "canonical_hydration",
+            "count": 2,
+            "recommended_action": "reindex",
+            "query": "private user query",
+            "source_ids": ["private-source"],
+            "excerpt": "private source passage",
+        },
+    )
+    projected = projected_events()
+    warning = projected[-1]["data"]
+    assert warning["event_type"] == "inqtrix.knowledge.retrieval.warning"
+    assert warning["code"] == "chunks_require_reindex"
+    assert warning["reason"] == "source_unverified"
+    assert warning["stage"] == "canonical_hydration"
+    assert warning["count"] == 2
+    assert warning["recommended_action"] == "reindex"
+    assert "message" not in warning
+    assert "query" not in warning
+    assert "source_ids" not in warning
+    assert "excerpt" not in warning
 
     release_parent.set()
-    _wait_until(
-        lambda: store.get(parent["run_id"])["status"] == "completed"
-    )
+    _wait_until(lambda: store.get(parent["run_id"])["status"] == "completed")

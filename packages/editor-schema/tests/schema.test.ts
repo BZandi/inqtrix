@@ -1,11 +1,14 @@
 import { getSchema } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { EditorState, TextSelection } from '@tiptap/pm/state'
+import { findWrapping } from '@tiptap/pm/transform'
 import { initProseMirrorDoc, ySyncPluginKey } from '@tiptap/y-tiptap'
 import * as Y from 'yjs'
 import { describe, expect, it } from 'vitest'
 import {
   EDITOR_BLOCK_SUGGESTIONS_SUPPORTED,
+  INQTRIX_STRUCTURE_COMMAND_META,
+  INQTRIX_STRUCTURE_SUGGESTION_ATTR,
   UnsupportedSuggestionStructureError,
   createEditorSchemaExtensions,
   createRelativePositionAdapter,
@@ -20,6 +23,7 @@ import {
   parseEditorMarkdown,
   projectFinalJson,
   projectOriginalJson,
+  resolveStructureSuggestion,
   SUGGESTION_MARK_NAMES,
   serializeEditorJson,
   serializeRelativePosition,
@@ -74,6 +78,22 @@ function cloneYDoc(document: Y.Doc): Y.Doc {
 }
 
 describe('editor schema gate', () => {
+  it('normalizes empty Markdown to one canonical empty paragraph', () => {
+    const parsed = parseEditorMarkdown('')
+    const document = editorJsonToYDoc(parsed)
+
+    expect(parsed).toEqual({
+      type: 'doc',
+      content: [{
+        attrs: { inqtrixStructureSuggestion: null, textAlign: null },
+        type: 'paragraph',
+      }],
+    })
+    expect(editorYDocToJson(document)).toEqual(parsed)
+    expect(serializeEditorJson(parsed)).toBe('')
+    document.destroy()
+  })
+
   it('round-trips one table-and-mathematics document through Markdown and Yjs', () => {
     const markdown = [
       '# Findings',
@@ -146,6 +166,26 @@ describe('editor schema gate', () => {
     mutate(document)
 
     expect(editorYDocToJson(document)).toEqual(content)
+    expect(() => validateEditorYDoc(document)).toThrow(/not canonical/)
+    document.destroy()
+  })
+
+  it('accepts y-tiptap’s inert empty textblock placeholder', () => {
+    const content = parseEditorMarkdown('')
+    const document = editorJsonToYDoc(content)
+    firstParagraphXml(document).insert(0, [new Y.XmlText()])
+
+    expect(editorYDocToJson(document)).toEqual(content)
+    expect(validateEditorYDoc(document)).toEqual(content)
+    document.destroy()
+  })
+
+  it('rejects attributes on y-tiptap’s empty textblock placeholder', () => {
+    const document = editorJsonToYDoc(parseEditorMarkdown(''))
+    const placeholder = new Y.XmlText()
+    firstParagraphXml(document).insert(0, [placeholder])
+    placeholder.setAttribute('rogue', 'hidden')
+
     expect(() => validateEditorYDoc(document)).toThrow(/not canonical/)
     document.destroy()
   })
@@ -290,6 +330,30 @@ describe('editor schema gate', () => {
     document.destroy()
   })
 
+  it('allows an origin-inferred structure attribute replacement update', () => {
+    const document = editorJsonToYDoc(parseEditorMarkdown('Structure target'))
+    const paragraph = firstParagraphXml(document)
+    paragraph.setAttribute(INQTRIX_STRUCTURE_SUGGESTION_ATTR, null as never)
+    const vector = Y.encodeStateVector(document)
+    paragraph.setAttribute(INQTRIX_STRUCTURE_SUGGESTION_ATTR, {
+      action: 'codeBlock',
+      authorId: '0f111111-1111-4111-8111-111111111111',
+      createdAt: 1_784_112_009,
+      kind: 'structure',
+      patchId: '0f222222-2222-4222-8222-222222222222',
+      suggestionId: '0f333333-3333-4333-8333-333333333333',
+    } as never)
+    const update = Y.encodeStateAsUpdate(document, vector)
+    const attributeReplacement = Y.decodeUpdate(update).structs.find((struct) => (
+      struct instanceof Y.Item
+      && struct.content instanceof Y.ContentAny
+    ))
+
+    expect(attributeReplacement).toMatchObject({ parentSub: null })
+    expect(validateSuggestionYjsUpdate(update)).toBe(update)
+    document.destroy()
+  })
+
   it('tracks UUID suggestions with authoritative metadata and projects both views', () => {
     const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
     const document = schema.node('doc', null, [schema.node('paragraph', null, schema.text('Hello'))])
@@ -321,7 +385,83 @@ describe('editor schema gate', () => {
     expect(projectOriginalJson(tracked).content?.[0]?.content?.[0]?.text).toBe('Hello')
   })
 
-  it('models a text replacement as one modification with both semantic projections', () => {
+  it('extends an adjacent actor-owned insertion without requiring a second suggestion id', () => {
+    const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
+    const document = schema.node('doc', null, [
+      schema.node('paragraph', null, schema.text('Hello')),
+    ])
+    const initial = EditorState.create({ schema, doc: document })
+    const first = initial.apply(transformToInqtrixSuggestionTransaction(
+      initial.tr.insertText('A', 6),
+      initial,
+      {
+        authorId: 'user-continuous',
+        createdAt: 1_784_112_000,
+        patchId: 'patch-continuous',
+      },
+      () => 'suggestion-existing',
+    ))
+    const continued = first.apply(transformToInqtrixSuggestionTransaction(
+      first.tr.insertText('B', 7),
+      first,
+      {
+        authorId: 'user-continuous',
+        createdAt: 1_784_112_001,
+        patchId: 'unused-new-patch',
+      },
+      () => 'unused-new-suggestion',
+    )).doc
+
+    expect(suggestionDescriptors(continued)).toEqual([{
+      authorId: 'user-continuous',
+      createdAt: 1_784_112_000,
+      kind: 'insertion',
+      patchId: 'patch-continuous',
+      suggestionId: 'suggestion-existing',
+    }])
+    expect(projectFinalJson(continued).content?.[0]?.content?.[0]?.text).toBe('HelloAB')
+    expect(projectOriginalJson(continued).content?.[0]?.content?.[0]?.text).toBe('Hello')
+  })
+
+  it('allows slash input inside an empty paragraph proposed by a split', () => {
+    const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
+    const document = schema.node('doc', null, [
+      schema.node('paragraph', null, schema.text('Before')),
+    ])
+    const initial = EditorState.create({ schema, doc: document })
+    const split = initial.apply(transformToInqtrixSuggestionTransaction(
+      initial.tr
+        .setSelection(TextSelection.create(initial.doc, 1))
+        .split(1),
+      initial,
+      {
+        authorId: 'user-slash',
+        createdAt: 1_784_112_010,
+        patchId: 'patch-split',
+      },
+      () => 'suggestion-split',
+    ))
+    const synchronized = EditorState.create({
+      schema,
+      doc: split.doc,
+      selection: TextSelection.create(split.doc, 5),
+    })
+    const slash = synchronized.apply(transformToInqtrixSuggestionTransaction(
+      synchronized.tr.insertText('/'),
+      synchronized,
+      {
+        authorId: 'user-slash',
+        createdAt: 1_784_112_011,
+        patchId: 'unused-slash-patch',
+      },
+      () => 'unused-slash-suggestion',
+    )).doc
+
+    expect(schema.nodeFromJSON(projectFinalJson(slash)).textContent).toContain('/')
+    expect(projectOriginalJson(slash)).toEqual(document.toJSON())
+  })
+
+  it('models a text replacement as one replacement with both semantic projections', () => {
     const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
     const document = schema.node('doc', null, [schema.node('paragraph', null, schema.text('Hello'))])
     const state = EditorState.create({ schema, doc: document })
@@ -339,11 +479,11 @@ describe('editor schema gate', () => {
     const tracked = state.apply(transformed).doc
 
     expect(suggestionMarkKinds(tracked)).toEqual(['deletion', 'insertion'])
-    expect(suggestionDeclaredKinds(tracked)).toEqual(['modification'])
+    expect(suggestionDeclaredKinds(tracked)).toEqual(['replacement'])
     expect(suggestionDescriptors(tracked)).toEqual([{
       authorId: 'user-replacement',
       createdAt: 1_784_112_001,
-      kind: 'modification',
+      kind: 'replacement',
       patchId: 'patch-replacement',
       suggestionId: 'suggestion-replacement',
     }])
@@ -406,7 +546,7 @@ describe('editor schema gate', () => {
     expect(() => suggestionDescriptors(document)).toThrow(/invalid mark composition/)
   })
 
-  it('models inline formatting as one modification with both semantic projections', () => {
+  it('models inline formatting as one format proposal with both semantic projections', () => {
     const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
     const bold = schema.marks.bold
     if (!bold) throw new Error('Editor schema is missing the bold mark')
@@ -426,11 +566,11 @@ describe('editor schema gate', () => {
     const tracked = state.apply(transformed).doc
 
     expect(suggestionMarkKinds(tracked)).toEqual(['deletion', 'insertion'])
-    expect(suggestionDeclaredKinds(tracked)).toEqual(['modification'])
+    expect(suggestionDeclaredKinds(tracked)).toEqual(['format'])
     expect(suggestionDescriptors(tracked)).toEqual([{
       authorId: 'user-formatting',
       createdAt: 1_784_112_002,
-      kind: 'modification',
+      kind: 'format',
       patchId: 'patch-formatting',
       suggestionId: 'suggestion-formatting',
     }])
@@ -508,13 +648,139 @@ describe('editor schema gate', () => {
     expect(state.apply(transformed).doc.textContent).toBe('AB')
   })
 
+  it.each([
+    ['heading2', 'heading'],
+    ['blockquote', 'blockquote'],
+    ['bulletList', 'bulletList'],
+    ['orderedList', 'orderedList'],
+    ['taskList', 'taskList'],
+  ] as const)('tracks slash-menu %s as one reversible structure proposal', (action, finalType) => {
+    const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
+    const document = schema.node('doc', null, [
+      schema.node('paragraph', null, schema.text('/x')),
+    ])
+    const state = EditorState.create({ schema, doc: document })
+    const direct = state.tr.delete(1, 3)
+    if (action === 'heading2') {
+      direct.setNodeMarkup(0, schema.nodes.heading, { level: 2, textAlign: null })
+    } else {
+      const target = direct.doc.nodeAt(0)
+      const range = target
+        ? direct.doc.resolve(0).blockRange(
+            direct.doc.resolve(target.nodeSize),
+          )
+        : null
+      const nodeType = schema.nodes[action]
+      const wrapping = range && nodeType ? findWrapping(range, nodeType) : null
+      if (!range || !wrapping) throw new Error(`Missing ${action} wrapping`)
+      direct.wrap(range, wrapping)
+    }
+    direct.setMeta(INQTRIX_STRUCTURE_COMMAND_META, {
+      action,
+      commandRange: { from: 1, to: 3 },
+    })
+    const tracked = state.apply(transformToInqtrixSuggestionTransaction(
+      direct,
+      state,
+      {
+        authorId: 'user-structure',
+        createdAt: 1_784_112_006,
+        patchId: 'patch-structure',
+      },
+      () => 'suggestion-structure',
+    )).doc
+
+    expect(tracked.child(0).type.name).toBe('paragraph')
+    expect(suggestionDescriptors(tracked)).toEqual([{
+      authorId: 'user-structure',
+      createdAt: 1_784_112_006,
+      kind: 'structure',
+      patchId: 'patch-structure',
+      suggestionId: 'suggestion-structure',
+    }])
+    expect(projectFinalJson(tracked).content?.[0]?.type).toBe(finalType)
+    expect(projectOriginalJson(tracked).content?.[0]?.content?.[0]?.text).toBe('/x')
+    const accepted = resolveStructureSuggestion(
+      EditorState.create({ schema, doc: tracked }),
+      'suggestion-structure',
+      'accept',
+    )
+    expect(accepted.doc.child(0).type.name).toBe(finalType)
+    const rejected = resolveStructureSuggestion(
+      EditorState.create({ schema, doc: tracked }),
+      'suggestion-structure',
+      'reject',
+    )
+    expect(rejected.doc.child(0).type.name).toBe('paragraph')
+    expect(rejected.doc.textContent).toBe('')
+  })
+
+  it('supersedes a transported slash insertion with one structure proposal', () => {
+    const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
+    const document = schema.node('doc', null, [
+      schema.node('heading', { level: 1, textAlign: null }, schema.text('Title')),
+    ])
+    const initial = EditorState.create({ schema, doc: document })
+    const trackedSlash = initial.apply(transformToInqtrixSuggestionTransaction(
+      initial.tr.insertText('/', 1),
+      initial,
+      {
+        authorId: 'user-structure',
+        createdAt: 1_784_112_006,
+        patchId: 'patch-slash',
+      },
+      () => 'suggestion-slash',
+    )).doc
+    const slashState = EditorState.create({ schema, doc: trackedSlash })
+    const direct = slashState.tr
+      .delete(1, 2)
+      .setNodeMarkup(0, schema.nodes.heading, { level: 2, textAlign: null })
+      .setMeta(INQTRIX_STRUCTURE_COMMAND_META, {
+        action: 'heading2',
+        commandRange: { from: 1, to: 2 },
+      })
+    const trackedStructure = slashState.apply(
+      transformToInqtrixSuggestionTransaction(
+        direct,
+        slashState,
+        {
+          authorId: 'user-structure',
+          createdAt: 1_784_112_007,
+          patchId: 'unused-new-patch',
+        },
+        () => 'suggestion-structure',
+      ),
+    ).doc
+
+    expect(suggestionDescriptors(trackedStructure)).toEqual([{
+      authorId: 'user-structure',
+      createdAt: 1_784_112_006,
+      kind: 'structure',
+      patchId: 'patch-slash',
+      suggestionId: 'suggestion-structure',
+    }])
+    expect(projectOriginalJson(trackedStructure).content?.[0]).toEqual(
+      expect.objectContaining({
+        content: [{ text: 'Title', type: 'text' }],
+        type: 'heading',
+      }),
+    )
+    expect(projectFinalJson(trackedStructure).content?.[0]).toEqual(
+      expect.objectContaining({
+        attrs: expect.objectContaining({ level: 2 }),
+        content: [{ text: 'Title', type: 'text' }],
+        type: 'heading',
+      }),
+    )
+  })
+
   it('rejects block insertions before the Yjs codec can drop their marks', () => {
     const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
     const document = schema.node('doc', null, [schema.node('paragraph', null, schema.text('First'))])
     const state = EditorState.create({ schema, doc: document })
     const insertedParagraph = schema.node('paragraph', null, schema.text('Second'))
     const insertion = state.tr.insert(state.doc.content.size, insertedParagraph)
-    expect(EDITOR_BLOCK_SUGGESTIONS_SUPPORTED).toBe(false)
+    expect(EDITOR_BLOCK_SUGGESTIONS_SUPPORTED).toBe(true)
     expect(() => transformToInqtrixSuggestionTransaction(
       insertion,
       state,

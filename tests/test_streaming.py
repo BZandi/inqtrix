@@ -219,6 +219,69 @@ async def test_stream_response_dispatches_event_only_algorithm_answer_only():
 
 
 @pytest.mark.asyncio
+async def test_stream_response_never_marks_returned_terminal_failure_as_stop():
+    """Rejected Knowledge output is a visible SSE error, never an answer."""
+    from inqtrix.core.results import AgentResult
+
+    safe_reason = "The required evidence block could not be verified safely."
+
+    class _RejectedKnowledgeAlgorithm:
+        def capabilities(self) -> dict:
+            return {"supports_chat_completions": True}
+
+        def run(self, request, *, runtime, context):
+            del request, runtime, context
+            return AgentResult(
+                answer=safe_reason,
+                result_type="knowledge_result",
+                raw={
+                    "answer": safe_reason,
+                    "usage": {"prompt_tokens": 9, "completion_tokens": 4},
+                    "result_state": {
+                        "_terminal_failure": {
+                            "type": "knowledge_grounding_format_invalid",
+                            "message": safe_reason,
+                        }
+                    },
+                },
+            )
+
+    chunks = await _collect(
+        stream_response(
+            "Question",
+            algorithm=_RejectedKnowledgeAlgorithm(),
+            runtime=None,
+            run_request=_run_request("Question"),
+            providers=None,
+            strategies=None,
+            settings=AgentSettings(),
+            include_progress=False,
+        )
+    )
+    payloads = [
+        json.loads(chunk.removeprefix("data: ").strip())
+        for chunk in chunks
+        if chunk.startswith("data: {")
+    ]
+
+    assert any(
+        payload.get("inqtrix", {}).get("error", {}).get("type")
+        == "knowledge_grounding_format_invalid"
+        for payload in payloads
+    )
+    assert safe_reason in "".join(
+        payload["choices"][0]["delta"].get("content", "")
+        for payload in payloads
+    )
+    assert payloads[-1]["choices"][0]["finish_reason"] == "error"
+    assert not any(
+        payload["choices"][0]["finish_reason"] == "stop"
+        for payload in payloads
+    )
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
 async def test_stream_response_returns_timeout_chunk(monkeypatch):
     import inqtrix.research.web_research as web_research_module
 

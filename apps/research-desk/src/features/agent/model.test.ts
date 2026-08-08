@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  agentArtifactFromWire,
   agentSessionHistoryTimeIso,
   canEditAgentRun,
   isActiveAgentRun,
@@ -8,6 +9,48 @@ import {
   restoredAgentSessionId,
 } from './model'
 import type { ResearchRunStatus } from '@/features/researchRuns/types'
+
+describe('agent artifact detail projection', () => {
+  it('retains the evidence payload only after the detail row is fetched', () => {
+    const artifact = agentArtifactFromWire({
+      artifact_id: 'artifact-evidence',
+      content_markdown: '',
+      created_at: 1,
+      kind: 'evidence_bundle',
+      payload: {
+        schema_version: 1,
+        web_search_ledger: {
+          kind: 'web_search_ledger',
+          schema_version: 1,
+          searches: {
+            'query-1': { provider_answer: 'Grounded answer', query_id: 'query-1' },
+          },
+        },
+      },
+      refs: [],
+      refs_count: 0,
+      revision: 1,
+      revisions: [],
+      run_id: 'run-1',
+      session_id: null,
+      status: 'ready',
+      title: 'Evidence',
+      updated_at: 2,
+      updated_by: 'agent',
+    })
+
+    expect(artifact.payload).toEqual({
+      schema_version: 1,
+      web_search_ledger: {
+        kind: 'web_search_ledger',
+        schema_version: 1,
+        searches: {
+          'query-1': { provider_answer: 'Grounded answer', query_id: 'query-1' },
+        },
+      },
+    })
+  })
+})
 
 /**
  * THE one active/gate vocabulary for every agent surface (composer,
@@ -126,6 +169,22 @@ describe('restoredAgentSessionId', () => {
     expect(
       restoredAgentSessionId(null, ['old', 'recent'], withRuns, runs),
     ).toBe('old')
+  })
+
+  it('never restores a session whose durable deletion is still visible', () => {
+    const deleting = {
+      ...sessions,
+      recent: {
+        ...sessions.recent,
+        deletion: {
+          error: null,
+          operationId: 'del_1',
+          stage: 'queued',
+          status: 'deleting' as const,
+        },
+      },
+    }
+    expect(restoredAgentSessionId('recent', ['recent', 'old'], deleting, {})).toBe('old')
   })
 })
 

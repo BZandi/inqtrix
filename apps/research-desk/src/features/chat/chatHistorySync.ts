@@ -35,6 +35,10 @@ import type {
   ChatThreadGroupRecord,
   ChatThreadRecord,
 } from '@/features/project/types'
+import {
+  agentModelSelectionKey,
+  normalizeAgentModelSelection,
+} from '@/features/agent/executionPolicy'
 import { isoFromUnixSeconds, unixSecondsFromIso } from '@/lib/time'
 
 const VALID_SOURCES: ReadonlySet<string> = new Set(['api', 'imported', 'mock'])
@@ -49,6 +53,7 @@ export function threadRecordFromServer(thread: ServerChatThread): {
   groupId: string | null
   record: ChatThreadRecord
 } {
+  const modelSelection = threadModelSelectionFromWire(thread.model_selection)
   return {
     groupId: thread.group_id,
     record: {
@@ -59,7 +64,19 @@ export function threadRecordFromServer(thread: ServerChatThread): {
       source: normalizeSource(thread.source),
       title: thread.title,
       updatedAt: isoFromUnixSeconds(thread.updated_at),
+      ...(modelSelection ? { modelSelection } : {}),
     },
+  }
+}
+
+/** Parse the thread's stored pick defensively; '' / absent / garbage all
+ * resolve to null so the account preference can seed instead. */
+export function threadModelSelectionFromWire(value: string | undefined) {
+  if (!value) return null
+  try {
+    return normalizeAgentModelSelection(JSON.parse(value) as unknown)
+  } catch {
+    return null
   }
 }
 
@@ -118,6 +135,7 @@ export function serverThreadPayload(
   source: string
   title: string
   updated_at: number
+  model_selection: string
 } {
   return {
     created_at: unixSecondsFromIso(record.createdAt),
@@ -126,7 +144,18 @@ export function serverThreadPayload(
     source: record.source,
     title: record.title,
     updated_at: unixSecondsFromIso(record.updatedAt),
+    // Whole-row PUT: the field must ride every save or the server resets
+    // the stored pick to '' on the next unrelated title/preview save.
+    model_selection: record.modelSelection
+      ? JSON.stringify(record.modelSelection)
+      : '',
   }
+}
+
+/** Change-detection key for the thread's pick (rides updatedAt in the
+ * fingerprint, but comparisons in tests use this directly). */
+export function threadModelSelectionKey(record: ChatThreadRecord): string {
+  return agentModelSelectionKey(record.modelSelection)
 }
 
 /** A message record -> the server append body, packing the optional
@@ -150,6 +179,23 @@ export function serverMessagePayload(message: ChatMessageRecord): {
     metadata,
     role: message.role,
   }
+}
+
+/** Lazy message hydration is only authoritative for a thread the server has
+ * already listed or accepted. A newly-created local empty thread is saved by
+ * the autosave path first; reading it before that PUT would turn the expected
+ * not-yet-present state into a visible 404 sync error. */
+export function shouldLoadServerChatMessages(
+  thread: Pick<ChatThreadRecord, 'messages'> | undefined,
+  serverThreadKnown: boolean,
+  alreadyLoaded: boolean,
+): boolean {
+  return Boolean(
+    thread
+    && serverThreadKnown
+    && !alreadyLoaded
+    && thread.messages.length === 0,
+  )
 }
 
 /** A group record -> the server PUT body. */

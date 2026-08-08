@@ -19,7 +19,6 @@ from inqtrix.model_routing import (
     describe_node_resolutions,
 )
 from inqtrix.settings import AgentSettings, Settings
-from inqtrix.urls import sanitize_error
 
 if TYPE_CHECKING:
     from inqtrix.auth.principal import AuthProvider
@@ -30,11 +29,21 @@ log = logging.getLogger("inqtrix")
 
 
 def provider_label(provider: object) -> str:
-    """Return the public class name of a provider, unwrapping adapter shells."""
-    wrapped = getattr(provider, "_provider", None)
-    if wrapped is not None:
-        return type(wrapped).__name__
-    return type(provider).__name__
+    """Return the public class name of a provider, unwrapping adapter shells.
+
+    Follows the ``_provider`` chain to a fixed point so stacked shells
+    (tracing wrapper around ``ConfiguredLLMProvider`` around the real
+    backend) still report the backend class, never a wrapper name.
+    """
+    seen: set[int] = set()
+    current = provider
+    while id(current) not in seen:
+        seen.add(id(current))
+        wrapped = getattr(current, "_provider", None)
+        if wrapped is None:
+            break
+        current = wrapped
+    return type(current).__name__
 
 
 def provider_ready(provider: object, *, label: str) -> bool:
@@ -43,7 +52,11 @@ def provider_ready(provider: object, *, label: str) -> bool:
         checker = getattr(provider, "is_available", None)
         return bool(checker()) if callable(checker) else False
     except Exception as exc:  # noqa: BLE001 — health probes must not crash the endpoint
-        log.warning("Health-Check fuer %s fehlgeschlagen: %s", label, sanitize_error(exc))
+        log.warning(
+            "Health-Check fuer %s fehlgeschlagen (error_type=%s)",
+            label,
+            type(exc).__name__,
+        )
         return False
 
 
@@ -91,7 +104,7 @@ class HealthService:
         ``Settings.models.search_model``. Falling back to
         ``settings.models.search_model`` is therefore a defensive last
         resort only when ``getattr`` finds nothing (older third-party
-        SearchProvider subclasses pre-dating ADR-WS-12).
+        SearchProvider subclasses that do not expose the standardized field).
         """
         value = getattr(search_provider, "search_model", "")
         if isinstance(value, str) and value:

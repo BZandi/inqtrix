@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Awaitable, Callable, Mapping, Protocol, Sequence
 
+from inqtrix.auth.log_redaction import log_authorization_denial
 from inqtrix.auth.permissions import (
     SHARE_PERMISSIONS_BY_RESOURCE_TYPE,
     AuditEntry,
@@ -627,13 +628,14 @@ class ShareService:
         resource_id: str,
         recipient_user_id: uuid.UUID,
     ) -> None:
-        log.warning(
-            "share denied: actor=%s resource=%s/%s recipient=%s "
-            "reason=not_workspace_member",
-            principal.user_id,
-            resource_type,
-            resource_id,
-            recipient_user_id,
+        log_authorization_denial(
+            log,
+            action="share",
+            principal_kind=principal.kind,
+            actor_user_id=principal.user_id,
+            tenant_id=principal.tenant_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
         )
         await self._audit_event(
             principal,

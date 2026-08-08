@@ -9,7 +9,8 @@ How to embed Inqtrix in a Python script or application as a library. Two common 
 ## Prerequisites
 
 - Python ≥ 3.11.
-- Editable install with dev extras: `uv sync --extra dev` or `pip install -e ".[dev]"`.
+- Editable install with dev extras: `uv sync --extra dev` or
+  `python -m pip install -e ".[dev]"`.
 - At least one set of provider credentials in `.env` or the process environment.
 
 See [Installation](../getting-started/installation.md) for the full bootstrap.

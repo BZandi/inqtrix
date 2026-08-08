@@ -14,10 +14,16 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
 CollaborationPermission = Literal["view", "suggest", "edit"]
-CollaborationActorKind = Literal["human", "assistant", "agent", "system"]
+CollaborationActorKind = Literal["human", "guest", "assistant", "agent", "system"]
 CollaborationChangeKind = Literal["direct", "suggestion", "decision", "system"]
 CollaborationDecision = Literal["accept", "reject"]
-CollaborationSuggestionKind = Literal["insertion", "deletion", "modification"]
+CollaborationSuggestionKind = Literal[
+    "insertion",
+    "deletion",
+    "replacement",
+    "format",
+    "structure",
+]
 
 
 class CollaborationDocumentNotFound(KeyError):
@@ -88,7 +94,10 @@ class CollaborationUpdate:
     actor_user_id: uuid.UUID | None
     actor_kind: CollaborationActorKind
     change_kind: CollaborationChangeKind
+    actor_guest_identity_id: uuid.UUID | None = None
     suggestion_ids: tuple[str, ...] = ()
+    change_summary: dict[str, Any] = field(default_factory=dict, repr=False)
+    decision_outcome: Literal["accepted", "rejected"] | None = None
     command_id: uuid.UUID | None = None
     created_at: float = 0.0
     payload_pruned_at: float | None = None
@@ -138,12 +147,15 @@ class CollaborationLease:
     tenant_id: str
     document_id: str
     generation: int
-    user_id: uuid.UUID
+    user_id: uuid.UUID | None
     permission: CollaborationPermission
-    session_id: str
+    session_id: str | None
     issued_at: float
     expires_at: float
     last_validated_at: float
+    actor_kind: Literal["user", "guest"] = "user"
+    guest_identity_id: uuid.UUID | None = None
+    guest_link_id: uuid.UUID | None = None
     rotation_command_id: uuid.UUID | None = None
     rotated_from_lease_id: uuid.UUID | None = None
     revoked_at: float | None = None
@@ -179,6 +191,7 @@ class CollaborationPatchState:
     created_at: float
     active_suggestion_ids: tuple[str, ...]
     kinds: tuple[CollaborationSuggestionKind, ...]
+    superseded_suggestion_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -191,12 +204,14 @@ class PersistCollaborationUpdate:
     instance_id: str
     instance_epoch: int
     lease_id: uuid.UUID | None
-    actor_user_id: uuid.UUID
+    actor_user_id: uuid.UUID | None
     update_hash: str
     update_bytes: bytes = field(repr=False)
     actor_kind: CollaborationActorKind
     change_kind: CollaborationChangeKind
     suggestion_ids: tuple[str, ...] = ()
+    change_summary: dict[str, Any] = field(default_factory=dict, repr=False)
+    decision_outcome: Literal["accepted", "rejected"] | None = None
     suggestions: tuple[CollaborationSuggestion, ...] = ()
     patches: tuple[CollaborationPatchState, ...] = ()
     decision: CollaborationDecision | None = None
@@ -204,6 +219,7 @@ class PersistCollaborationUpdate:
     command_payload_hash: str | None = None
     expected_sequence: int | None = None
     now: float = 0.0
+    actor_guest_identity_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +268,19 @@ class CollaborationActivity:
     suggestion_ids: tuple[str, ...]
     command_id: uuid.UUID | None
     created_at: float
+    actor_guest_identity_id: uuid.UUID | None = None
+    change_summary: dict[str, Any] = field(default_factory=dict, repr=False)
+    decision_outcome: Literal["accepted", "rejected"] | None = None
+
+
+@dataclass(frozen=True)
+class CollaborationCommentActivity:
+    """One content-free shared-comment audit event for the activity filter."""
+
+    id: int
+    actor_user_id: uuid.UUID | None
+    action: str
+    created_at: float
 
 
 @dataclass(frozen=True)
@@ -292,6 +321,56 @@ class CollaborationPolicyPage:
     events: tuple[CollaborationPolicyEvent, ...]
     current_cursor: int
     reset_required: bool = False
+
+
+@dataclass(frozen=True)
+class CollaborationCommentMessage:
+    """One shared-comment message; deleted rows retain an audit tombstone."""
+
+    message_id: uuid.UUID
+    thread_id: uuid.UUID
+    revision: int
+    author_user_id: uuid.UUID | None
+    body_markdown: str
+    mention_user_ids: tuple[uuid.UUID, ...]
+    created_at: float
+    author_guest_identity_id: uuid.UUID | None = None
+    edited_at: float | None = None
+    deleted_at: float | None = None
+
+
+@dataclass(frozen=True)
+class CollaborationCommentThread:
+    """One durable shared discussion thread and its ordered messages."""
+
+    thread_id: uuid.UUID
+    document_id: str
+    generation: int
+    revision: int
+    status: Literal["open", "resolved"]
+    created_by_user_id: uuid.UUID | None
+    resolved_by_user_id: uuid.UUID | None
+    resolved_at: float | None
+    anchor: dict[str, Any]
+    quote_text: str
+    created_at: float
+    updated_at: float
+    created_by_guest_identity_id: uuid.UUID | None = None
+    resolved_by_guest_identity_id: uuid.UUID | None = None
+    messages: tuple[CollaborationCommentMessage, ...] = ()
+
+
+@dataclass(frozen=True)
+class CollaborationCommentPage:
+    """Incremental comment snapshot at one document-scoped revision."""
+
+    threads: tuple[CollaborationCommentThread, ...]
+    revision: int
+    last_read_revision: int
+    current_revision: int | None = None
+    has_more: bool = False
+    participant_user_ids: tuple[uuid.UUID, ...] = ()
+    participant_guest_identity_ids: tuple[uuid.UUID, ...] = ()
 
 
 @runtime_checkable
@@ -485,6 +564,18 @@ class EditorCollaborationStore(Protocol):
         """List durable activity metadata without returning binary payloads."""
         ...
 
+    async def list_comment_activity(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        before_id: int | None,
+        author_user_id: uuid.UUID | None,
+        limit: int,
+    ) -> tuple[CollaborationCommentActivity, ...]:
+        """List content-free shared-comment events from the audit trail."""
+        ...
+
     async def list_open_patches(
         self,
         *,
@@ -522,6 +613,10 @@ class EditorCollaborationStore(Protocol):
         """Reconstruct a prior decision without requiring its payload hash."""
         ...
 
+    async def current_policy_cursor(self, *, tenant_id: str) -> int:
+        """Return the greatest committed tenant policy-event identifier."""
+        ...
+
     async def policy_events_after(
         self,
         *,
@@ -530,6 +625,123 @@ class EditorCollaborationStore(Protocol):
         limit: int,
     ) -> CollaborationPolicyPage:
         """Read editor/user invalidations from the existing user-events feed."""
+        ...
+
+    async def list_comment_threads(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        since_revision: int,
+        status: Literal["all", "open", "resolved"],
+        limit: int,
+    ) -> CollaborationCommentPage:
+        """List changed shared-comment threads after a durable revision."""
+        ...
+
+    async def create_comment_thread(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        anchor: dict[str, Any],
+        quote_text: str,
+        body_markdown: str,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        expected_revision: int,
+        command_id: uuid.UUID,
+        command_payload_hash: str,
+        now: float,
+    ) -> CollaborationCommentThread:
+        """Atomically create a thread, first message, audit, and refetch event."""
+        ...
+
+    async def add_comment_reply(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        body_markdown: str,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        expected_revision: int,
+        command_id: uuid.UUID,
+        command_payload_hash: str,
+        now: float,
+    ) -> CollaborationCommentThread:
+        """Append one reply using thread revision conflict detection."""
+        ...
+
+    async def update_comment_message(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        body_markdown: str | None,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        delete_message: bool,
+        expected_revision: int,
+        command_id: uuid.UUID,
+        command_payload_hash: str,
+        now: float,
+    ) -> CollaborationCommentThread:
+        """Edit or tombstone an actor-owned message."""
+        ...
+
+    async def set_comment_thread_status(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        thread_id: uuid.UUID,
+        status: Literal["open", "resolved"],
+        can_moderate: bool,
+        expected_revision: int,
+        command_id: uuid.UUID,
+        command_payload_hash: str,
+        now: float,
+    ) -> CollaborationCommentThread:
+        """Resolve/reopen a thread under author-or-moderator policy."""
+        ...
+
+    async def mark_comments_read(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str,
+        generation: int,
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None = None,
+        guest_link_id: uuid.UUID | None = None,
+        revision: int,
+        now: float,
+    ) -> int:
+        """Advance the caller's personal shared-comment read coordinate."""
         ...
 
     async def compact(

@@ -1,27 +1,355 @@
 import {
-  addKnowledgeDocument,
+  cancelIndexingJob,
   createKnowledgeCollection,
   deleteKnowledgeCollection,
-  fetchKnowledgeDocumentText,
-  ingestKnowledgeFile,
+  getAssetDeletionOperation,
+  getIndexingJob,
+  listKnowledgeDocuments,
+  startDocumentRevisionJob,
+  streamIndexingJobEvents,
 } from '@/api/inqtrixClient'
+import type {
+  IndexingJobEvent,
+  IndexingJobSnapshot,
+  IndexingJobSummary,
+} from './indexingTypes'
+import type { ServerDeletionOperation } from '@/api/inqtrixClient'
 import type { FileAssetRecord, VectorIndexRecord } from '@/features/project/types'
+
+/** How many immutable revisions may be reserved concurrently. The POSTs are
+ * short: provider work runs in the existing server job queue and this client
+ * only subscribes to durable progress. */
+const INGEST_CONCURRENCY = 3
+const EVENT_RECONNECT_BASE_MS = 250
+const EVENT_RECONNECT_MAX_MS = 5_000
+
+const ACTIVE_JOB_STATUSES = new Set([
+  'queued',
+  'running',
+  'cancelling',
+])
+
+class DocumentRevisionJobError extends Error {
+  readonly jobId: string
+  readonly summary: IndexingJobSummary
+
+  constructor(job: IndexingJobSummary, message: string) {
+    super(message)
+    this.name = 'DocumentRevisionJobError'
+    this.jobId = job.job_id
+    this.summary = job
+  }
+}
+
+type KnowledgeMemberFailure = {
+  error: unknown
+  fileId: string
+  position: number
+}
+
+class KnowledgeAssetIngestError extends Error {
+  readonly failures: KnowledgeMemberFailure[]
+  readonly partial: KnowledgeAssetIngestResult
+
+  constructor(
+    partial: KnowledgeAssetIngestResult,
+    failures: KnowledgeMemberFailure[],
+  ) {
+    const ordered = [...failures].sort((left, right) => left.position - right.position)
+    const primary = ordered[0]?.error
+    super(primary instanceof Error ? primary.message : String(primary))
+    this.name = 'KnowledgeAssetIngestError'
+    this.failures = ordered
+    this.partial = partial
+  }
+}
+
+export type PausedDocumentRevision = {
+  fileId: string
+  summary: IndexingJobSummary
+  status: 'paused_dependency' | 'paused_validation'
+}
+
+/** A first build or incremental add stopped after some durable work had
+ * already succeeded. The collection and confirmed document ids are preserved;
+ * callers adopt this partial truth before showing the failure or pause. */
+export class KnowledgeReindexPartialError extends Error {
+  readonly failures: ReadonlyArray<{ fileId: string; message: string }>
+  readonly pausedJobs: PausedDocumentRevision[]
+  readonly result: KnowledgeReindexResult
+
+  constructor(
+    result: KnowledgeReindexResult,
+    failures: KnowledgeMemberFailure[],
+  ) {
+    const ordered = [...failures].sort((left, right) => left.position - right.position)
+    const primary = ordered[0]?.error
+    super(primary instanceof Error ? primary.message : String(primary))
+    this.name = 'KnowledgeReindexPartialError'
+    this.result = result
+    this.failures = ordered.map(({ error, fileId }) => ({
+      fileId,
+      message: error instanceof Error ? error.message : String(error),
+    }))
+    this.pausedJobs = ordered.flatMap(({ error, fileId }) => (
+      error instanceof DocumentRevisionJobError
+      && (
+        error.summary.status === 'paused_dependency'
+        || error.summary.status === 'paused_validation'
+      )
+        ? [{
+            fileId,
+            summary: error.summary,
+            status: error.summary.status,
+          }]
+        : []
+    ))
+  }
+}
+
+function eventReconnectDelay(attempt: number): number {
+  const exponential = Math.min(
+    EVENT_RECONNECT_BASE_MS * (2 ** Math.min(attempt, 8)),
+    EVENT_RECONNECT_MAX_MS,
+  )
+  // Bounded jitter prevents many document workers from reconnecting in lockstep.
+  return Math.round(exponential * (0.75 + Math.random() * 0.5))
+}
+
+async function waitForReconnect(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, delayMs)
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function waitForDocumentRevision(
+  started: IndexingJobSummary,
+  options: KnowledgeSyncOptions,
+  onProgress?: (progress: MemberJobProgressEvent) => void,
+): Promise<{ cancelled: boolean; summary: IndexingJobSummary }> {
+  const streamController = new AbortController()
+  const cancelOptions = {
+    apiKey: options.apiKey,
+    workspaceId: options.workspaceId,
+  }
+  let parentAborted = options.signal?.aborted ?? false
+  let cancelSent = false
+  let reconnectAttempt = 0
+  let warnedAboutDisconnect = false
+  let progressFingerprint = ''
+  let lastEventSequence = 0
+  const emitSummary = (summary: IndexingJobSummary) => {
+    if (!ACTIVE_JOB_STATUSES.has(summary.status)) return
+    onProgress?.({
+      currentBatch: summary.current_batch,
+      phase: summary.phase,
+      queuePosition: summary.queue_position,
+      status: summary.status as MemberJobProgressEvent['status'],
+      totalBatches: summary.total_batches,
+    })
+  }
+  const emitEvent = (event: IndexingJobEvent) => {
+    // A reconnect may replay the durable history. Never move a row backwards
+    // from a newer batch to an older one.
+    if (event.sequence <= lastEventSequence) return
+    lastEventSequence = event.sequence
+    const snapshot = (event.data?.snapshot ?? {}) as IndexingJobSnapshot
+    if (event.type === 'inqtrix.index.queued') {
+      const position = event.data?.queue_position
+      onProgress?.({
+        currentBatch: snapshot.current_batch,
+        phase: snapshot.phase,
+        queuePosition: typeof position === 'number' ? position : null,
+        status: 'queued',
+        totalBatches: snapshot.total_batches,
+      })
+    } else if (
+      event.type === 'inqtrix.index.started'
+      || event.type === 'inqtrix.index.progress'
+      || event.type === 'inqtrix.index.resumed'
+    ) {
+      onProgress?.({
+        currentBatch: snapshot.current_batch,
+        phase: snapshot.phase,
+        queuePosition: null,
+        status: 'running',
+        totalBatches: snapshot.total_batches,
+      })
+    } else if (event.type === 'inqtrix.index.cancelling') {
+      onProgress?.({
+        currentBatch: snapshot.current_batch,
+        phase: snapshot.phase,
+        queuePosition: null,
+        status: 'cancelling',
+        totalBatches: snapshot.total_batches,
+      })
+    }
+  }
+  const onAbort = () => {
+    parentAborted = true
+    streamController.abort()
+  }
+  options.signal?.addEventListener('abort', onAbort, { once: true })
+  try {
+    let summary = started
+    emitSummary(summary)
+    while (ACTIVE_JOB_STATUSES.has(summary.status)) {
+      if (options.signal?.aborted) {
+        parentAborted = true
+      }
+      if (parentAborted && !cancelSent) {
+        summary = await cancelIndexingJob(started.job_id, cancelOptions)
+        cancelSent = true
+      } else if (!parentAborted) {
+        try {
+          // SSE is the primary wait primitive. A normal stream remains open
+          // until a terminal event; no summary polling runs beside it.
+          await streamIndexingJobEvents(started.events_url, {
+            ...cancelOptions,
+            signal: streamController.signal,
+            onEvent: emitEvent,
+          })
+        } catch (error) {
+          // Transport loss cannot decide the durable job outcome. Reconnect
+          // below with bounded backoff; warn once instead of flooding logs.
+          if (!streamController.signal.aborted && !warnedAboutDisconnect) {
+            warnedAboutDisconnect = true
+            console.warn('Document indexing event stream disconnected.', error)
+          }
+        }
+        summary = options.signal?.aborted
+          ? await cancelIndexingJob(started.job_id, cancelOptions)
+          : await getIndexingJob(started.job_id, cancelOptions)
+        emitSummary(summary)
+        if (options.signal?.aborted) {
+          parentAborted = true
+          cancelSent = true
+        }
+      } else {
+        summary = await getIndexingJob(started.job_id, cancelOptions)
+        emitSummary(summary)
+      }
+
+      if (!ACTIVE_JOB_STATUSES.has(summary.status)) break
+      const nextFingerprint = [
+        summary.status,
+        summary.phase,
+        summary.current_batch,
+        summary.completed_documents,
+      ].join(':')
+      reconnectAttempt = nextFingerprint === progressFingerprint
+        ? reconnectAttempt + 1
+        : 0
+      progressFingerprint = nextFingerprint
+      // Once the caller aborts, the original signal is permanently aborted.
+      // Cancellation still needs bounded status observation until the server
+      // confirms a terminal state; reusing that signal would resolve every
+      // delay immediately and create a tight GET loop.
+      await waitForReconnect(
+        eventReconnectDelay(reconnectAttempt),
+        parentAborted ? undefined : options.signal,
+      )
+    }
+    if (summary.status === 'completed' || summary.status === 'ready_raw_by_user_choice') {
+      return { cancelled: false, summary }
+    }
+    if (summary.status === 'cancelled') {
+      return { cancelled: true, summary }
+    }
+    const message = summary.error?.message
+      ?? (summary.status === 'superseded'
+        ? 'A newer document revision superseded this indexing job.'
+        : `Document indexing stopped with status ${summary.status}.`)
+    throw new DocumentRevisionJobError(summary, message)
+  } finally {
+    options.signal?.removeEventListener('abort', onAbort)
+    streamController.abort()
+  }
+}
 
 /** Connection facts needed to talk to the knowledge backend. */
 export type KnowledgeSyncOptions = {
   apiKey?: string
+  /** Aborts the run: in-flight requests reject and no further document is
+   * started. The partial result is returned with `cancelled` set, so the
+   * caller can keep what was actually embedded. */
+  signal?: AbortSignal
   /**
-   * Prefer server-side file ingestion (`file_id`) over browser-extracted
-   * text for assets that carry a `serverFileId`. Set when the backend
-   * advertises `features.document_parser` — the server then parses the
-   * ORIGINAL file (better PDF/DOCX fidelity than browser extraction).
+   * Compatibility capability hint retained for callers on mixed server
+   * versions. Current servers require every uploaded file asset to reference
+   * its operation-fenced canonical preparation; browser extraction is never
+   * promoted to knowledge-source authority.
    */
   useFileIngestion?: boolean
   workspaceId?: string
 }
 
+/** Whether a rejection is the run's own abort rather than a real failure. */
+export function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+/** Options for the cleanup that runs AFTER a run was aborted. It must not
+ * carry the run's signal: an already-aborted signal makes fetch reject
+ * before the request is sent, so the collection we mean to remove would
+ * silently survive. */
+function cleanupOptions(options: KnowledgeSyncOptions): KnowledgeSyncOptions {
+  return { ...options, signal: undefined }
+}
+
+async function waitForCollectionDeletion(
+  started: ServerDeletionOperation,
+  options: KnowledgeSyncOptions,
+): Promise<void> {
+  let current = started
+  let unchangedAttempts = 0
+  let fingerprint = ''
+  while (current.status === 'queued' || current.status === 'running') {
+    const nextFingerprint = [
+      current.status,
+      current.stage,
+      current.completed_items,
+    ].join(':')
+    unchangedAttempts = nextFingerprint === fingerprint
+      ? unchangedAttempts + 1
+      : 0
+    fingerprint = nextFingerprint
+    await waitForReconnect(eventReconnectDelay(unchangedAttempts), options.signal)
+    current = await getAssetDeletionOperation(current.operation_id, options)
+  }
+  if (current.status !== 'deleted') {
+    throw new Error(
+      current.error?.message
+      ?? `Collection deletion stopped with status ${current.status}.`,
+    )
+  }
+}
+
+async function deleteCollectionAndWait(
+  collectionId: string,
+  options: KnowledgeSyncOptions,
+): Promise<void> {
+  const safeOptions = cleanupOptions(options)
+  const operation = await deleteKnowledgeCollection(collectionId, safeOptions)
+  await waitForCollectionDeletion(operation, safeOptions)
+}
+
 export type KnowledgeReindexResult = {
-  collectionId: string
+  /** `null` only when a cancelled first build embedded nothing and its empty
+   * collection was removed again — there is then no collection to adopt. */
+  collectionId: string | null
+  /** The run stopped early because the caller aborted it. Everything reported
+   * here still landed on the server and must be kept. */
+  cancelled: boolean
   /** Embedding model the collection was built/extended with — persisted on the
    * index so a later reindex can tell "model changed" from "docs added". */
   serverCollectionModel: string
@@ -35,10 +363,9 @@ export type KnowledgeReindexResult = {
   skippedFiles: string[]
   uploadedDocuments: number
   /**
-   * Assets the server (MarkItDown) parsed during this run, with the
-   * resulting text. The caller back-fills these into the library so the
-   * stored `extractedText` + `parserId` upgrade from the fast client parse to
-   * the higher-fidelity server parse (and a later re-index reuses it).
+   * Compatibility field for older callers. Canonical parsing now belongs to
+   * the durable upload operation and is projected through asset sync, so a
+   * document-revision run never returns ad-hoc reparsed text.
    */
   reparsed: { assetId: string; text: string }[]
   /** fileId -> backend knowledge-document id for each member ingested this run
@@ -46,17 +373,16 @@ export type KnowledgeReindexResult = {
   serverDocumentIds: Record<string, string>
 }
 
-/** Whether an asset should be ingested by `file_id` (server re-parses the
- * original) rather than by its stored text. When the stored text is already
- * `markitdown`-grade the upload would just re-produce it, so embed it directly
- * and skip the redundant S3 fetch + parse. */
-function canUseFile(asset: FileAssetRecord, options: KnowledgeSyncOptions): boolean {
-  return Boolean(
-    options.useFileIngestion && asset.serverFileId && asset.parserId !== 'markitdown',
-  )
+/** Uploaded assets are indexed only through their stable asset identity. The
+ * revision endpoint validates the canonical extract against the original file
+ * digest before reserving any work. */
+function hasServerSource(asset: FileAssetRecord): boolean {
+  return Boolean(asset.serverFileId)
 }
 
 export type KnowledgeAssetIngestResult = {
+  /** The run was aborted before every member was processed. */
+  cancelled: boolean
   embeddedFileIds: string[]
   skippedFileIds: string[]
   skippedFiles: string[]
@@ -76,6 +402,44 @@ export type MemberProgress = (event: {
   embedded: boolean
 }) => void
 
+/** Fired when a member's ingest STARTS, before its request goes out. The only
+ * signal available during the long synchronous server-side embed, so the UI
+ * can name the documents it is working on instead of sitting at zero.
+ * `done` is the CONFIRMED completion count, never the queue position —
+ * several members are in flight at once, so a position would overstate
+ * progress and then jump backwards on the next completion. */
+export type MemberStart = (event: {
+  fileId: string
+  done: number
+  total: number
+}) => void
+
+/** Fired when a member's ingest failed. Not an outcome the index records —
+ * the run fails as a whole — but the caller must stop presenting it as work
+ * in progress. */
+export type MemberFailed = (event: { fileId: string }) => void
+
+/** Authoritative live state of one durable document-revision job. Batch
+ * counters describe contextualization batches, not guessed document chunks. */
+export type MemberJobProgressEvent = {
+  currentBatch?: number
+  phase?: string
+  queuePosition?: number | null
+  status: 'queued' | 'running' | 'cancelling'
+  totalBatches?: number
+}
+
+export type MemberJobProgress = (
+  event: MemberJobProgressEvent & { fileId: string },
+) => void
+
+export type IngestProgress = {
+  onMemberDone?: MemberProgress
+  onMemberFailed?: MemberFailed
+  onMemberJobProgress?: MemberJobProgress
+  onMemberStart?: MemberStart
+}
+
 /** Ingest a list of member assets into an EXISTING collection id. Defined once
  * (design principle 4) and shared by the rebuild-from-scratch path and the
  * incremental add path. Members with neither usable text nor file ingestion are
@@ -85,7 +449,11 @@ async function ingestMembersIntoCollection(
   collectionId: string,
   memberAssets: FileAssetRecord[],
   options: KnowledgeSyncOptions,
-  onMemberDone?: MemberProgress,
+  progress?: IngestProgress,
+  /** fileId -> existing knowledge-document id. Members listed here are already
+   * on the server and are adopted instead of re-ingested (resume after a
+   * cancelled run; the server finishes an aborted request's document). */
+  existingDocumentIds?: ReadonlyMap<string, string>,
 ): Promise<KnowledgeAssetIngestResult> {
   const embeddedFileIds: string[] = []
   const skippedFileIds: string[] = []
@@ -94,73 +462,159 @@ async function ingestMembersIntoCollection(
   const serverDocumentIds: Record<string, string> = {}
   const total = memberAssets.length
   let done = 0
-  for (const asset of memberAssets) {
-    const useFile = canUseFile(asset, options)
-    if (!useFile && asset.extractedText.trim().length === 0) {
+  let cancelled = false
+
+  const settle = (asset: FileAssetRecord, embedded: boolean) => {
+    done += 1
+    progress?.onMemberDone?.({ fileId: asset.id, done, total, embedded })
+  }
+
+  const ingestOne = async (asset: FileAssetRecord) => {
+    progress?.onMemberStart?.({ fileId: asset.id, done, total })
+    const adopted = existingDocumentIds?.get(asset.id)
+    if (adopted) {
+      // Already on the server from an earlier (cancelled) run — count it,
+      // never pay for a second embedding of the same document.
+      embeddedFileIds.push(asset.id)
+      serverDocumentIds[asset.id] = adopted
+      settle(asset, true)
+      return
+    }
+    const useServerSource = hasServerSource(asset)
+    if (!useServerSource) {
       skippedFileIds.push(asset.id)
       skippedFiles.push(asset.label)
-    } else if (useFile) {
-      const document = await ingestKnowledgeFile(
-        collectionId,
-        {
-          fileId: asset.serverFileId as string,
-          // `fileId` = the local asset id (member mapping); `file_id` = the
-          // SERVER file id (when uploaded) so the knowledge citation viewer can
-          // load the original PDF for the page-jump. Omitted when there is no
-          // server file (text-only docs) → the viewer shows no source PDF.
-          metadata: {
-            fileId: asset.id,
-            fileName: asset.fileName,
-            ...(asset.serverFileId ? { file_id: asset.serverFileId } : {}),
-          },
-          title: asset.title,
-        },
-        options,
-      )
-      embeddedFileIds.push(asset.id)
-      serverDocumentIds[asset.id] = document.id
-      // The server just parsed the original with MarkItDown — read that text
-      // back so the caller can upgrade the library asset's text + provenance.
-      // Best-effort: indexing already succeeded, so a failed read only forgoes
-      // the label upgrade, it does not fail the run.
-      try {
-        const parsedText = await fetchKnowledgeDocumentText(document.id, options)
-        reparsed.push({ assetId: asset.id, text: parsedText.text })
-      } catch {
-        // Leave provenance as 'client'; the embeddings are still server-grade.
-      }
-    } else {
-      const document = await addKnowledgeDocument(
-        collectionId,
-        {
-          // `fileId` = the local asset id (member mapping); `file_id` = the
-          // SERVER file id (when uploaded) so the knowledge citation viewer can
-          // load the original PDF for the page-jump. Omitted when there is no
-          // server file (text-only docs) → the viewer shows no source PDF.
-          metadata: {
-            fileId: asset.id,
-            fileName: asset.fileName,
-            ...(asset.serverFileId ? { file_id: asset.serverFileId } : {}),
-          },
-          text: asset.extractedText,
-          title: asset.title,
-        },
-        options,
-      )
-      embeddedFileIds.push(asset.id)
-      serverDocumentIds[asset.id] = document.id
+      settle(asset, false)
+      return
     }
-    // Report this member's REAL, server-confirmed outcome so the caller can
-    // advance the progress bar + flip the file row live (never cosmetic).
-    done += 1
-    onMemberDone?.({
+    // `fileId` = the local asset id (member mapping); `file_id` = the SERVER
+    // file id (when uploaded) so the knowledge citation viewer can load the
+    // original PDF for the page-jump. Omitted when there is no server file
+    // (text-only docs) → the viewer shows no source PDF.
+    const metadata = {
       fileId: asset.id,
-      done,
-      total,
-      embedded: !skippedFileIds.includes(asset.id),
-    })
+      fileName: asset.fileName,
+      ...(asset.serverFileId ? { file_id: asset.serverFileId } : {}),
+    }
+    const started = await startDocumentRevisionJob(
+      collectionId,
+      { assetId: asset.id, metadata, title: asset.title },
+      { ...options, signal: undefined },
+    )
+    const outcome = await waitForDocumentRevision(
+      started,
+      options,
+      (jobProgress) => progress?.onMemberJobProgress?.({
+        ...jobProgress,
+        fileId: asset.id,
+      }),
+    )
+    if (outcome.cancelled) {
+      cancelled = true
+      return
+    }
+    const documentId = outcome.summary.document_id
+    if (!documentId) {
+      throw new DocumentRevisionJobError(
+        outcome.summary,
+        'Completed document indexing job did not return a document id.',
+      )
+    }
+    embeddedFileIds.push(asset.id)
+    serverDocumentIds[asset.id] = documentId
+    settle(asset, true)
   }
-  return { embeddedFileIds, skippedFileIds, skippedFiles, reparsed, serverDocumentIds }
+
+  // Bounded worker pool: several documents embed at once, but the queue is
+  // shared so the endpoint never sees more than INGEST_CONCURRENCY at a time.
+  // Every worker re-checks both stop conditions before taking more work, so a
+  // cancel OR a sibling's failure ends the run within one in-flight request
+  // instead of walking the rest of the queue.
+  let cursor = 0
+  const failures: KnowledgeMemberFailure[] = []
+  let stopTakingWork = false
+  const worker = async () => {
+    while (cursor < memberAssets.length) {
+      if (stopTakingWork) return
+      if (options.signal?.aborted) {
+        cancelled = true
+        return
+      }
+      const position = cursor
+      cursor += 1
+      try {
+        await ingestOne(memberAssets[position])
+      } catch (error) {
+        if (isAbortError(error)) {
+          cancelled = true
+          return
+        }
+        // First failure wins and stops every worker. Keeping the others
+        // running would start fresh provider work after the dependency has
+        // already failed. Requests already in flight are allowed to settle so
+        // their confirmed work can be adopted instead of being deleted.
+        progress?.onMemberFailed?.({ fileId: memberAssets[position].id })
+        failures.push({
+          error,
+          fileId: memberAssets[position].id,
+          position,
+        })
+        stopTakingWork = true
+        return
+      }
+    }
+  }
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(INGEST_CONCURRENCY, memberAssets.length)) },
+    worker,
+  )
+  // Wait for EVERY already-started worker to settle. Their successful
+  // documents are durable truth and must be returned even when a sibling
+  // pauses or fails.
+  await Promise.all(workers)
+  const partial = {
+    cancelled,
+    embeddedFileIds,
+    skippedFileIds,
+    skippedFiles,
+    reparsed,
+    serverDocumentIds,
+  }
+  if (failures.length > 0) {
+    for (const failure of failures) {
+      if (
+        failure.error instanceof DocumentRevisionJobError
+        && failure.error.summary.document_id
+      ) {
+        serverDocumentIds[failure.fileId] = failure.error.summary.document_id
+      }
+    }
+    throw new KnowledgeAssetIngestError(partial, failures)
+  }
+
+  return partial
+}
+
+/** Map the collection's already-ingested documents by their local asset id.
+ * A failed listing FAILS the run: without this map a resumed run re-ingests
+ * documents the collection already holds, and the duplicate carries the same
+ * `metadata.fileId` while only the newer id is tracked — the older copy then
+ * stays searchable forever and cannot be removed from the UI. */
+async function existingDocumentIdsByFileId(
+  collectionId: string,
+  options: KnowledgeSyncOptions,
+): Promise<Map<string, string>> {
+  const byFileId = new Map<string, string>()
+  let cursor: string | undefined
+  do {
+    const page = await listKnowledgeDocuments(collectionId, { ...options, cursor, limit: 100 })
+    for (const document of page.data) {
+      const fileId = document.metadata?.fileId
+      if (typeof fileId === 'string' && !byFileId.has(fileId)) byFileId.set(fileId, document.id)
+    }
+    cursor = page.next_cursor ?? undefined
+  } while (cursor)
+  return byFileId
 }
 
 /** Create the server collection for a not-yet-built local vector index.
@@ -173,7 +627,7 @@ export async function createVectorIndexCollectionOnServer(
   index: VectorIndexRecord,
   memberAssets: FileAssetRecord[],
   options: KnowledgeSyncOptions,
-  onMemberDone?: MemberProgress,
+  progress?: IngestProgress,
 ): Promise<KnowledgeReindexResult> {
   if (index.serverCollectionId) {
     throw new Error(
@@ -189,21 +643,59 @@ export async function createVectorIndexCollectionOnServer(
   let ingest: KnowledgeAssetIngestResult
   try {
     ingest = await ingestMembersIntoCollection(
-      collection.id, memberAssets, options, onMemberDone,
+      collection.id, memberAssets, options, progress,
     )
   } catch (error) {
-    // A half-filled collection must not pose as a complete index:
-    // remove it so the visible outcome is "failed", not "ready-ish".
-    try {
-      await deleteKnowledgeCollection(collection.id, options)
-    } catch {
-      // Cleanup is best-effort; the original error is the one that matters.
+    if (error instanceof KnowledgeAssetIngestError) {
+      throw new KnowledgeReindexPartialError({
+        collectionId: collection.id,
+        cancelled: error.partial.cancelled,
+        serverCollectionModel: index.model,
+        embeddedFileIds: error.partial.embeddedFileIds,
+        skippedFileIds: error.partial.skippedFileIds,
+        skippedFiles: error.partial.skippedFiles,
+        uploadedDocuments: error.partial.embeddedFileIds.length,
+        reparsed: error.partial.reparsed,
+        serverDocumentIds: error.partial.serverDocumentIds,
+      }, error.failures)
     }
+    // The collection exists and is the only stable address for diagnosing or
+    // retrying this first build. Never destroy it as compensation for a child
+    // failure; an explicit user deletion remains the sole destructive path.
     throw error
   }
 
+  if (ingest.cancelled && ingest.embeddedFileIds.length === 0) {
+    // Cancelled before anything landed: the empty collection would surface as
+    // a phantom the user never asked for. Report "no collection" only after
+    // the durable deletion operation proves that teardown is complete.
+    let collectionRemoved = false
+    try {
+      await deleteCollectionAndWait(collection.id, options)
+      collectionRemoved = true
+    } catch {
+      // Preserve the server identity when deletion is unresolved. Returning
+      // null here would turn a failed async teardown into a false terminal
+      // success and leave the collection impossible to address from the UI.
+    }
+    return {
+      collectionId: collectionRemoved ? null : collection.id,
+      cancelled: true,
+      serverCollectionModel: index.model,
+      embeddedFileIds: [],
+      skippedFileIds: ingest.skippedFileIds,
+      skippedFiles: ingest.skippedFiles,
+      uploadedDocuments: 0,
+      reparsed: ingest.reparsed,
+      serverDocumentIds: {},
+    }
+  }
+
+  // A cancelled run that DID embed documents keeps its collection: those
+  // embeddings are real and the index adopts them (a later run resumes).
   return {
     collectionId: collection.id,
+    cancelled: ingest.cancelled,
     serverCollectionModel: index.model,
     embeddedFileIds: ingest.embeddedFileIds,
     skippedFileIds: ingest.skippedFileIds,
@@ -221,9 +713,9 @@ export async function ingestAssetsIntoKnowledgeCollection(
   collectionId: string,
   assets: FileAssetRecord[],
   options: KnowledgeSyncOptions,
-  onMemberDone?: MemberProgress,
+  progress?: IngestProgress,
 ): Promise<KnowledgeAssetIngestResult> {
-  return ingestMembersIntoCollection(collectionId, assets, options, onMemberDone)
+  return ingestMembersIntoCollection(collectionId, assets, options, progress)
 }
 
 /** Incrementally ingest the index's newly-added (pending) members into its
@@ -237,21 +729,45 @@ export async function ingestNewVectorIndexMembers(
   index: VectorIndexRecord,
   pendingMemberAssets: FileAssetRecord[],
   options: KnowledgeSyncOptions,
-  onMemberDone?: MemberProgress,
+  progress?: IngestProgress,
 ): Promise<KnowledgeReindexResult> {
   if (!index.serverCollectionId) {
     throw new Error(
       'ingestNewVectorIndexMembers requires an existing server collection.',
     )
   }
-  const ingest = await ingestMembersIntoCollection(
-    index.serverCollectionId,
-    pendingMemberAssets,
-    options,
-    onMemberDone,
-  )
+  // Adopt what the collection already holds instead of embedding it twice.
+  // A cancelled run can leave a document the server finished after the client
+  // stopped listening, and a resumed run must not pay for it again.
+  const existing = await existingDocumentIdsByFileId(index.serverCollectionId, options)
+  let ingest: KnowledgeAssetIngestResult
+  try {
+    ingest = await ingestMembersIntoCollection(
+      index.serverCollectionId,
+      pendingMemberAssets,
+      options,
+      progress,
+      existing,
+    )
+  } catch (error) {
+    if (error instanceof KnowledgeAssetIngestError) {
+      throw new KnowledgeReindexPartialError({
+        collectionId: index.serverCollectionId,
+        cancelled: error.partial.cancelled,
+        serverCollectionModel: index.serverCollectionModel ?? index.model,
+        embeddedFileIds: error.partial.embeddedFileIds,
+        skippedFileIds: error.partial.skippedFileIds,
+        skippedFiles: error.partial.skippedFiles,
+        uploadedDocuments: error.partial.embeddedFileIds.length,
+        reparsed: error.partial.reparsed,
+        serverDocumentIds: error.partial.serverDocumentIds,
+      }, error.failures)
+    }
+    throw error
+  }
   return {
     collectionId: index.serverCollectionId,
+    cancelled: ingest.cancelled,
     serverCollectionModel: index.serverCollectionModel ?? index.model,
     embeddedFileIds: ingest.embeddedFileIds,
     skippedFileIds: ingest.skippedFileIds,

@@ -1,6 +1,6 @@
 # LDAP stack walkthrough (bind against a directory with LLDAP)
 
-> Files: `deploy/compose/compose.dev.yaml`, `src/inqtrix/auth/ldap.py`, `src/inqtrix/server/routers/auth.py`
+> Files: `deploy/compose/compose.stack.yaml`, `deploy/compose/compose.dev-ports.yaml`, `src/inqtrix/auth/ldap.py`, `src/inqtrix/server/routers/auth.py`
 >
 > Every `INQTRIX_LDAP_*` / `INQTRIX_AUTH_MODE` variable (defaults, allowed values) is defined in [`docs/configuration/settings-and-env.md`](../../docs/configuration/settings-and-env.md), the single source of truth for env vars; this page is the walkthrough.
 
@@ -20,15 +20,30 @@ Inqtrix never runs an LDAP server and never stores the password: it does
 the portable **search-then-bind** (bind as a read-only service account,
 search for the user DN, then re-bind as that DN with the user's
 password). LDAP logins reuse the exact session-cookie + CSRF + PAT
-machinery as OIDC (ADR-AUTH-3); only the login transport differs.
+machinery as OIDC; only the login transport differs.
 
 ## 1. Start the directory
 
-LLDAP is gated behind the compose profile `ldap`; a plain `up -d` keeps
-the zero-auth default stack:
+LLDAP is gated behind the compose profile `ldap`; without that profile Compose
+does not start the bundled directory and leaves the configured authentication
+mode unchanged. Start from the named local pair described in the
+[local infrastructure guide](../../docs/development/local-infrastructure.md#start--stop). Keep the
+LDAP topology in `deploy/.env.stack.local`, and add these credentials only to
+`deploy/.env.stack.secrets.local`:
+
+```dotenv
+INQTRIX_LDAP_BIND_PASSWORD=replace-with-a-local-bind-password
+INQTRIX_LLDAP_JWT_SECRET=replace-with-an-independent-jwt-secret
+INQTRIX_LLDAP_KEY_SEED=replace-with-an-independent-key-seed
+```
 
 ```bash
-podman compose -f deploy/compose/compose.dev.yaml --profile ldap up -d lldap
+podman compose \
+  -f deploy/compose/compose.stack.yaml \
+  -f deploy/compose/compose.dev-ports.yaml \
+  --env-file deploy/.env.stack.secrets.local \
+  --env-file deploy/.env.stack.local \
+  --profile ldap up -d lldap
 ```
 
 (`docker compose` works identically.) It publishes two loopback ports:
@@ -36,12 +51,12 @@ LDAP on `3890` (the host-side API binds here) and a setup web UI on
 `17170`. The compose service bootstraps the base DN `dc=example,dc=com`
 and the admin account `cn=admin,ou=people,dc=example,dc=com` with the
 password from `INQTRIX_LDAP_BIND_PASSWORD` (default
-`inqtrix-dev-ldap-password`).
+is intentionally absent; use the value from the selected secret file).
 
 ## 2. Create a demo user
 
-Open `http://127.0.0.1:17170` and sign in as `admin` /
-`inqtrix-dev-ldap-password`. Create a user — e.g. user id `bob`, email
+Open `http://127.0.0.1:17170` and sign in as `admin` with the selected
+`INQTRIX_LDAP_BIND_PASSWORD`. Create a user — e.g. user id `bob`, email
 `bob@example.com`, and set a password. (Optionally add `bob` to the
 built-in `lldap_admin` group to exercise the admin-group mapping in
 step 4.)
@@ -56,7 +71,7 @@ Every webserver-stack script builds its auth provider through
 | `INQTRIX_AUTH_MODE` | `ldap` | Explicit mode; missing connection settings fail loud at startup. |
 | `INQTRIX_LDAP_URL` | `ldap://127.0.0.1:3890` | `ldaps://host:636` or add `INQTRIX_LDAP_START_TLS=true` for real directories — never bind plaintext over an untrusted network. |
 | `INQTRIX_LDAP_BIND_DN` | `cn=admin,ou=people,dc=example,dc=com` | Read-only service account that can search users. |
-| `INQTRIX_LDAP_BIND_PASSWORD` | `inqtrix-dev-ldap-password` | Same value feeds the LLDAP container, so a single export covers both sides. |
+| `INQTRIX_LDAP_BIND_PASSWORD` | the value selected above | Same value feeds the LLDAP container and host-side API; keep it in the private companion file and export it only into the API process. |
 | `INQTRIX_LDAP_USER_SEARCH_BASE` | `ou=people,dc=example,dc=com` | Subtree searched for the login. |
 | `INQTRIX_LDAP_USER_SEARCH_FILTER` | `(uid={username})` | `{username}` is RFC 4515-escaped before the search (LDAP-injection defense). AD uses `(sAMAccountName={username})`. |
 | `INQTRIX_LDAP_ID_ATTR` | `uid` | Stable subject id. LLDAP keys on `uid`; OpenLDAP uses `entryUUID`, AD `objectGUID` (binary — rendered as a canonical GUID). Prefer a non-reassignable attribute in production. |
@@ -68,11 +83,17 @@ Every webserver-stack script builds its auth provider through
 `mail` (email) and `cn` (display name) are the Inqtrix defaults and match
 LLDAP, so no override is needed.
 
+Install the project once with either `uv sync --extra dev` or a standard
+environment created with `python -m venv .venv` followed by
+`python -m pip install -e ".[dev]"`. The following block uses plain Python;
+uv users can replace its final command with
+`uv run python examples/webserver_stacks/anthropic_perplexity.py`.
+
 ```bash
 INQTRIX_AUTH_MODE=ldap \
 INQTRIX_LDAP_URL=ldap://127.0.0.1:3890 \
 INQTRIX_LDAP_BIND_DN=cn=admin,ou=people,dc=example,dc=com \
-INQTRIX_LDAP_BIND_PASSWORD=inqtrix-dev-ldap-password \
+INQTRIX_LDAP_BIND_PASSWORD=replace-with-the-same-local-bind-password \
 INQTRIX_LDAP_USER_SEARCH_BASE=ou=people,dc=example,dc=com \
 INQTRIX_LDAP_USER_SEARCH_FILTER='(uid={username})' \
 INQTRIX_LDAP_ID_ATTR=uid \
@@ -80,13 +101,14 @@ INQTRIX_LDAP_ADMIN_GROUP_DN=cn=lldap_admin,ou=groups,dc=example,dc=com \
 INQTRIX_SESSION_SECRET=dev-session-secret-change-me \
 INQTRIX_PAT_PEPPER=dev-pat-pepper-change-me \
 INQTRIX_OIDC_INSECURE_DEV_COOKIES=true \
-uv run python examples/webserver_stacks/anthropic_perplexity.py
+python examples/webserver_stacks/anthropic_perplexity.py
 ```
 
-Any other stack script (or `uv run python -m inqtrix`) accepts the same
-variables. The startup log line records `auth_mode=ldap`. A missing
-connection setting (URL, bind DN/password, search base) fails loud at
-startup, naming the variable.
+Any other stack script accepts the same variables. The env-only server starts
+with `uv run python -m inqtrix` or, after the pip installation,
+`python -m inqtrix`. The startup log line records `auth_mode=ldap`. A missing
+connection setting (URL, bind DN/password, search base) fails loud at startup,
+naming the variable.
 
 ## 4. Verify over curl
 
@@ -136,22 +158,29 @@ profile, but **internal** to the compose network (only the setup web UI
 is published):
 
 ```bash
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack \
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack \
   --profile ldap up -d
 ```
 
-Set `INQTRIX_AUTH_MODE=ldap` in `deploy/.env.stack` and point Inqtrix at
-the service by name (no host port for LDAP — the API container reaches it
-over the network):
+Set `INQTRIX_AUTH_MODE=ldap` in `deploy/.env.stack` and point Inqtrix at the
+service by name (no host port for LDAP — the API container reaches it over the
+network). Keep only visible directory configuration in this file:
 
 ```dotenv
 INQTRIX_AUTH_MODE=ldap
 INQTRIX_LDAP_URL=ldap://lldap:3890
 INQTRIX_LDAP_BIND_DN=cn=admin,ou=people,dc=example,dc=com
-INQTRIX_LDAP_BIND_PASSWORD=inqtrix-ldap-password   # the LLDAP_LDAP_USER_PASS default
 INQTRIX_LDAP_USER_SEARCH_BASE=ou=people,dc=example,dc=com
 INQTRIX_LDAP_USER_SEARCH_FILTER=(uid={username})
 INQTRIX_LDAP_ID_ATTR=uid
+```
+
+Put the corresponding credential in `deploy/.env.stack.secrets`:
+
+```dotenv
+INQTRIX_LDAP_BIND_PASSWORD=replace-with-the-lldap-bind-password
 ```
 
 Open the setup UI on `http://127.0.0.1:17170` to create users, then sign

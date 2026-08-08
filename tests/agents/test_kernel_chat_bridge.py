@@ -1,4 +1,4 @@
-"""Kernel chat bridge contract (plan M2 step 2).
+"""Kernel chat bridge contract.
 
 Secures: the LangChain -> OpenAI message translation (roles, tool-call
 re-serialization, tool_call_id threading), the ChatTurn -> AIMessage

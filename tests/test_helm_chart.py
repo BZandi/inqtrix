@@ -27,10 +27,52 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _template(*set_args: str, extra: list[str] | None = None) -> str:
-    """Render the chart, raising on a helm error (so fail-guards are testable)."""
+def _template(
+    *set_args: str,
+    extra: list[str] | None = None,
+    allow_unpinned: bool = True,
+    inject_bundled_credentials: bool = True,
+) -> str:
+    """Render the chart, raising on a Helm error.
+
+    Existing functional tests model local chart development and opt into
+    tag-only first-party images. Dedicated supply-chain tests exercise the
+    production default with ``allow_unpinned=False``.
+    """
+    effective_set_args = list(set_args)
+    if inject_bundled_credentials:
+        bundled_credentials = (
+            (
+                "postgres.enabled=true",
+                "postgres.auth.password=",
+                "postgres.auth.password=SyntheticPostgres2026",
+            ),
+            (
+                "valkey.enabled=true",
+                "valkey.password=",
+                "valkey.password=SyntheticValkey2026",
+            ),
+            (
+                "qdrant.enabled=true",
+                "qdrant.apiKey=",
+                "qdrant.apiKey=SyntheticQdrant2026",
+            ),
+            (
+                "s3.enabled=true",
+                "s3.secretKey=",
+                "s3.secretKey=SyntheticMinio2026",
+            ),
+        )
+        for enabled, prefix, credential in bundled_credentials:
+            if enabled in effective_set_args and not any(
+                item.startswith(prefix) for item in effective_set_args
+            ):
+                effective_set_args.append(credential)
+
     cmd = ["helm", "template", "rel", str(_CHART)]
-    for item in set_args:
+    if allow_unpinned:
+        cmd += ["--set", "image.allowUnpinned=true"]
+    for item in effective_set_args:
         cmd += ["--set", item]
     if extra:
         cmd += extra
@@ -64,6 +106,297 @@ def _node_collaboration_env_names() -> set[str]:
 # A database source is mandatory for the default (postgres) storage backend, so
 # every positive-path render supplies one.
 _EXTERNAL = "secret.existingSecret=app-secret"
+_MANAGED_EXTERNAL = (
+    "secret.data.INQTRIX_DATABASE_URL="
+    "postgresql+asyncpg://runtime:SyntheticDatabase2026@database:5432/inqtrix"
+)
+
+
+@pytest.mark.parametrize(
+    ("set_args", "credential_name"),
+    [
+        (("postgres.enabled=true",), "postgres.auth.password"),
+        (
+            (_MANAGED_EXTERNAL, "valkey.enabled=true"),
+            "valkey.password",
+        ),
+        (
+            (_MANAGED_EXTERNAL, "qdrant.enabled=true"),
+            "qdrant.apiKey",
+        ),
+        (
+            (_MANAGED_EXTERNAL, "s3.enabled=true"),
+            "s3.secretKey",
+        ),
+    ],
+)
+def test_bundled_services_require_explicit_credentials(
+    set_args: tuple[str, ...],
+    credential_name: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=credential_name):
+        _template(
+            *set_args,
+            inject_bundled_credentials=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("set_args", "credential_name"),
+    [
+        (
+            (
+                "postgres.enabled=true",
+                "postgres.auth.password=change-me-postgres",
+            ),
+            "postgres.auth.password",
+        ),
+        (
+            (
+                _MANAGED_EXTERNAL,
+                "valkey.enabled=true",
+                "valkey.password=change-me-valkey",
+            ),
+            "valkey.password",
+        ),
+        (
+            (
+                _MANAGED_EXTERNAL,
+                "qdrant.enabled=true",
+                "qdrant.apiKey=change-me-qdrant",
+            ),
+            "qdrant.apiKey",
+        ),
+        (
+            (
+                _MANAGED_EXTERNAL,
+                "s3.enabled=true",
+                "s3.secretKey=change-me-minio",
+            ),
+            "s3.secretKey",
+        ),
+    ],
+)
+def test_bundled_services_reject_placeholder_credentials(
+    set_args: tuple[str, ...],
+    credential_name: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=credential_name):
+        _template(
+            *set_args,
+            inject_bundled_credentials=False,
+        )
+
+
+def test_bundled_services_require_a_selected_secret() -> None:
+    with pytest.raises(RuntimeError, match="secret.create=true"):
+        _template(
+            "postgres.enabled=true",
+            "secret.create=false",
+        )
+
+
+@pytest.mark.parametrize(
+    ("set_args", "message"),
+    [
+        (
+            (
+                "postgres.enabled=true",
+                _MANAGED_EXTERNAL,
+                "postgres.auth.password=",
+            ),
+            "bundled Postgres credentials",
+        ),
+        (
+            (
+                "postgres.enabled=true",
+                "postgres.auth.password=SyntheticPostgres2026",
+                "secret.data.INQTRIX_BUNDLED_POSTGRES_PASSWORD=Different2026",
+            ),
+            "bundled Postgres credentials",
+        ),
+        (
+            (
+                _MANAGED_EXTERNAL,
+                "valkey.enabled=true",
+                "valkey.password=SyntheticValkey2026",
+                "secret.data.INQTRIX_BUNDLED_VALKEY_PASSWORD=Different2026",
+            ),
+            "bundled Valkey credentials",
+        ),
+        (
+            (
+                _MANAGED_EXTERNAL,
+                "qdrant.enabled=true",
+                "qdrant.apiKey=SyntheticQdrant2026",
+                "secret.data.INQTRIX_QDRANT_API_KEY=change-me-qdrant",
+            ),
+            "bundled Qdrant credentials",
+        ),
+        (
+            (
+                _MANAGED_EXTERNAL,
+                "s3.enabled=true",
+                "s3.secretKey=SyntheticMinio2026",
+                "secret.data.INQTRIX_S3_SECRET_KEY=DifferentMinio2026",
+            ),
+            "bundled MinIO credentials",
+        ),
+    ],
+)
+def test_bundled_credentials_reject_parallel_secret_data_sources(
+    set_args: tuple[str, ...],
+    message: str,
+) -> None:
+    """A bundled service cannot drift from its chart-derived connection."""
+    with pytest.raises(RuntimeError, match=message):
+        _template(*set_args, inject_bundled_credentials=False)
+
+
+def test_null_bundled_credential_never_renders_literal_nil() -> None:
+    """YAML null is empty input, not the credential string ``<nil>``."""
+    with pytest.raises(RuntimeError, match="qdrant.apiKey"):
+        _template(
+            _MANAGED_EXTERNAL,
+            "qdrant.enabled=true",
+            extra=["--set-json", "qdrant.apiKey=null"],
+            inject_bundled_credentials=False,
+        )
+
+
+def test_external_secret_remains_valid_for_bundled_service_credentials() -> None:
+    """Helm cannot inspect an operator-managed Secret and does not invent data."""
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            "qdrant.enabled=true",
+            inject_bundled_credentials=False,
+        )
+    )
+    qdrant = next(
+        item
+        for item in _by_kind(docs, "StatefulSet")
+        if item["metadata"]["name"].endswith("-qdrant")
+    )
+    secret_ref = qdrant["spec"]["template"]["spec"]["containers"][0]["env"][
+        -1
+    ]["valueFrom"]["secretKeyRef"]
+    assert secret_ref == {
+        "name": "app-secret",
+        "key": "INQTRIX_QDRANT_API_KEY",
+    }
+
+
+def test_chart_managed_secret_rejects_placeholder_application_values() -> None:
+    """Non-bundled secret.data values follow the same fail-closed rule."""
+    with pytest.raises(
+        RuntimeError,
+        match=r"secret\.data\.INQTRIX_DATABASE_URL",
+    ):
+        _template(
+            "secret.data.INQTRIX_DATABASE_URL=change-me-database",
+            inject_bundled_credentials=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("argument", "message"),
+    [
+        ("postgres.auth.username=user/name", "postgres.auth.username"),
+        ("postgres.auth.database=", "postgres.auth.database"),
+    ],
+)
+def test_bundled_postgres_rejects_ambiguous_dsn_components(
+    argument: str,
+    message: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        _template("postgres.enabled=true", argument)
+
+
+def test_production_images_require_immutable_digests() -> None:
+    """The chart's default refuses mutable first-party release references."""
+    with pytest.raises(RuntimeError, match="image.api.digest is required"):
+        _template(_EXTERNAL, allow_unpinned=False)
+
+
+def test_first_party_images_render_tag_and_digest() -> None:
+    """Pinned references retain a readable tag and immutable sha256 identity."""
+    api_digest = f"sha256:{'a' * 64}"
+    web_digest = f"sha256:{'b' * 64}"
+    collaboration_digest = f"sha256:{'c' * 64}"
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            "collaboration.enabled=true",
+            "collaboration.secret.existingSecret=collaboration-secret",
+            f"image.api.digest={api_digest}",
+            f"image.web.digest={web_digest}",
+            f"image.collaboration.digest={collaboration_digest}",
+            allow_unpinned=False,
+        )
+    )
+    images = {
+        container["name"]: container["image"]
+        for deployment in _by_kind(docs, "Deployment")
+        for container in deployment["spec"]["template"]["spec"]["containers"]
+    }
+    assert images["api"] == (
+        f"ghcr.io/bzandi/inqtrix-api:0.2.0@{api_digest}"
+    )
+    assert images["web"] == (
+        f"ghcr.io/bzandi/inqtrix-web:0.2.0@{web_digest}"
+    )
+    assert images["collaboration"] == (
+        "ghcr.io/bzandi/inqtrix-collaboration:"
+        f"0.2.0@{collaboration_digest}"
+    )
+
+
+def test_invalid_first_party_digest_fails_render() -> None:
+    """Malformed digest values never reach a Kubernetes workload."""
+    with pytest.raises(RuntimeError, match="64 lowercase hex"):
+        _template(
+            _EXTERNAL,
+            "image.api.digest=sha256:NOT-A-DIGEST",
+            allow_unpinned=False,
+        )
+
+
+def test_bundled_images_are_digest_pinned() -> None:
+    """Every chart-bundled demo dependency has an immutable upstream identity."""
+    docs = _docs(
+        _template(
+            "postgres.enabled=true",
+            "pgbouncer.enabled=true",
+            "qdrant.enabled=true",
+            "valkey.enabled=true",
+            "s3.enabled=true",
+        )
+    )
+    images = [
+        container["image"]
+        for workload in (
+            _by_kind(docs, "Deployment") + _by_kind(docs, "StatefulSet")
+        )
+        for container in workload["spec"]["template"]["spec"]["containers"]
+    ]
+    bundled = [
+        image
+        for image in images
+        if any(
+            marker in image
+            for marker in (
+                "postgres:",
+                "pgbouncer:",
+                "qdrant:",
+                "valkey:",
+                "minio:",
+            )
+        )
+    ]
+    assert len(bundled) == 5
+    assert all("@sha256:" in image for image in bundled)
 
 
 def test_bare_install_fails_without_database():
@@ -153,7 +486,9 @@ def test_collaboration_renders_one_private_recreate_replica() -> None:
 
     pod = deployment["spec"]["template"]["spec"]
     container = pod["containers"][0]
-    assert container["image"] == "inqtrix-collaboration:0.2.0"
+    assert container["image"] == (
+        "ghcr.io/bzandi/inqtrix-collaboration:0.2.0"
+    )
     assert "volumes" not in pod
     assert "volumeMounts" not in container
     assert "envFrom" not in container
@@ -256,7 +591,7 @@ def test_vanilla_sets_nonroot_uid_and_no_route():
     assert pod_sc["fsGroup"] == 1001
 
 
-def test_tls_ingress_wires_the_public_origin_through_nginx() -> None:
+def test_tls_ingress_wires_the_public_origin_through_web_gateway() -> None:
     """TLS termination produces one trusted HTTPS origin at web and API."""
     docs = _docs(
         _template(
@@ -289,6 +624,7 @@ def test_tls_ingress_wires_the_public_origin_through_nginx() -> None:
         for item in web["spec"]["template"]["spec"]["containers"][0]["env"]
     }
     assert env["INQTRIX_EXTERNAL_SCHEME"] == "https"
+    assert env["INQTRIX_PUBLIC_BASE_URL"] == "https://desk.example"
 
 
 def test_explicit_public_origin_overrides_ingress_derivation() -> None:
@@ -306,6 +642,46 @@ def test_explicit_public_origin_overrides_ingress_derivation() -> None:
     assert config["INQTRIX_PUBLIC_BASE_URL"] == "https://public.example"
 
 
+@pytest.mark.parametrize(
+    ("origin", "scheme"),
+    [
+        ("http://desk.example:8080", "http"),
+        ("https://desk.example", "https"),
+    ],
+)
+def test_explicit_public_origin_drives_the_same_web_scheme(
+    origin: str,
+    scheme: str,
+) -> None:
+    """A non-chart TLS boundary cannot create a gateway startup conflict."""
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            f"config.INQTRIX_PUBLIC_BASE_URL={origin}",
+        )
+    )
+    web = next(
+        item
+        for item in _by_kind(docs, "Deployment")
+        if item["metadata"]["name"].endswith("-web")
+    )
+    env = {
+        item["name"]: item["value"]
+        for item in web["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["INQTRIX_PUBLIC_BASE_URL"] == origin
+    assert env["INQTRIX_EXTERNAL_SCHEME"] == scheme
+
+
+def test_explicit_public_origin_rejects_scheme_override_conflict() -> None:
+    with pytest.raises(RuntimeError, match="must match the scheme"):
+        _template(
+            _EXTERNAL,
+            "config.INQTRIX_PUBLIC_BASE_URL=https://desk.example",
+            "web.externalScheme=http",
+        )
+
+
 def test_openshift_omits_uid_and_renders_route_not_ingress():
     rendered = _template(
         _EXTERNAL,
@@ -319,6 +695,19 @@ def test_openshift_omits_uid_and_renders_route_not_ingress():
         sc = dep["spec"]["template"]["spec"].get("securityContext", {})
         assert "runAsUser" not in sc, "OpenShift SCC assigns the UID; chart must not pin it"
         assert "fsGroup" not in sc
+
+
+@pytest.mark.parametrize("termination", ["reencrypt", "passthrough"])
+def test_openshift_rejects_uncertified_tls_termination(
+    termination: str,
+) -> None:
+    """The chart advertises only the edge-TLS mode certified in this release."""
+    with pytest.raises(RuntimeError, match="supports OpenShift edge termination only"):
+        _template(
+            _EXTERNAL,
+            "openshift.enabled=true",
+            f"route.tls.termination={termination}",
+        )
 
 
 def test_openshift_auto_host_collaboration_requires_public_origin() -> None:
@@ -373,8 +762,6 @@ def test_bundled_services_autowire_connections():
         "valkey.enabled=true",
         "worker.enabled=true",
         "s3.enabled=true",
-        "secret.data.INQTRIX_S3_ACCESS_KEY=k",
-        "secret.data.INQTRIX_S3_SECRET_KEY=s",
     )
     docs = _docs(rendered)
     names = {f"{d['kind']}/{d['metadata']['name']}" for d in docs}
@@ -513,6 +900,17 @@ def test_migrate_hook_phase_tracks_database_origin():
     assert migrate_bun["metadata"]["annotations"]["helm.sh/hook"] == "post-install,pre-upgrade"
 
 
+@pytest.mark.parametrize("rls_mode", ["owner", "bypass"])
+def test_privileged_external_migrations_require_a_separate_secret(
+    rls_mode: str,
+) -> None:
+    with pytest.raises(
+        RuntimeError,
+        match="privileged migration credentials must remain outside",
+    ):
+        _template(_EXTERNAL, f"migrations.rlsMode={rls_mode}")
+
+
 def test_migration_secret_is_scoped_to_job_and_owner_upgrade_is_confirmed():
     rendered = _template(
         _EXTERNAL,
@@ -565,16 +963,25 @@ def test_migration_secret_is_scoped_to_job_and_owner_upgrade_is_confirmed():
             "secret.data.INQTRIX_MIGRATION_DATABASE_URL=privileged",
         )
 
-    with pytest.raises(RuntimeError, match="ownerMaintenanceConfirmed"):
+    with pytest.raises(RuntimeError, match="maintenanceConfirmed"):
         _template(
             _EXTERNAL,
+            "migrations.databaseSecret.name=migration-database",
             "migrations.rlsMode=owner",
+            extra=["--is-upgrade"],
+        )
+    with pytest.raises(RuntimeError, match="maintenanceConfirmed"):
+        _template(
+            _EXTERNAL,
+            "migrations.databaseSecret.name=migration-database",
+            "migrations.rlsMode=bypass",
             extra=["--is-upgrade"],
         )
     confirmed = _template(
         _EXTERNAL,
+        "migrations.databaseSecret.name=migration-database",
         "migrations.rlsMode=owner",
-        "migrations.ownerMaintenanceConfirmed=true",
+        "migrations.maintenanceConfirmed=true",
         extra=["--is-upgrade"],
     )
     confirmed_docs = _docs(confirmed)
@@ -582,11 +989,11 @@ def test_migration_secret_is_scoped_to_job_and_owner_upgrade_is_confirmed():
     maintenance = next(
         document
         for document in _by_kind(confirmed_docs, "Job")
-        if document["metadata"]["name"].endswith("-owner-maintenance")
+        if document["metadata"]["name"].endswith("-schema-maintenance")
     )
     assert maintenance["metadata"]["annotations"]["helm.sh/hook-weight"] == "-20"
     assert maintenance["spec"]["template"]["spec"]["serviceAccountName"] == (
-        "rel-inqtrix-owner-maintenance"
+        "rel-inqtrix-schema-maintenance"
     )
     assert maintenance["spec"]["template"]["spec"][
         "automountServiceAccountToken"
@@ -602,7 +1009,7 @@ def test_migration_secret_is_scoped_to_job_and_owner_upgrade_is_confirmed():
     role = next(
         document
         for document in _by_kind(confirmed_docs, "Role")
-        if document["metadata"]["name"].endswith("-owner-maintenance")
+        if document["metadata"]["name"].endswith("-schema-maintenance")
     )
     assert {rule["resources"][0] for rule in role["rules"]} == {
         "deployments/scale",
@@ -610,6 +1017,12 @@ def test_migration_secret_is_scoped_to_job_and_owner_upgrade_is_confirmed():
         "pods",
         "rolebindings",
     }
+    scale_rule = next(
+        rule
+        for rule in role["rules"]
+        if rule["resources"] == ["deployments/scale"]
+    )
+    assert "rel-inqtrix-pgbouncer" in scale_rule["resourceNames"]
     self_revoke = next(
         rule for rule in role["rules"] if rule["resources"] == ["rolebindings"]
     )
@@ -620,11 +1033,11 @@ def test_migration_secret_is_scoped_to_job_and_owner_upgrade_is_confirmed():
         if "value" in item
     }
     assert maintenance_env["INQTRIX_K8S_MAINTENANCE_ROLE_BINDING"] == (
-        "rel-inqtrix-owner-maintenance"
+        "rel-inqtrix-schema-maintenance"
     )
 
 
-def test_owner_upgrade_reactivates_api_hpa_only_after_migration() -> None:
+def test_schema_upgrade_reactivates_api_hpa_only_after_migration() -> None:
     owner = _docs(_template(
         _EXTERNAL,
         "api.autoscaling.enabled=true",
@@ -632,8 +1045,9 @@ def test_owner_upgrade_reactivates_api_hpa_only_after_migration() -> None:
         "config.INQTRIX_OBJECT_STORE_BACKEND=s3",
         "config.INQTRIX_S3_AUTH_MODE=default",
         "config.INQTRIX_S3_BUCKET=managed-bucket",
+        "migrations.databaseSecret.name=migration-database",
         "migrations.rlsMode=owner",
-        "migrations.ownerMaintenanceConfirmed=true",
+        "migrations.maintenanceConfirmed=true",
         extra=["--is-upgrade"],
     ))
     owner_api = next(
@@ -648,14 +1062,16 @@ def test_owner_upgrade_reactivates_api_hpa_only_after_migration() -> None:
         "config.INQTRIX_OBJECT_STORE_BACKEND=s3",
         "config.INQTRIX_S3_AUTH_MODE=default",
         "config.INQTRIX_S3_BUCKET=managed-bucket",
+        "migrations.databaseSecret.name=migration-database",
         "migrations.rlsMode=bypass",
+        "migrations.maintenanceConfirmed=true",
         extra=["--is-upgrade"],
     ))
     bypass_api = next(
         document for document in _by_kind(bypass, "Deployment")
         if document["metadata"]["name"].endswith("-api")
     )
-    assert "replicas" not in bypass_api["spec"]
+    assert bypass_api["spec"]["replicas"] == 1
 
 
 def test_byo_service_account_creates_none_and_requires_explicit_name() -> None:
@@ -696,7 +1112,66 @@ def test_byo_service_account_creates_none_and_requires_explicit_name() -> None:
 
 def test_chart_version_tracks_chart_contract_changes() -> None:
     chart = yaml.safe_load((_CHART / "Chart.yaml").read_text(encoding="utf-8"))
-    assert chart["version"] == "0.1.6"
+    assert chart["version"] == "0.1.13"
+
+
+def test_observability_tracing_env_renders_for_api_and_worker() -> None:
+    rendered = _template(
+        _EXTERNAL,
+        "worker.enabled=true",
+        "s3.enabled=true",
+        "observability.tracing.enabled=true",
+        "observability.tracing.otlpEndpoint=http://langfuse-web.langfuse.svc:3000/api/public/otel",
+        "observability.tracing.headersSecret.name=langfuse-otlp",
+        "observability.tracing.uiUrl=https://langfuse.example",
+        "observability.tracing.retentionDays=14",
+    )
+    # Both deployments share the helper: the api consumes the UI URL,
+    # the worker the retention — extra vars are inert per process.
+    assert rendered.count('value: "otlp"') >= 2
+    assert rendered.count("INQTRIX_TRACE_UI_URL") == 2
+    assert rendered.count("INQTRIX_TRACE_RETENTION_DAYS") == 2
+    assert 'value: "14"' in rendered
+    assert "langfuse-otlp" in rendered
+
+    disabled = _template(_EXTERNAL, "worker.enabled=true", "s3.enabled=true")
+    assert "INQTRIX_TRACING" not in disabled
+    assert "INQTRIX_TRACE_UI_URL" not in disabled
+    assert "INQTRIX_TRACE_RETENTION_DAYS" not in disabled
+
+
+def test_observability_file_mode_requires_and_wires_shared_spool() -> None:
+    # file mode + worker WITHOUT a shared claim: refused at render time
+    # (a pod-local spool would hide worker spans from the admin export).
+    with pytest.raises(RuntimeError, match="spoolClaim"):
+        _template(
+            _EXTERNAL,
+            "worker.enabled=true",
+            "s3.enabled=true",
+            "observability.tracing.enabled=true",
+            "observability.tracing.mode=file",
+        )
+
+    rendered = _template(
+        _EXTERNAL,
+        "worker.enabled=true",
+        "s3.enabled=true",
+        "observability.tracing.enabled=true",
+        "observability.tracing.mode=file",
+        "observability.tracing.spoolClaim=trace-spool-rwx",
+    )
+    # Both deployments mount the claim and pin the spool dir onto it.
+    assert rendered.count("claimName: trace-spool-rwx") == 2
+    assert rendered.count("mountPath: /var/lib/inqtrix/traces") == 2
+    assert rendered.count("INQTRIX_TRACE_SPOOL_DIR") == 2
+
+    # API-only file mode needs no shared claim — render must succeed.
+    api_only = _template(
+        _EXTERNAL,
+        "observability.tracing.enabled=true",
+        "observability.tracing.mode=file",
+    )
+    assert "claimName" not in api_only or "trace-spool" not in api_only
 
 
 def test_workload_identity_and_ca_are_scoped_to_api_and_worker():
@@ -835,7 +1310,77 @@ def test_bundled_minio_renders_and_autowires_s3():
 
     secret = _by_kind(docs, "Secret")[0]["stringData"]
     assert secret["INQTRIX_S3_ACCESS_KEY"] == "inqtrix"
-    assert secret["INQTRIX_S3_SECRET_KEY"] == "change-me-minio"
+    assert secret["INQTRIX_S3_SECRET_KEY"] == "SyntheticMinio2026"
+
+
+def test_existing_secret_supplies_bundled_service_credentials() -> None:
+    """Backing-service pods read credentials from one selected Secret."""
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            "qdrant.enabled=true",
+            "valkey.enabled=true",
+            "s3.enabled=true",
+        )
+    )
+    statefulsets = {
+        document["metadata"]["name"]: document
+        for document in _by_kind(docs, "StatefulSet")
+    }
+
+    def environment(service: str) -> dict[str, dict]:
+        statefulset = next(
+            value
+            for name, value in statefulsets.items()
+            if name.endswith(f"-{service}")
+        )
+        return {
+            item["name"]: item
+            for item in statefulset["spec"]["template"]["spec"][
+                "containers"
+            ][0]["env"]
+        }
+
+    qdrant = environment("qdrant")["QDRANT__SERVICE__API_KEY"]
+    assert qdrant["valueFrom"]["secretKeyRef"] == {
+        "name": "app-secret",
+        "key": "INQTRIX_QDRANT_API_KEY",
+    }
+    valkey = environment("valkey")["VALKEY_PASSWORD"]
+    assert valkey["valueFrom"]["secretKeyRef"] == {
+        "name": "app-secret",
+        "key": "INQTRIX_BUNDLED_VALKEY_PASSWORD",
+    }
+    minio = environment("minio")
+    assert minio["MINIO_ROOT_USER"]["valueFrom"]["secretKeyRef"] == {
+        "name": "app-secret",
+        "key": "INQTRIX_S3_ACCESS_KEY",
+    }
+    assert minio["MINIO_ROOT_PASSWORD"]["valueFrom"]["secretKeyRef"] == {
+        "name": "app-secret",
+        "key": "INQTRIX_S3_SECRET_KEY",
+    }
+
+
+def test_valkey_probes_do_not_put_password_in_process_arguments() -> None:
+    docs = _docs(
+        _template(
+            _MANAGED_EXTERNAL,
+            "valkey.enabled=true",
+        )
+    )
+    statefulset = next(
+        document
+        for document in _by_kind(docs, "StatefulSet")
+        if document["metadata"]["name"].endswith("-valkey")
+    )
+    container = statefulset["spec"]["template"]["spec"]["containers"][0]
+
+    for probe_name in ("readinessProbe", "livenessProbe"):
+        command = " ".join(container[probe_name]["exec"]["command"])
+        assert "REDISCLI_AUTH=" in command
+        assert "valkey-cli ping" in command
+        assert "valkey-cli -a" not in command
 
 
 def test_openshift_omits_uid_on_bundled_qdrant_valkey_minio():
@@ -881,25 +1426,14 @@ def test_vanilla_pins_uid_on_bundled_qdrant_valkey_minio():
         assert sc["fsGroup"] == uid
 
 
-def test_explicit_s3_config_overrides_bundled_minio():
-    """A value set explicitly in config/secret must win over the auto-wired MinIO
-    default (config > derived; secret.data > derived)."""
-    rendered = _template(
-        "postgres.enabled=true",
-        "s3.enabled=true",
-        "config.INQTRIX_S3_ENDPOINT_URL=https://external.example.test",
-        "config.INQTRIX_S3_BUCKET=custom-bucket",
-        "secret.data.INQTRIX_S3_ACCESS_KEY=explicit-access",
-    )
-    docs = _docs(rendered)
-    config = _by_kind(docs, "ConfigMap")[0]["data"]
-    assert config["INQTRIX_S3_ENDPOINT_URL"] == "https://external.example.test"
-    assert config["INQTRIX_S3_BUCKET"] == "custom-bucket"
-
-    secret = _by_kind(docs, "Secret")[0]["stringData"]
-    assert secret["INQTRIX_S3_ACCESS_KEY"] == "explicit-access"
-    # the key left unset still falls back to the bundled MinIO default
-    assert secret["INQTRIX_S3_SECRET_KEY"] == "change-me-minio"
+def test_bundled_minio_rejects_parallel_external_s3_config() -> None:
+    """One enabled bundled service has one topology and credential source."""
+    with pytest.raises(RuntimeError, match="bundled MinIO topology"):
+        _template(
+            "postgres.enabled=true",
+            "s3.enabled=true",
+            "config.INQTRIX_S3_ENDPOINT_URL=https://external.example.test",
+        )
 
 
 def test_local_object_store_refuses_multi_replica_render():
@@ -924,11 +1458,9 @@ def test_local_object_store_refuses_multi_replica_render():
     # Bundled MinIO (s3.enabled) makes multi-replica renderable again, and
     # the replica hint reaches the app config for its own startup guard.
     rendered = _template(
-        _EXTERNAL,
+        _MANAGED_EXTERNAL,
         "api.replicaCount=2",
         "s3.enabled=true",
-        "secret.data.INQTRIX_S3_ACCESS_KEY=k",
-        "secret.data.INQTRIX_S3_SECRET_KEY=s",
     )
     config = _by_kind(_docs(rendered), "ConfigMap")[0]["data"]
     assert config["INQTRIX_OBJECT_STORE_BACKEND"] == "s3"
@@ -973,16 +1505,89 @@ def test_bundled_pgbouncer_pools_app_url_but_not_migrate():
         if "pgbouncer" in d["metadata"]["name"]
     ][0]
     container = pooler["spec"]["template"]["spec"]["containers"][0]
-    env = {e["name"]: e.get("value") for e in container["env"]}
-    assert env["POOL_MODE"] == "transaction"
-    assert env["MAX_PREPARED_STATEMENTS"] == "200"
-    assert env["DB_HOST"] == "rel-inqtrix-postgres"
+    assert container["image"] == (
+        "ghcr.io/cloudnative-pg/pgbouncer:1.25.1-trixie@"
+        "sha256:e6ddfe22d845e603825e235dd8334b21ecd125abea2a2172478f556b8dee2bb8"
+    )
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert container["command"] == ["/bin/sh", "-ec"]
+    command = container["args"][0]
+    assert "umask 077" in command
+    assert "unset DB_PASSWORD" in command
+    assert "exec /usr/sbin/pgbouncer" in command
+    env = {e["name"]: e for e in container["env"]}
+    assert env["DB_USER"]["value"] == "inqtrix"
+    assert "value" not in env["DB_PASSWORD"]
+    assert env["DB_PASSWORD"]["valueFrom"]["secretKeyRef"] == {
+        "name": "rel-inqtrix",
+        "key": "INQTRIX_BUNDLED_POSTGRES_PASSWORD",
+    }
+    config = next(
+        d
+        for d in _by_kind(docs, "ConfigMap")
+        if d["metadata"]["name"].endswith("-pgbouncer")
+    )["data"]["pgbouncer.ini"]
+    assert "pool_mode = transaction" in config
+    assert "max_prepared_statements = 200" in config
+    assert "* = host=rel-inqtrix-postgres port=5432" in config
+
+    postgres = next(
+        d
+        for d in _by_kind(docs, "StatefulSet")
+        if d["metadata"]["name"].endswith("-postgres")
+    )
+    postgres_env = {
+        item["name"]: item
+        for item in postgres["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert "value" not in postgres_env["POSTGRES_PASSWORD"]
+    assert postgres_env["POSTGRES_PASSWORD"]["valueFrom"]["secretKeyRef"] == {
+        "name": "rel-inqtrix",
+        "key": "INQTRIX_BUNDLED_POSTGRES_PASSWORD",
+    }
 
 
 def test_pgbouncer_disabled_keeps_direct_app_url():
     rendered = _template("postgres.enabled=true")
     secret = _by_kind(_docs(rendered), "Secret")[0]["stringData"]
     assert "rel-inqtrix-postgres:5432" in secret["INQTRIX_DATABASE_URL"]
+
+
+@pytest.mark.parametrize(
+    ("enabled", "credential", "suffix"),
+    [
+        ("qdrant.enabled=true", "qdrant.apiKey", "qdrant"),
+        ("valkey.enabled=true", "valkey.password", "valkey"),
+        ("s3.enabled=true", "s3.secretKey", "minio"),
+    ],
+)
+def test_bundled_credential_change_rolls_its_backing_service(
+    enabled: str,
+    credential: str,
+    suffix: str,
+) -> None:
+    """Chart-managed Secret changes alter the backing Pod template checksum."""
+
+    def checksum(value: str) -> str:
+        docs = _docs(
+            _template(
+                _MANAGED_EXTERNAL,
+                enabled,
+                f"{credential}={value}",
+            )
+        )
+        workload = next(
+            item
+            for item in _by_kind(docs, "StatefulSet")
+            if item["metadata"]["name"].endswith(f"-{suffix}")
+        )
+        return workload["spec"]["template"]["metadata"]["annotations"][
+            "checksum/secret"
+        ]
+
+    assert checksum("SyntheticCredentialAlpha2026") != checksum(
+        "SyntheticCredentialBeta2026"
+    )
 
 
 def _api_deployment(docs: list[dict]) -> dict:
@@ -1035,3 +1640,137 @@ def test_metrics_enabled_sets_flag_and_scrape_annotations():
         )
     )
     assert "prometheus.io/scrape" not in annotations2
+
+
+def _web_env(docs: list[dict]) -> dict[str, str | None]:
+    """Extract the web container environment as a name->value map."""
+    web = [
+        d
+        for d in _by_kind(docs, "Deployment")
+        if d["metadata"]["name"].endswith("-web")
+    ][0]
+    return {
+        item["name"]: item.get("value")
+        for item in web["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+
+
+def test_route_raises_default_router_timeout() -> None:
+    """The Route ships a timeout above the backend's HTTP wait ceiling.
+
+    OpenShift's router cuts byte-silent responses after 30 seconds by
+    default, but editor AI calls block up to 630s and non-streaming chat
+    completions up to 3630s without sending a byte (and chat SSE has no
+    keepalive frames). 3630s tracks request_timeout_seconds
+    (INQTRIX_MAX_TOTAL_SECONDS + 30s margin).
+    """
+    docs = _docs(_template(_EXTERNAL, "openshift.enabled=true"))
+    route = _by_kind(docs, "Route")[0]
+    annotations = route["metadata"]["annotations"]
+    assert annotations["haproxy.router.openshift.io/timeout"] == "3630s"
+
+
+def test_chart_edge_sets_two_trusted_proxy_hops() -> None:
+    """Ingress/Route plus web gateway put TWO hops into X-Forwarded-For.
+
+    With the app default of 1 the login rate limiter would key every client
+    on the edge pod address, collapsing all users into a single lockout
+    bucket (a third party spraying failed logins at a victim's identifier
+    would lock the victim out).
+    """
+    for edge_args in (("openshift.enabled=true",), ("ingress.enabled=true",)):
+        docs = _docs(_template(_EXTERNAL, *edge_args))
+        config = [
+            d
+            for d in _by_kind(docs, "ConfigMap")
+            if d["metadata"]["name"] == "rel-inqtrix"
+        ][0]["data"]
+        assert config["INQTRIX_TRUSTED_PROXY_HOPS"] == "2"
+
+
+def test_no_edge_leaves_trusted_proxy_hops_unset() -> None:
+    """Port-forward topology has one proxy hop; the app default fits."""
+    docs = _docs(_template(_EXTERNAL))
+    config = [
+        d
+        for d in _by_kind(docs, "ConfigMap")
+        if d["metadata"]["name"] == "rel-inqtrix"
+    ][0]["data"]
+    assert "INQTRIX_TRUSTED_PROXY_HOPS" not in config
+
+
+def test_explicit_trusted_proxy_hops_wins_over_derived() -> None:
+    """An extra outer load balancer needs a deeper explicit hop count."""
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            "ingress.enabled=true",
+            extra=["--set-string", "config.INQTRIX_TRUSTED_PROXY_HOPS=3"],
+        )
+    )
+    config = [
+        d
+        for d in _by_kind(docs, "ConfigMap")
+        if d["metadata"]["name"] == "rel-inqtrix"
+    ][0]["data"]
+    assert config["INQTRIX_TRUSTED_PROXY_HOPS"] == "3"
+
+
+def test_web_body_size_tracks_max_file_bytes() -> None:
+    """The gateway receives the API limit and derives its guarded headroom."""
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            extra=["--set-string", "config.INQTRIX_MAX_FILE_BYTES=524288000"],
+        )
+    )
+    env = _web_env(docs)
+    assert env["INQTRIX_MAX_FILE_BYTES"] == "524288000"
+    assert "INQTRIX_PROXY_MAX_BODY_BYTES" not in env
+
+
+def test_web_body_size_defaults_to_image_value() -> None:
+    """Without the config key the gateway's 100 MiB + headroom defaults apply."""
+    docs = _docs(_template(_EXTERNAL))
+    env = _web_env(docs)
+    assert "INQTRIX_MAX_FILE_BYTES" not in env
+    assert "INQTRIX_PROXY_MAX_BODY_BYTES" not in env
+
+
+def test_web_external_scheme_override_pins_https() -> None:
+    """web.externalScheme covers TLS terminators the chart does not own.
+
+    Without it the web gateway forwards X-Forwarded-Proto: http behind an
+    external load balancer, and the collaboration WebSocket origin check
+    rejects every session even with a correct INQTRIX_PUBLIC_BASE_URL.
+    """
+    docs = _docs(_template(_EXTERNAL, "web.externalScheme=https"))
+    assert _web_env(docs)["INQTRIX_EXTERNAL_SCHEME"] == "https"
+
+
+def test_web_body_size_rejects_non_byte_values() -> None:
+    """Legacy size suffixes cannot silently produce a divergent proxy cap."""
+    with pytest.raises(RuntimeError, match="plain bytes"):
+        _template(
+            _EXTERNAL,
+            extra=["--set-string", "config.INQTRIX_MAX_FILE_BYTES=100m"],
+        )
+
+
+def test_web_extra_env_accepts_explicit_proxy_byte_cap() -> None:
+    """Operators may deliberately override the gateway's derived headroom."""
+    docs = _docs(
+        _template(
+            _EXTERNAL,
+            "web.extraEnv[0].name=INQTRIX_PROXY_MAX_BODY_BYTES",
+            extra=[
+                "--set-string",
+                "web.extraEnv[0].value=209715200",
+                "--set-string",
+                "config.INQTRIX_MAX_FILE_BYTES=524288000",
+            ],
+        )
+    )
+    env = _web_env(docs)
+    assert env["INQTRIX_MAX_FILE_BYTES"] == "524288000"
+    assert env["INQTRIX_PROXY_MAX_BODY_BYTES"] == "209715200"

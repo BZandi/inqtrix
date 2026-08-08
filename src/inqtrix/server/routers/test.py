@@ -83,21 +83,11 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
 
         try:
-            _stack_name, stack_bundle = resolver.resolve_request_stack(body)
+            resolved = resolver.resolve(body)
         except StackResolutionError as exc:
             return stack_error_response(exc)
 
-        active_providers = (
-            stack_bundle.providers if stack_bundle is not None else container.providers
-        )
-        active_strategies = (
-            stack_bundle.strategies if stack_bundle is not None else container.strategies
-        )
-        active_agent_settings = (
-            stack_bundle.agent_settings
-            if stack_bundle is not None and stack_bundle.agent_settings is not None
-            else settings.agent
-        )
+        active_agent_settings = resolved.agent_settings
 
         loop = asyncio.get_running_loop()
         try:
@@ -107,8 +97,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                     partial(
                         web_research.run_web_graph_test,
                         question,
-                        providers=active_providers,
-                        strategies=active_strategies,
+                        providers=resolved.providers,
+                        strategies=resolved.strategies,
                         settings=active_agent_settings,
                     ),
                 ),
@@ -123,7 +113,10 @@ def build_router(container: "AppContainer") -> APIRouter:
                 }},
             )
         except Exception as exc:  # noqa: BLE001 — agent failures map to 502
-            log.error("Test-Durchlauf Fehler: %s", exc)
+            log.error(
+                "Test-Durchlauf Fehler (error_type=%s)",
+                type(exc).__name__,
+            )
             return JSONResponse(
                 status_code=502,
                 content={"error": {

@@ -5,13 +5,13 @@ import pytest
 from inqtrix.agents.web_execution_policy import derive_web_research_policy
 
 
-def test_normal_requires_explicit_consent_and_always_uses_compact() -> None:
+def test_normal_adaptive_research_always_uses_compact() -> None:
     automatic = derive_web_research_policy(depth="normal")
     directed = derive_web_research_policy(
         depth="normal", admitted_directive=True
     )
     edited = derive_web_research_policy(depth="normal", edited_plan=True)
-    assert (automatic.allowed, automatic.profile) == (False, None)
+    assert (automatic.allowed, automatic.profile) == (True, "compact")
     assert (directed.allowed, directed.profile) == (True, "compact")
     assert edited == directed
 

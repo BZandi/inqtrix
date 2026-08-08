@@ -1,7 +1,7 @@
-"""Quiesce database clients before a Kubernetes owner-mode migration.
+"""Quiesce chart-owned database clients before a schema migration.
 
 The Helm pre-upgrade hook runs this module with a narrowly scoped ServiceAccount.
-It scales only the release's API, worker, and collaboration Deployments to zero,
+It scales the release's API, worker, collaboration, and PgBouncer Deployments to zero,
 removes the API HPA so it cannot race the scale-down, and waits until every
 matching Pod has terminated. Before exiting it revokes its own temporary
 RoleBinding. Helm applies the desired Deployments after the migration hook
@@ -124,7 +124,7 @@ def quiesce_database_clients(
 
     selector = (
         f"app.kubernetes.io/instance={config.release},"
-        "app.kubernetes.io/component in (api,worker,collaboration)"
+        "app.kubernetes.io/component in (api,worker,collaboration,pgbouncer)"
     )
     pods_path = (
         f"/api/v1/namespaces/{namespace}/pods?"
@@ -142,13 +142,13 @@ def quiesce_database_clients(
                 for item in items
             )
             raise RuntimeError(
-                "database-client Pods did not terminate before the owner-mode "
+                "database-client Pods did not terminate before the schema "
                 f"migration timeout: {', '.join(names)}"
             )
         time.sleep(2)
 
 
-def run_owner_maintenance(
+def run_schema_maintenance(
     api: KubernetesApi,
     config: KubernetesMaintenanceConfig,
 ) -> None:
@@ -180,7 +180,7 @@ def _config_from_environment() -> KubernetesMaintenanceConfig:
         release=release,
         deployment_names=tuple(
             f"{prefix}-{component}"
-            for component in ("api", "worker", "collaboration")
+            for component in ("api", "worker", "collaboration", "pgbouncer")
         ),
         hpa_names=(f"{prefix}-api",),
         timeout_seconds=float(
@@ -189,12 +189,12 @@ def _config_from_environment() -> KubernetesMaintenanceConfig:
         role_binding_name=os.environ.get(
             "INQTRIX_K8S_MAINTENANCE_ROLE_BINDING", ""
         ).strip()
-        or f"{prefix}-owner-maintenance",
+        or f"{prefix}-schema-maintenance",
     )
 
 
 def main() -> None:
-    """Run the in-cluster owner-maintenance hook."""
+    """Run the in-cluster schema-maintenance hook."""
     host = os.environ.get("KUBERNETES_SERVICE_HOST", "").strip()
     port = os.environ.get("KUBERNETES_SERVICE_PORT", "443").strip()
     if not host or not _TOKEN_PATH.is_file() or not _CA_PATH.is_file():
@@ -205,8 +205,8 @@ def main() -> None:
         token=_TOKEN_PATH.read_text(encoding="utf-8").strip(),
         ca_path=_CA_PATH,
     )
-    run_owner_maintenance(api, _config_from_environment())
-    print("database-client workloads are quiesced for owner-mode migration")
+    run_schema_maintenance(api, _config_from_environment())
+    print("chart-owned database clients are quiesced for schema migration")
 
 
 if __name__ == "__main__":

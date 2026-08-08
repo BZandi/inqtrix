@@ -13,8 +13,8 @@ Centralises:
   a developer's local ``.env`` from accidentally turning a replay test
   into a live call.
 
-Recording workflow (Maintainer-Tool, no separate pytest-marker, see
-ADR-I in ``.cursor/memory/architecture-decisions.md``):
+Recording workflow (an explicit maintainer operation, deliberately controlled
+by ``INQTRIX_RECORD_MODE`` rather than a second pytest marker):
 
 ::
 

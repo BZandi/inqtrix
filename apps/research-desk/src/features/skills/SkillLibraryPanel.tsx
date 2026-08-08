@@ -48,7 +48,7 @@ import {
 import type { SkillsApiHandle } from './useSkillsApi'
 
 /**
- * Master/detail editor of the skill library (plan M3 `3.6`) — the
+ * Master/detail editor of the skill library — the
  * second PromptLibrary tab. Server-first (no local/synced dual state):
  * every save round-trips through `/v1/skills`, validation errors and
  * conflicts surface verbatim. The point editor stays COUPLED to the

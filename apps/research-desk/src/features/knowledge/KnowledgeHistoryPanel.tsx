@@ -7,6 +7,7 @@ import {
   PencilLine,
   Pin,
   PinOff,
+  RotateCcw,
   SquarePen,
   Trash2,
 } from '@/components/icons'
@@ -65,6 +66,7 @@ type KnowledgeHistoryPanelProps = {
   onCreateSession: (groupId?: string | null) => void
   onCreateSessionGroup: () => void
   onDeleteSession: (sessionId: string) => void
+  onRetrySessionDeletion: (sessionId: string) => void
   onDeleteSessionGroup: (groupId: string) => void
   onMoveSessionGroup: (groupId: string, targetIndex: number) => void
   onMoveSessionToGroup: (sessionId: string, groupId: string | null, targetIndex: number) => void
@@ -86,6 +88,7 @@ export function KnowledgeHistoryPanel({
   onCreateSession,
   onCreateSessionGroup,
   onDeleteSession,
+  onRetrySessionDeletion,
   onDeleteSessionGroup,
   onMoveSessionGroup,
   onMoveSessionToGroup,
@@ -425,6 +428,7 @@ export function KnowledgeHistoryPanel({
                     key={session.id}
                     nested={false}
                     onDeleteSession={onDeleteSession}
+                    onRetrySessionDeletion={onRetrySessionDeletion}
                     onSelectSession={selectSessionFromHistory}
                     onSessionTitleDraftChange={setSessionTitleDraft}
                     onTogglePinnedSession={onTogglePinnedSession}
@@ -459,6 +463,7 @@ export function KnowledgeHistoryPanel({
                       key={session.id}
                       nested={false}
                       onDeleteSession={onDeleteSession}
+                      onRetrySessionDeletion={onRetrySessionDeletion}
                       onSelectSession={selectSessionFromHistory}
                       onSessionTitleDraftChange={setSessionTitleDraft}
                       onTogglePinnedSession={onTogglePinnedSession}
@@ -497,6 +502,7 @@ export function KnowledgeHistoryPanel({
                   key={section.kind === 'group' ? section.groupId : UNGROUPED_KNOWLEDGE_SECTION_ID}
                   onCreateSession={onCreateSession}
                   onDeleteSession={onDeleteSession}
+                  onRetrySessionDeletion={onRetrySessionDeletion}
                   onDeleteSessionGroup={onDeleteSessionGroup}
                   onGroupTitleDraftChange={setGroupTitleDraft}
                   onSelectSession={selectSessionFromHistory}
@@ -547,6 +553,7 @@ function KnowledgeHistorySectionView({
   groupCount,
   onCreateSession,
   onDeleteSession,
+  onRetrySessionDeletion,
   onDeleteSessionGroup,
   onGroupTitleDraftChange,
   onSelectSession,
@@ -582,6 +589,7 @@ function KnowledgeHistorySectionView({
   groupCount: number
   onCreateSession: (groupId?: string | null) => void
   onDeleteSession: (sessionId: string) => void
+  onRetrySessionDeletion: (sessionId: string) => void
   onDeleteSessionGroup: (groupId: string) => void
   onGroupTitleDraftChange: (value: string) => void
   onSelectSession: (sessionId: string) => void
@@ -742,6 +750,7 @@ function KnowledgeHistorySectionView({
                   key={session.id}
                   nested={section.kind === 'group'}
                   onDeleteSession={onDeleteSession}
+                  onRetrySessionDeletion={onRetrySessionDeletion}
                   onSelectSession={onSelectSession}
                   onSessionTitleDraftChange={onSessionTitleDraftChange}
                   onTogglePinnedSession={onTogglePinnedSession}
@@ -790,6 +799,7 @@ function KnowledgeSessionHistoryItem({
   editing,
   nested,
   onDeleteSession,
+  onRetrySessionDeletion,
   onSelectSession,
   onSessionTitleDraftChange,
   onTogglePinnedSession,
@@ -811,6 +821,7 @@ function KnowledgeSessionHistoryItem({
   editing: boolean
   nested: boolean
   onDeleteSession: (sessionId: string) => void
+  onRetrySessionDeletion: (sessionId: string) => void
   onSelectSession: (sessionId: string) => void
   onSessionTitleDraftChange: (value: string) => void
   onTogglePinnedSession: (sessionId: string) => void
@@ -830,6 +841,8 @@ function KnowledgeSessionHistoryItem({
   const showBeforeIndicator = sessionDropApplies && sessionDropTarget?.targetIndex === sessionIndex
   const showAfterIndicator = sessionDropApplies && sessionDropTarget?.targetIndex === sessionIndex + 1
   const sessionTime = displayRelativeAge(session.updatedAt, locale)
+  const deleting = session.deletion?.status === 'deleting'
+  const deleteFailed = session.deletion?.status === 'delete_failed'
 
   return (
     <motion.div
@@ -843,7 +856,12 @@ function KnowledgeSessionHistoryItem({
         <span className="pointer-events-none absolute -bottom-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
       )}
       <ExplorerHistoryRow
-        actions={[
+        actions={session.deletion ? (deleteFailed ? [{
+          ariaLabel: `${t.knowledge.retrySessionDelete}: ${session.title}`,
+          icon: <RotateCcw className="icon-sm" />,
+          label: t.knowledge.retrySessionDelete,
+          onSelect: () => onRetrySessionDeletion(session.id),
+        }] : []) : [
           {
             ariaLabel: `${pinned ? t.knowledge.unpinSession : t.knowledge.pinSession}: ${session.title}`,
             icon: pinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />,
@@ -859,12 +877,17 @@ function KnowledgeSessionHistoryItem({
           },
         ]}
         active={selected}
+        disabled={Boolean(session.deletion)}
         dragging={dragged}
-        indicator={running ? <ExplorerRunningIndicator label={t.common.running} /> : undefined}
+        indicator={deleting
+          ? <ExplorerRunningIndicator label={t.knowledge.sessionDeleting} />
+          : running ? <ExplorerRunningIndicator label={t.common.running} /> : undefined}
         nested={nested}
-        onPointerDown={(event) => beginSessionDrag(event, session.id)}
+        onPointerDown={session.deletion
+          ? undefined
+          : (event) => beginSessionDrag(event, session.id)}
         onSelect={() => onSelectSession(session.id)}
-        onStartRename={() => startSessionEdit(session)}
+        onStartRename={session.deletion ? undefined : () => startSessionEdit(session)}
         renameEditor={editing ? (
           <ExplorerHistoryTitleInput
             inputRef={sessionTitleInputRef}
@@ -875,8 +898,12 @@ function KnowledgeSessionHistoryItem({
             value={sessionTitleDraft}
           />
         ) : undefined}
-        renameLabel={t.knowledge.renameSession}
-        timeLabel={sessionTime}
+        renameLabel={session.deletion ? undefined : t.knowledge.renameSession}
+        timeLabel={deleting
+          ? t.knowledge.sessionDeleting
+          : deleteFailed
+            ? t.knowledge.sessionDeleteFailed
+            : sessionTime}
         title={session.title}
       />
     </motion.div>

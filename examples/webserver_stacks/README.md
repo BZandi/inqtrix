@@ -25,6 +25,25 @@ instead of running it once in-process.
 > secrets management. See the repo `README.md` header for the full
 > disclaimer.
 
+## Python installation and command parity
+
+Choose one installation path from the repository root:
+
+```bash
+# uv
+uv sync --extra dev
+
+# or standard Python/pip
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+```
+
+Operational recipes below use plain `python` so they remain portable. In the uv
+path, the equivalent command is `uv run python ...`; in the activated
+pip-installed environment it is `python ...`. Both execute the same entry
+point with the same environment variables.
+
 ## Relationship to `provider_stacks/`
 
 | Aspect | `provider_stacks/` | `webserver_stacks/` |
@@ -212,7 +231,7 @@ Recipe — debug a sticky algorithmic run with full trace:
 INQTRIX_LOG_ENABLED=true \
 INQTRIX_LOG_LEVEL=DEBUG \
 INQTRIX_LOG_WEB_LEVEL=INFO \
-uv run python examples/webserver_stacks/anthropic_perplexity.py
+python examples/webserver_stacks/anthropic_perplexity.py
 ```
 
 Recipe — forensic lineage (query/source/claim/answer IDs in the same log file):
@@ -222,7 +241,7 @@ INQTRIX_LOG_ENABLED=true \
 INQTRIX_LOG_LEVEL=DEBUG \
 INQTRIX_LOG_WEB_LEVEL=INFO \
 OBSERVABILITY_PROFILE=forensic \
-uv run python examples/webserver_stacks/anthropic_perplexity.py
+python examples/webserver_stacks/anthropic_perplexity.py
 ```
 
 Recipe — investigate a reverse-proxy / disconnect issue:
@@ -231,14 +250,14 @@ Recipe — investigate a reverse-proxy / disconnect issue:
 INQTRIX_LOG_ENABLED=true \
 INQTRIX_LOG_LEVEL=INFO \
 INQTRIX_LOG_WEB_LEVEL=DEBUG \
-uv run python examples/webserver_stacks/anthropic_perplexity.py
+python examples/webserver_stacks/anthropic_perplexity.py
 ```
 
 Recipe — silent mode (only WARNING+ to terminal, no file):
 
 ```bash
 INQTRIX_LOG_CONSOLE=true \
-uv run python examples/webserver_stacks/anthropic_perplexity.py
+python examples/webserver_stacks/anthropic_perplexity.py
 ```
 
 ## Run instructions
@@ -248,13 +267,13 @@ process, or `multi_stack.py` when one server should host every
 provider combination available in your environment.
 
 ```bash
-uv sync
-
-# Single-stack (one provider combination)
+# uv: single-stack, then multi-stack
 uv run python examples/webserver_stacks/litellm_perplexity.py
-
-# Multi-stack (every combination whose env vars are present)
 uv run python examples/webserver_stacks/multi_stack.py
+
+# standard Python/pip: the same entry points
+python examples/webserver_stacks/litellm_perplexity.py
+python examples/webserver_stacks/multi_stack.py
 ```
 
 By default the server listens on `http://0.0.0.0:5100` (HTTP).
@@ -369,7 +388,7 @@ Reproducible with bash and four background calls:
 
 ```bash
 # Setup: start the server in one terminal
-uv run python examples/webserver_stacks/litellm_perplexity.py
+python examples/webserver_stacks/litellm_perplexity.py
 
 # In a second terminal, fire four calls in parallel
 for i in 1 2 3 4; do
@@ -386,7 +405,7 @@ Expected: three `200`, one `429`. Bump the cap when you need more
 parallelism:
 
 ```bash
-MAX_CONCURRENT=10 uv run python examples/webserver_stacks/litellm_perplexity.py
+MAX_CONCURRENT=10 python examples/webserver_stacks/litellm_perplexity.py
 ```
 
 Scaling notes:
@@ -407,10 +426,11 @@ Scaling notes:
 
 ## What you see when you start the server
 
-`uv run python examples/webserver_stacks/<script>.py` is a plain
-`uvicorn.run(app, ...)` invocation. The terminal output looks
-exactly like a regular FastAPI/uvicorn boot, with one extra
-Inqtrix-specific log line up front from the lifespan handler.
+`uv run python examples/webserver_stacks/<script>.py` and, after the pip
+installation, `python examples/webserver_stacks/<script>.py` both reach the
+same plain `uvicorn.run(app, ...)` invocation. The terminal output looks
+exactly like a regular FastAPI/uvicorn boot, with one extra Inqtrix-specific
+log line up front from the lifespan handler.
 
 Single-stack scripts emit one provider line:
 
@@ -609,7 +629,18 @@ The test-suite block for this family:
 Run the webserver-related slice locally:
 
 ```bash
+# uv
 uv run pytest \
+  tests/test_webserver_examples.py \
+  tests/test_server_overrides.py \
+  tests/test_server_security.py \
+  tests/test_server_multi_stack.py \
+  tests/test_server_cancel_on_disconnect.py \
+  tests/test_routes.py \
+  -v
+
+# standard Python/pip
+python -m pytest \
   tests/test_webserver_examples.py \
   tests/test_server_overrides.py \
   tests/test_server_security.py \

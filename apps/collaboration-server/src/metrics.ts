@@ -1,4 +1,10 @@
-const HISTOGRAM_BUCKETS_MS = [5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000]
+// 750 and 1500 exist because the large-state collaboration latency
+// lands between roughly 490ms and 750ms. Without them every sample in
+// that band shares one bucket, and a regression from 500ms to 950ms is
+// indistinguishable from no change at all.
+const HISTOGRAM_BUCKETS_MS = [
+  5, 10, 25, 50, 100, 250, 500, 750, 1_000, 1_500, 2_500, 5_000,
+]
 
 type Histogram = {
   bucketCounts: number[]

@@ -2,7 +2,6 @@
 
 Revision ID: 0033_agent_memory
 Revises: 0032_editor_agent_source
-Create Date: 2026-07-02
 """
 
 from __future__ import annotations

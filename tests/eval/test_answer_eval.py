@@ -1,10 +1,10 @@
 """Gated live answer eval: gate honesty over the golden set.
 
-Requires the Azure deployment (run with ``uv run --env-file .env``):
-embeddings (azure provider fallbacks) plus the chat deployment from
-``AZURE_OPENAI_DEPLOYMENT_NAME``. Roughly 50 algorithm runs — each one
-embed call, one or two gate calls, and at most one answer call — so
-this stays out of the offline default suite by design.
+Requires the Azure deployment (load ``.env`` through uv or export it in a
+standard pip/plain-Python environment): embeddings (azure provider fallbacks)
+plus the chat deployment from ``AZURE_OPENAI_DEPLOYMENT_NAME``. Roughly 50
+algorithm runs — each one embed call, one or two gate calls, and at most one
+answer call — so this stays out of the offline default suite by design.
 
 Gate thresholds (absolute, behaviour-defining rather than
 baseline-relative): the six ``no_evidence`` queries must mostly be
@@ -77,7 +77,7 @@ pytestmark = pytest.mark.skipif(
     reason=(
         "live answer eval needs AZURE_OPENAI_ENDPOINT/_API_KEY/"
         "_DEPLOYMENT_NAME plus the embeddings endpoint "
-        "(run with uv run --env-file .env)"
+        "(load the required values from .env before the test)"
     ),
 )
 

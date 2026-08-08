@@ -4,12 +4,25 @@ import { groupHitsByDocument } from './findGrouping'
 
 function hit(documentId: string, chunkIndex: number, score: number): KnowledgeSearchHit {
   return {
+    chunk_id: `chunk-${documentId}-${chunkIndex}`,
     chunk_index: chunkIndex,
     collection_id: `col-${documentId}`,
     document_id: documentId,
     document_title: `Titel ${documentId}`,
+    excerpt: `Auszug ${documentId}-${chunkIndex}`,
+    generation_id: 'generation-1',
+    page_number: null,
+    provenance_status: 'verified_span',
+    rank: 1,
+    reference_id: 'K1',
+    revision_id: 'revision-1',
     score,
-    text: `Auszug ${documentId}-${chunkIndex}`,
+    source_span: {
+      document_content_hash: 'sha256',
+      end: 20,
+      offset_unit: 'utf8_byte',
+      start: 0,
+    },
   }
 }
 

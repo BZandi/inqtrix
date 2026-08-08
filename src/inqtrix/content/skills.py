@@ -1,6 +1,6 @@
 """Skill records: server-enforced policy objects of the skill library.
 
-Skills are NOT a fourth prompt-template category (plan M3 `3.1`):
+Skills are not a fourth prompt-template category:
 templates are client-interpreted text, while a skill's fields are
 ENFORCED server-side — ``clarification_points`` drive the intake gate,
 ``requires_plan`` the plan gate, ``allowed_tools`` the tool dispatch,
@@ -16,7 +16,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from inqtrix.auth.permissions import SharePermission

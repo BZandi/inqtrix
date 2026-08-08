@@ -4,7 +4,9 @@ Same conventions as the other storage backends: every operation runs
 inside :func:`~inqtrix.storage.db.tenant_session` (restricted role +
 tenant GUC, forced RLS as the second defense layer), guarded UPDATEs
 make revocation and the last-used throttle replica-safe, and the
-store shares the identity bundle's HTTP-loop engine.
+store shares the identity bundle's HTTP-loop engine. Create, sampled
+use, and revoke audit rows commit in the same transaction as their
+token state.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from sqlalchemy import or_, select, update
 from inqtrix.auth.pat import PersonalAccessToken
 from inqtrix.storage.db import tenant_session
 from inqtrix.storage.pat_orm import personal_access_tokens as pats
+from inqtrix.storage.resource_access import append_audit_row
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -64,6 +67,11 @@ class PostgresPatStore:
             app_role=self._app_role,
         )
 
+    @property
+    def atomic_audit_effects(self) -> bool:
+        """Create, sampled use, and revoke include their audit row."""
+        return True
+
     async def create(self, token: PersonalAccessToken) -> None:
         async with self._scope() as db:
             await db.execute(
@@ -79,6 +87,14 @@ class PostgresPatStore:
                     last_used_at=token.last_used_at,
                     revoked_at=token.revoked_at,
                 )
+            )
+            await append_audit_row(
+                db,
+                tenant_id=token.tenant_id,
+                actor_user_id=token.owner_user_id,
+                action="pat.created",
+                resource_type="pat",
+                resource_id=token.token_id,
             )
 
     async def get(self, token_id: str) -> PersonalAccessToken | None:
@@ -121,36 +137,66 @@ class PostgresPatStore:
         across replicas and stops cross-user revocation by id.
         """
         async with self._scope() as db:
-            result = await db.execute(
-                update(pats)
-                .where(
-                    pats.c.tenant_id == tenant_id,
-                    pats.c.token_id == token_id,
-                    pats.c.owner_user_id == owner_user_id,
-                    pats.c.revoked_at.is_(None),
+            row = (
+                await db.execute(
+                    update(pats)
+                    .where(
+                        pats.c.tenant_id == tenant_id,
+                        pats.c.token_id == token_id,
+                        pats.c.owner_user_id == owner_user_id,
+                        pats.c.revoked_at.is_(None),
+                    )
+                    .values(revoked_at=now)
+                    .returning(pats.c.tenant_id, pats.c.owner_user_id)
                 )
-                .values(revoked_at=now)
+            ).one_or_none()
+            if row is None:
+                return False
+            await append_audit_row(
+                db,
+                tenant_id=row.tenant_id,
+                actor_user_id=row.owner_user_id,
+                action="pat.revoked",
+                resource_type="pat",
+                resource_id=token_id,
             )
-        return bool(result.rowcount)
+            return True
 
     async def touch_last_used(
         self, token_id: str, *, now: float, min_interval: float
-    ) -> None:
+    ) -> bool:
         """Throttled bookkeeping as ONE guarded statement (no
         read-modify-write, so concurrent verifies write at most once
-        per interval)."""
+        per interval). The rowcount doubles as the ``pat.used`` audit
+        sampling signal: exactly the verify that landed the write also
+        writes the row."""
         async with self._scope() as db:
-            await db.execute(
-                update(pats)
-                .where(
-                    pats.c.token_id == token_id,
-                    or_(
-                        pats.c.last_used_at.is_(None),
-                        pats.c.last_used_at <= now - min_interval,
-                    ),
+            row = (
+                await db.execute(
+                    update(pats)
+                    .where(
+                        pats.c.token_id == token_id,
+                        or_(
+                            pats.c.last_used_at.is_(None),
+                            pats.c.last_used_at <= now - min_interval,
+                        ),
+                    )
+                    .values(last_used_at=now)
+                    .returning(pats.c.tenant_id, pats.c.owner_user_id)
                 )
-                .values(last_used_at=now)
+            ).one_or_none()
+            if row is None:
+                return False
+            await append_audit_row(
+                db,
+                tenant_id=row.tenant_id,
+                actor_user_id=row.owner_user_id,
+                action="pat.used",
+                resource_type="pat",
+                resource_id=token_id,
+                origin={"auth_method": "pat"},
             )
+            return True
 
     async def revoke_all_for_owner(
         self, *, tenant_id: str, owner_user_id: uuid.UUID, now: float

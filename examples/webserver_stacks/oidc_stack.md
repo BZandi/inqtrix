@@ -1,6 +1,6 @@
 # OIDC stack walkthrough (browser SSO with Dex)
 
-> Files: `deploy/compose/compose.dev.yaml`, `deploy/compose/dex-config.yaml`, `src/inqtrix/server/routers/auth.py`, `src/inqtrix/auth/oidc.py`
+> Files: `deploy/compose/compose.stack.yaml`, `deploy/compose/compose.dev-ports.yaml`, `deploy/compose/dex-config.yaml`, `src/inqtrix/server/routers/auth.py`, `src/inqtrix/auth/oidc.py`
 >
 > Every `INQTRIX_OIDC_*` / `INQTRIX_AUTH_MODE` variable (defaults, allowed values) is defined in [`docs/configuration/settings-and-env.md`](../../docs/configuration/settings-and-env.md), the single source of truth for env vars; this page is the walkthrough.
 
@@ -16,20 +16,43 @@ confidential BFF client and stores only an opaque session cookie.
 
 ## 1. Start the IdP
 
-Dex is gated behind the compose profile `oidc`; a plain `up -d` keeps
-the zero-auth default stack:
+Dex is gated behind the compose profile `oidc`; without that profile Compose
+does not start the bundled IdP and leaves the configured authentication mode
+unchanged. Start from the named local pair described in the
+[local infrastructure guide](../../docs/development/local-infrastructure.md#start--stop). Keep the
+issuer/client id in `deploy/.env.stack.local` and add the client credential
+only to `deploy/.env.stack.secrets.local`:
+
+Visible configuration:
+
+```dotenv
+INQTRIX_AUTH_MODE=oidc
+INQTRIX_OIDC_ISSUER=http://dex.localhost:5556/dex
+INQTRIX_OIDC_CLIENT_ID=inqtrix-local
+```
+
+Credentials (mode `0600`):
+
+```dotenv
+INQTRIX_OIDC_CLIENT_SECRET=replace-with-a-local-dev-secret
+```
 
 ```bash
-podman compose -f deploy/compose/compose.dev.yaml --profile oidc up -d dex
+podman compose \
+  -f deploy/compose/compose.stack.yaml \
+  -f deploy/compose/compose.dev-ports.yaml \
+  --env-file deploy/.env.stack.secrets.local \
+  --env-file deploy/.env.stack.local \
+  --profile oidc up -d dex
 ```
 
 (`docker compose` works identically.) The issuer is
-`http://127.0.0.1:5556/dex` — loopback-published, so the backend
+`http://dex.localhost:5556/dex` — loopback-published, so the backend
 (discovery/token calls) and the browser (authorize redirect) reach it
 under the identical string. Health check:
 
 ```bash
-curl http://127.0.0.1:5556/dex/healthz
+curl http://dex.localhost:5556/dex/healthz
 ```
 
 `dex-config.yaml` registers one static client and one demo user:
@@ -37,7 +60,7 @@ curl http://127.0.0.1:5556/dex/healthz
 | What | Value |
 |---|---|
 | Client id | `inqtrix-local` |
-| Client secret | from `DEX_INQTRIX_CLIENT_SECRET` in the container env; compose sets it to `${INQTRIX_OIDC_CLIENT_SECRET:-inqtrix-dev-oidc-secret}` |
+| Client secret | from `INQTRIX_OIDC_CLIENT_SECRET` in the selected companion secrets file; there is no committed credential default |
 | Redirect URIs | `http://127.0.0.1:5100/api/auth/callback` and `http://127.0.0.1:5173/api/auth/callback` |
 | Demo login | `admin@example.com` / `password` |
 
@@ -49,28 +72,35 @@ Every webserver-stack script builds its auth provider through
 | Variable | Dev value | Notes |
 |---|---|---|
 | `INQTRIX_AUTH_MODE` | `oidc` | Explicit mode; unset would infer `apikey`/`none` from `INQTRIX_SERVER_API_KEY`. |
-| `INQTRIX_OIDC_ISSUER` | `http://127.0.0.1:5556/dex` | Must equal the Dex issuer byte-for-byte; discovery is fetched from `{issuer}/.well-known/openid-configuration`. |
+| `INQTRIX_OIDC_ISSUER` | `http://dex.localhost:5556/dex` | Must equal the Dex issuer byte-for-byte; discovery is fetched from `{issuer}/.well-known/openid-configuration`. |
 | `INQTRIX_OIDC_CLIENT_ID` | `inqtrix-local` | The static client from `dex-config.yaml`. |
-| `INQTRIX_OIDC_CLIENT_SECRET` | `inqtrix-dev-oidc-secret` | Same variable feeds the Dex container, so a single export covers both sides. |
+| `INQTRIX_OIDC_CLIENT_SECRET` | the value selected above | Same variable feeds the Dex container and host-side API; keep the value in the private companion file and export it only into the API process. |
 | `INQTRIX_OIDC_REDIRECT_URL` | `http://127.0.0.1:5100/api/auth/callback` | Must match a registered redirect URI byte-for-byte (`localhost` is a different string). |
 | `INQTRIX_SESSION_SECRET` | any random string | CSRF-token derivation; required in oidc mode. |
 | `INQTRIX_PAT_PEPPER` | any random string | HMAC pepper for personal access tokens; required in oidc mode. |
 | `INQTRIX_OIDC_INSECURE_DEV_COOKIES` | `true` | Drops the `Secure` flag and `__Host-` prefix so login works over plain `http://127.0.0.1` in every browser. NEVER in production; activation is loudly logged. |
 
+Install the project once with either `uv sync --extra dev` or a standard
+environment created with `python -m venv .venv` followed by
+`python -m pip install -e ".[dev]"`. The following block uses plain Python;
+uv users can replace its final command with
+`uv run python examples/webserver_stacks/anthropic_perplexity.py`.
+
 ```bash
 INQTRIX_AUTH_MODE=oidc \
-INQTRIX_OIDC_ISSUER=http://127.0.0.1:5556/dex \
+INQTRIX_OIDC_ISSUER=http://dex.localhost:5556/dex \
 INQTRIX_OIDC_CLIENT_ID=inqtrix-local \
-INQTRIX_OIDC_CLIENT_SECRET=inqtrix-dev-oidc-secret \
+INQTRIX_OIDC_CLIENT_SECRET=replace-with-the-same-local-dev-secret \
 INQTRIX_OIDC_REDIRECT_URL=http://127.0.0.1:5100/api/auth/callback \
 INQTRIX_SESSION_SECRET=dev-session-secret-change-me \
 INQTRIX_PAT_PEPPER=dev-pat-pepper-change-me \
 INQTRIX_OIDC_INSECURE_DEV_COOKIES=true \
-uv run python examples/webserver_stacks/anthropic_perplexity.py
+python examples/webserver_stacks/anthropic_perplexity.py
 ```
 
-Any other stack script (or `uv run python -m inqtrix`) accepts the same
-variables. The startup log line records `auth_mode=oidc`.
+Any other stack script accepts the same variables. The env-only server starts
+with `uv run python -m inqtrix` or, after the pip installation,
+`python -m inqtrix`. The startup log line records `auth_mode=oidc`.
 
 ## 3. The browser login flow
 

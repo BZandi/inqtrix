@@ -20,12 +20,12 @@ from inqtrix.auth.pat import (
     PatLimitExceeded,
     PatService,
     PatVerifier,
-    PersonalAccessToken,
     format_pat,
     hash_pat_secret,
     mint_pat_credentials,
     parse_pat,
 )
+from inqtrix.auth.permissions import AuditEntry
 
 PEPPER = "test-pepper"
 USER_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -39,13 +39,25 @@ class ActiveUserLookup:
         return None
 
 
+class RecordingAudit:
+    def __init__(self) -> None:
+        self.entries: list[AuditEntry] = []
+
+    async def record(self, entry: AuditEntry) -> None:
+        self.entries.append(entry)
+
+
 def make_verifier(
-    store: MemoryPatStore, *, pepper: str = PEPPER
+    store: MemoryPatStore,
+    *,
+    pepper: str = PEPPER,
+    audit: RecordingAudit | None = None,
 ) -> PatVerifier:
     return PatVerifier(
         store=store,
         pepper=pepper,
         user_lookup=ActiveUserLookup(),
+        audit=audit,
     )
 
 
@@ -186,6 +198,55 @@ class TestLastUsedThrottle:
         assert (
             await store.get(minted.record.token_id)
         ).last_used_at == base + 400
+
+
+class TestAuditLifecycle:
+    @pytest.mark.asyncio
+    async def test_memory_store_records_one_sampled_lifecycle(
+        self, monkeypatch
+    ):
+        store = MemoryPatStore()
+        audit = RecordingAudit()
+        service = make_service(store, audit=audit)
+        verifier = make_verifier(store, audit=audit)
+
+        minted = await mint(service)
+        base = minted.record.created_at
+        monkeypatch.setattr(time, "time", lambda: base + 10)
+        await verifier.verify(minted.plaintext)
+        await verifier.verify(minted.plaintext)
+        assert await service.revoke_token(
+            tenant_id="default",
+            token_id=minted.record.token_id,
+            owner_user_id=USER_ID,
+        )
+
+        assert [entry.action for entry in audit.entries] == [
+            "pat.created",
+            "pat.used",
+            "pat.revoked",
+        ]
+        assert {
+            entry.resource_id for entry in audit.entries
+        } == {minted.record.token_id}
+        assert audit.entries[1].origin["auth_method"] == "pat"
+
+    def test_canonical_sink_binding_is_idempotent_but_not_replaceable(self):
+        store = MemoryPatStore()
+        first = RecordingAudit()
+        second = RecordingAudit()
+        service = make_service(store)
+        verifier = make_verifier(store)
+
+        service.bind_audit(first)
+        service.bind_audit(first)
+        verifier.bind_audit(first)
+        verifier.bind_audit(first)
+
+        with pytest.raises(RuntimeError, match="cannot be rebound"):
+            service.bind_audit(second)
+        with pytest.raises(RuntimeError, match="cannot be rebound"):
+            verifier.bind_audit(second)
 
 
 class TestManagement:

@@ -198,7 +198,7 @@ def run_planner(
                     f"{', '.join(web_tasks)}."
                 )
         if allowed_task_kinds is not None:
-            # Skill allowlist (plan M3 `3.3`): activated skills restrict
+            # Activated skill allowlists restrict
             # the tool families; a task outside the union is a repair
             # error, so a forbidden task never even gets persisted.
             blocked = [

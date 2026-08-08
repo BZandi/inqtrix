@@ -1,9 +1,11 @@
 import type { SuggestionDescriptor } from '@inqtrix/editor-schema'
 import type { HocuspocusProvider } from '@hocuspocus/provider'
+import type { Editor } from '@tiptap/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { EditorCollaborationActivity } from '@/api/inqtrixClient'
 import {
+  bindInspectorSuggestionEvents,
   durableSuggestionAuthorsFromActivity,
   INSPECTOR_ATTRIBUTION_MAX_PAGES,
   inspectorAttributionWarning,
@@ -207,5 +209,49 @@ describe('durable collaboration attribution', () => {
       id: 'user-opaque-7f3a',
       name: 'Collaborator',
     })
+  })
+})
+
+describe('inspector suggestion event lifecycle', () => {
+  it('removes listeners from the captured view after Tiptap destroys the editor', () => {
+    const viewDom = new EventTarget()
+    let destroyed = false
+    let viewReads = 0
+    const editor = {
+      get isDestroyed() {
+        return destroyed
+      },
+      get view() {
+        viewReads += 1
+        if (destroyed) throw new Error('editor view is not available')
+        return { dom: viewDom }
+      },
+    } as unknown as Editor
+    const onCollision = vi.fn()
+    const onError = vi.fn()
+
+    const unbind = bindInspectorSuggestionEvents(editor, { onCollision, onError })
+    destroyed = true
+
+    expect(() => unbind?.()).not.toThrow()
+    expect(viewReads).toBe(1)
+  })
+
+  it('does not resolve the view of an editor that is already destroyed', () => {
+    const view = vi.fn(() => {
+      throw new Error('editor view is not available')
+    })
+    const editor = {
+      isDestroyed: true,
+      get view() {
+        return view()
+      },
+    } as unknown as Editor
+
+    expect(bindInspectorSuggestionEvents(editor, {
+      onCollision: vi.fn(),
+      onError: vi.fn(),
+    })).toBeNull()
+    expect(view).not.toHaveBeenCalled()
   })
 })

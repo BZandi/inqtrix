@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pydantic import BaseModel
 
@@ -71,6 +71,11 @@ class CapabilityContext:
         on_provider_retry: Optional platform observer for one visible provider
             retry. Capability handlers enrich the notice with operation input;
             they never invent retry policy themselves.
+        question: The server-owned assignment text available to capability
+            adapters as context, never as a model-supplied tool argument.
+        search_provider: Request-resolved, authority-guarded search provider.
+            When absent, a direct capability adapter uses its composition-time
+            default. Models cannot set or replace this field.
     """
 
     principal: "Principal | None"
@@ -78,6 +83,12 @@ class CapabilityContext:
     workspace_id: str | None = None
     run_id: str | None = None
     knowledge_collection_ids: frozenset[str] | None = None
+    question: str = ""
+    search_provider: Any | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     authority_check: Callable[[], None] | None = field(
         default=None,
         repr=False,

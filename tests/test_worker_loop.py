@@ -9,6 +9,7 @@ executes EXACTLY the code path the HTTP in-process runner uses.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from concurrent.futures import Future
 from typing import Any
@@ -25,12 +26,17 @@ from inqtrix.runs.postgres_store import ClaimedRun
 from inqtrix.runs.valkey_queue import QueuedJob
 from inqtrix.server.container import build_container
 from inqtrix.settings import Settings
+from inqtrix.storage.runtime_contract import DatabaseRuntimeUnavailableError
 from inqtrix.worker.loop import (
     FencedRunHandle,
     WorkerClaimGuardError,
+    WorkerClaimUnavailableError,
     WorkerLoop,
 )
-from inqtrix.worker.__main__ import _DatabaseClaimGuard
+from inqtrix.worker.__main__ import (
+    _DatabaseClaimGuard,
+    _wait_for_database_claim_contract,
+)
 
 from tests.contract._app import StubLLM, StubSearch, minimal_agent_result
 
@@ -54,6 +60,11 @@ class StubStore:
     def claim_for_execution(self, run_id, tenant_id, *, allow_takeover):
         self.calls.append(("claim", run_id, allow_takeover))
         return self.claim_result
+
+    def total_elapsed_seconds(self, run_id):
+        assert self.claim_result is not None
+        assert run_id == self.claim_result.run_id
+        return 0.0
 
     def emit(self, run_id, event_type, payload=None, *, fence_attempt=None):
         self.calls.append(("emit", event_type, payload, fence_attempt))
@@ -112,13 +123,18 @@ class StubQueue:
         self.calls.append(("heartbeat", tuple(message_ids)))
 
 
-def make_loop(store, queue, monkeypatch, *, claim_guard=None) -> WorkerLoop:
+def make_loop(
+    store,
+    queue,
+    monkeypatch,
+    *,
+    claim_guard=None,
+    answer_publisher=None,
+) -> WorkerLoop:
     def fake_graph(question, **kwargs):
         return minimal_agent_result()
 
-    monkeypatch.setattr(
-        "inqtrix.research.web_research.run_web_graph", fake_graph
-    )
+    monkeypatch.setattr("inqtrix.research.web_research.run_web_graph", fake_graph)
     container = build_container(
         providers=ProviderContext(llm=StubLLM(), search=StubSearch()),
         strategies=None,
@@ -135,6 +151,7 @@ def make_loop(store, queue, monkeypatch, *, claim_guard=None) -> WorkerLoop:
         max_attempts=3,
         heartbeat_seconds=15,
         claim_idle_seconds=90,
+        answer_publisher=answer_publisher,
         claim_guard=claim_guard,
     )
 
@@ -187,6 +204,196 @@ def test_database_claim_guard_coalesces_and_latches_failures(monkeypatch):
         guard()
 
     assert calls == ["postgresql+asyncpg://runtime.invalid/inqtrix"]
+
+
+def test_database_claim_guard_coalesces_transient_outage_and_recovers(
+    monkeypatch,
+    caplog,
+):
+    now = [100.0]
+    calls: list[str] = []
+
+    async def recover_contract(database_url, *, app_role, login_policy):
+        del app_role, login_policy
+        calls.append(database_url)
+        if len(calls) == 1:
+            raise DatabaseRuntimeUnavailableError(
+                "database temporarily unavailable"
+            )
+
+    monkeypatch.setattr(
+        "inqtrix.storage.runtime_contract.verify_database_url_runtime_contract",
+        recover_contract,
+    )
+    monkeypatch.setattr(
+        "inqtrix.worker.__main__.time.monotonic",
+        lambda: now[0],
+    )
+    caplog.set_level(logging.INFO, logger="inqtrix")
+    guard = _DatabaseClaimGuard(
+        database_url="postgresql+asyncpg://runtime.invalid/inqtrix",
+        app_role="inqtrix_app",
+        login_policy="restricted",
+        interval_seconds=5,
+    )
+
+    with pytest.raises(Exception) as first:
+        guard()
+    assert isinstance(first.value, WorkerClaimUnavailableError)
+
+    with pytest.raises(Exception) as cached:
+        guard.verify_now()
+    assert isinstance(cached.value, WorkerClaimUnavailableError)
+    assert calls == ["postgresql+asyncpg://runtime.invalid/inqtrix"]
+
+    now[0] += 5
+    guard()
+    guard()
+
+    assert calls == [
+        "postgresql+asyncpg://runtime.invalid/inqtrix",
+        "postgresql+asyncpg://runtime.invalid/inqtrix",
+    ]
+    events = [getattr(record, "event", None) for record in caplog.records]
+    assert events.count("worker.database_contract_unavailable") == 1
+    assert events.count("worker.database_contract_recovered") == 1
+
+
+def test_worker_bootstrap_waits_for_transient_contract_recovery() -> None:
+    calls = 0
+    sleeps: list[float] = []
+    def guard() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise WorkerClaimUnavailableError(
+                "database temporarily unavailable",
+                retry_after_seconds=0.25,
+            )
+
+    _wait_for_database_claim_contract(
+        guard,
+        sleep=sleeps.append,
+    )
+
+    assert calls == 2
+    assert sleeps == [0.25]
+
+
+def test_worker_bootstrap_keeps_permanent_contract_failure_fatal() -> None:
+    sleeps: list[float] = []
+
+    def guard() -> None:
+        raise WorkerClaimGuardError("unsafe database role")
+
+    with pytest.raises(WorkerClaimGuardError, match="unsafe database role"):
+        _wait_for_database_claim_contract(
+            guard,
+            sleep=sleeps.append,
+        )
+
+    assert sleeps == []
+
+
+def test_worker_loop_waits_for_transient_startup_contract(
+    monkeypatch,
+) -> None:
+    store = StubStore(claim_result=None)
+
+    class RecoveringGuard:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def verify_now(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise WorkerClaimUnavailableError(
+                    "database temporarily unavailable",
+                    retry_after_seconds=0,
+                )
+
+        def __call__(self) -> None:
+            return None
+
+    class StartupQueue(StubQueue):
+        loop: WorkerLoop | None = None
+
+        def ensure_group(self):
+            self.calls.append(("ensure_group",))
+
+        def claim_pending(self):
+            self.calls.append(("claim_pending",))
+            assert self.loop is not None
+            self.loop.request_stop()
+            return []
+
+    guard = RecoveringGuard()
+    queue = StartupQueue()
+    loop = make_loop(store, queue, monkeypatch, claim_guard=guard)
+    queue.loop = loop
+
+    loop.run_forever()
+
+    assert guard.calls == 2
+    assert queue.calls == [("ensure_group",), ("claim_pending",)]
+    assert store.calls == []
+
+
+def test_transient_claim_guard_pauses_every_claim_path(
+    monkeypatch,
+) -> None:
+    store = StubStore(claim_result=claimed())
+    queue = StubQueue()
+
+    def pause_claims() -> None:
+        raise WorkerClaimUnavailableError(
+            "database temporarily unavailable",
+            retry_after_seconds=5,
+        )
+
+    loop = make_loop(store, queue, monkeypatch, claim_guard=pause_claims)
+
+    with pytest.raises(WorkerClaimUnavailableError):
+        loop._tick()
+
+    assert store.calls == []
+    assert queue.calls == []
+
+
+def test_worker_loop_survives_transient_contract_failure_after_startup(
+    monkeypatch,
+) -> None:
+    store = StubStore(claim_result=None)
+
+    class StartupQueue(StubQueue):
+        def ensure_group(self):
+            self.calls.append(("ensure_group",))
+
+        def claim_pending(self):
+            self.calls.append(("claim_pending",))
+            return []
+
+    queue = StartupQueue()
+    loop = make_loop(store, queue, monkeypatch)
+    ticks = 0
+
+    def tick() -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 1:
+            raise WorkerClaimUnavailableError(
+                "database temporarily unavailable",
+                retry_after_seconds=0,
+            )
+        loop.request_stop()
+
+    monkeypatch.setattr(loop, "_tick", tick)
+
+    loop.run_forever()
+
+    assert ticks == 2
+    assert queue.calls == [("ensure_group",), ("claim_pending",)]
+    assert store.calls == []
 
 
 def test_database_claim_guard_immediate_probe_bypasses_success_cache(
@@ -486,15 +693,11 @@ def test_successful_execution_completes_then_acks(monkeypatch):
     ],
     ids=["rate-limit", "timeout", "transport", "upstream-5xx"],
 )
-def test_worker_persists_stable_execution_failure_type(
-    monkeypatch, exc, error_type
-):
+def test_worker_persists_stable_execution_failure_type(monkeypatch, exc, error_type):
     def fail_execution(*_args, **_kwargs):
         raise exc
 
-    monkeypatch.setattr(
-        "inqtrix.worker.loop.execute_run_request", fail_execution
-    )
+    monkeypatch.setattr("inqtrix.worker.loop.execute_run_request", fail_execution)
     store = StubStore(claim_result=claimed())
     queue = StubQueue()
 
@@ -513,9 +716,7 @@ def test_worker_rehydrates_source_policy_and_execution_directive(monkeypatch):
         captured.append((run_request, kwargs))
         handle.complete(minimal_agent_result())
 
-    monkeypatch.setattr(
-        "inqtrix.worker.loop.execute_run_request", fake_execute
-    )
+    monkeypatch.setattr("inqtrix.worker.loop.execute_run_request", fake_execute)
     store = StubStore(
         claim_result=claimed(
             payload={
@@ -551,6 +752,31 @@ def test_worker_rehydrates_source_policy_and_execution_directive(monkeypatch):
     assert captured[0][1]["workspace_id"] == "ws-agent"
 
 
+def test_worker_passes_the_shared_answer_publisher_to_execution(monkeypatch):
+    """Queue replay uses the same central publication contract as the API."""
+    captured: list[Any] = []
+    publisher = object()
+
+    def fake_execute(handle, **kwargs):
+        captured.append(kwargs.get("answer_publisher"))
+        handle.complete(minimal_agent_result())
+
+    monkeypatch.setattr("inqtrix.worker.loop.execute_run_request", fake_execute)
+    store = StubStore(claim_result=claimed())
+    queue = StubQueue()
+    loop = make_loop(
+        store,
+        queue,
+        monkeypatch,
+        answer_publisher=publisher,
+    )
+
+    loop._start(job(), takeover=False)
+    assert loop.drain(timeout=10), "job did not finish in time"
+
+    assert captured == [publisher]
+
+
 def test_worker_ignores_legacy_child_budget_and_emits_stable_notice(
     monkeypatch,
 ):
@@ -561,9 +787,7 @@ def test_worker_ignores_legacy_child_budget_and_emits_stable_notice(
         captured.append(kwargs)
         handle.complete(minimal_agent_result())
 
-    monkeypatch.setattr(
-        "inqtrix.worker.loop.execute_run_request", fake_execute
-    )
+    monkeypatch.setattr("inqtrix.worker.loop.execute_run_request", fake_execute)
     store = StubStore(
         claim_result=claimed(
             payload={
@@ -589,8 +813,7 @@ def test_worker_ignores_legacy_child_budget_and_emits_stable_notice(
     notices = [
         call
         for call in store.calls
-        if call[0] == "emit"
-        and call[1] == "inqtrix.agent.activity"
+        if call[0] == "emit" and call[1] == "inqtrix.agent.activity"
     ]
     assert len(notices) == 1
     assert notices[0][2] == {
@@ -660,9 +883,7 @@ def test_fenced_handle_threads_the_attempt_into_terminal_writes():
     handle.cancel("client_requested_cancel")
 
     assert ("complete", "run_w1", 7) in store.calls
-    assert any(
-        call[0] == "fail" and call[4] == 7 for call in store.calls
-    )
+    assert any(call[0] == "fail" and call[4] == 7 for call in store.calls)
     assert ("cancelled", "run_w1", "client_requested_cancel", 7) in store.calls
 
 
@@ -681,9 +902,7 @@ def test_reconciler_re_enqueues_stale_queued_rows(monkeypatch, stale):
 
 def test_reconciler_cooldown_suppresses_duplicate_floods(monkeypatch):
     store = StubStore(claim_result=None)
-    store.stale_queued_runs = lambda *, older_than_seconds: [
-        ("run_s1", "default")
-    ]
+    store.stale_queued_runs = lambda *, older_than_seconds: [("run_s1", "default")]
     queue = StubQueue()
     loop = make_loop(store, queue, monkeypatch)
 
@@ -702,9 +921,7 @@ def test_self_reclaim_of_own_entry_is_never_acked(monkeypatch):
     from inqtrix.worker.loop import _ActiveJob
 
     with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(
-            job=job(), cancel_event=threading.Event()
-        )
+        loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
 
     loop._start(job(), takeover=True)  # same message id "1-0"
 
@@ -721,9 +938,7 @@ def test_duplicate_dispatch_for_active_run_is_acked_not_dropped(monkeypatch):
     from inqtrix.worker.loop import _ActiveJob
 
     with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(
-            job=job(), cancel_event=threading.Event()
-        )
+        loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
 
     duplicate = QueuedJob(
         message_id="2-0",
@@ -770,9 +985,7 @@ def test_unsegmented_worker_keeps_historical_duplicate_ack(monkeypatch):
         claim_idle_seconds=90,
     )
     with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(
-            job=job(), cancel_event=threading.Event()
-        )
+        loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
 
     loop._start(successor_job(), takeover=False)
 
@@ -793,9 +1006,7 @@ def test_queued_successor_is_held_hearted_and_claimed_after_old_ack(
     old = job()
     successor = successor_job()
     with loop._lock:
-        loop._active[old.run_id] = _ActiveJob(
-            job=old, cancel_event=threading.Event()
-        )
+        loop._active[old.run_id] = _ActiveJob(job=old, cancel_event=threading.Event())
 
     loop._start(successor, takeover=False)
 
@@ -833,9 +1044,7 @@ def test_second_successor_duplicate_is_acked_while_first_is_held(monkeypatch):
     from inqtrix.worker.loop import _ActiveJob
 
     with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(
-            job=job(), cancel_event=threading.Event()
-        )
+        loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
     loop._start(successor_job("2-0"), takeover=False)
     loop._start(successor_job("3-0"), takeover=False)
 
@@ -851,9 +1060,7 @@ def test_successor_status_read_error_never_degrades_to_ack(monkeypatch):
     from inqtrix.worker.loop import _ActiveJob
 
     with loop._lock:
-        loop._active["run_w1"] = _ActiveJob(
-            job=job(), cancel_event=threading.Event()
-        )
+        loop._active["run_w1"] = _ActiveJob(job=job(), cancel_event=threading.Event())
 
     with pytest.raises(RuntimeError, match="database unavailable"):
         loop._start(successor_job(), takeover=False)

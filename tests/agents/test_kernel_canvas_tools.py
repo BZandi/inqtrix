@@ -217,7 +217,7 @@ def test_write_canvas_normalizes_currency_but_preserves_math_and_code():
                 {
                     "title": "Markt-Memo",
                     "content_markdown": (
-                        "Umsatz: US-$1.5T. Formel: $x$. "
+                        "Umsatz: US-$1.5T.\n\nFormel: $x$. "
                         "Code: `$raw`."
                     ),
                     "deliverable_kind": "memo",
@@ -240,7 +240,7 @@ def test_write_canvas_normalizes_currency_but_preserves_math_and_code():
         ).json()
 
     assert detail["content_markdown"] == (
-        r"Umsatz: US-\$1.5T. Formel: $x$. Code: `$raw`."
+        "Umsatz: US-\\$1.5T.\n\nFormel: $x$. Code: `$raw`."
     )
 
 

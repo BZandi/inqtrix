@@ -264,13 +264,13 @@ describe('FastAPI-to-Node operations', () => {
       document_id: DOCUMENT_ID,
       markdown: '# Shared',
       max_document_bytes: 10 * 1024 * 1024,
-      schema_version: 1,
+      schema_version: 2,
     })
     expect(conversion).toMatchObject({
       projection_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
       projection_markdown: expect.any(String),
       schema_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
-      schema_version: 1,
+      schema_version: 2,
       snapshot: {
         covered_sequence: 0,
         state_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
@@ -289,13 +289,35 @@ describe('FastAPI-to-Node operations', () => {
       projection_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
       projection_markdown: expect.any(String),
       schema_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
-      schema_version: 1,
+      schema_version: 2,
       sequence: 3,
       snapshot: {
         covered_sequence: 3,
         state_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
         state_update_base64: expect.any(String),
         state_vector_base64: expect.any(String),
+      },
+    })
+    await fixture.close()
+  })
+
+  it('converts an empty editor document to canonical collaboration state', async () => {
+    const document = editorJsonToYDoc(parseEditorMarkdown('Seed'))
+    const fixture = await operationsFixture(document, 0)
+
+    const conversion = await fixture.operations.convert({
+      document_id: DOCUMENT_ID,
+      markdown: '',
+      max_document_bytes: 10 * 1024 * 1024,
+      schema_version: 2,
+    })
+
+    expect(conversion).toMatchObject({
+      projection_markdown: '',
+      schema_version: 2,
+      snapshot: {
+        covered_sequence: 0,
+        state_update_base64: expect.any(String),
       },
     })
     await fixture.close()

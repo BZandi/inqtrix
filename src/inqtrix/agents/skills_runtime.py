@@ -1,4 +1,4 @@
-"""Skill runtime for the agent algorithms (plan M3 `3.3`/`3.4`/`3.5`).
+"""Skill runtime for the agent algorithms.
 
 The pieces both brains share: the delimited instruction block (user
 content, never system authority), the fast-tier clarification point

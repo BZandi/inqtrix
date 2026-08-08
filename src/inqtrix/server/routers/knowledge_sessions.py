@@ -13,6 +13,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse, Response
 
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.project.knowledge_sessions_ports import (
@@ -21,6 +22,7 @@ from inqtrix.project.knowledge_sessions_ports import (
     KnowledgeSessionGroupNotFound,
     KnowledgeSessionNotFound,
 )
+from inqtrix.runs.deletion_operations import DeletionOperationConflict
 from inqtrix.services.request_parsing import (
     error_response,
     workspace_id_from_request,
@@ -39,6 +41,10 @@ def _meta_payload(s: KnowledgeSession) -> dict[str, Any]:
         "id": s.id, "title": s.title,
         "group_id": s.group_id,
         "created_at": s.created_at, "updated_at": s.updated_at,
+        "lifecycle_status": s.lifecycle_status,
+        "deletion_operation_id": s.deletion_operation_id,
+        "deletion_stage": s.deletion_stage,
+        "deletion_error": s.deletion_error,
     }
 
 
@@ -70,6 +76,7 @@ async def _json_object(req: Request) -> Any:
 
 def build_router(container: "AppContainer") -> APIRouter:
     service = container.knowledge_sessions_service
+    deletion_service = container.asset_deletion_service
     if service is None:
         raise RuntimeError(
             "build_router(knowledge_sessions) requires a wired service."
@@ -173,18 +180,32 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(404, "Sitzung nicht gefunden", "not_found")
         return _full_payload(session)
 
-    @router.delete("/v1/knowledge-sessions/{session_id}", status_code=204)
+    @router.delete("/v1/knowledge-sessions/{session_id}")
     async def delete_session(
         session_id: str,
         req: Request,
+        principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
         try:
+            if service.durable:
+                summary = await deletion_service.start_knowledge_session(
+                    session_id,
+                    principal=principal,
+                    visible_to=visible_to,
+                    workspace_id=workspace_id_from_request(req),
+                )
+                return JSONResponse(status_code=202, content=summary)
             await service.delete_session(
                 session_id, visible_to=visible_to,
                 request_workspace_id=workspace_id_from_request(req),
             )
         except KnowledgeSessionNotFound:
             return error_response(404, "Sitzung nicht gefunden", "not_found")
+        except DeletionOperationConflict:
+            return error_response(
+                409, "Sitzung wird bereits geloescht", "deletion_in_progress"
+            )
+        return Response(status_code=204)
 
     return router

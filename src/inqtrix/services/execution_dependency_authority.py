@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class ExecutionDependencyAuthorizer:
-    """Recheck pinned collections and skill revisions at every safepoint."""
+    """Recheck the actor, pinned collections and skill revisions at every safepoint."""
 
     def __init__(
         self,
@@ -25,17 +25,23 @@ class ExecutionDependencyAuthorizer:
         authorization: "AuthorizationService",
         knowledge_service: "KnowledgeService | None",
         skill_service: "SkillService | None",
+        user_lookup: "UserDirectory | None",
     ) -> None:
         self._authorization = authorization
         self._knowledge_service = knowledge_service
         self._skill_service = skill_service
+        self._user_lookup = user_lookup
+        """Live actor directory. Owned here rather than by each caller so
+        the actor probe rides the same safepoint pass and event loop as
+        the permission resolve — two callers previously duplicated the
+        probe in a separate per-call loop of its own."""
 
     def check(
         self,
         request: "RunRequest",
         principal: "Principal | None",
     ) -> None:
-        """Synchronously fail when any pinned dependency is no longer valid."""
+        """Synchronously fail when the actor or any pinned dependency is gone."""
         run_coro_sync(self._check_async(request, principal))
 
     async def _check_async(
@@ -43,6 +49,19 @@ class ExecutionDependencyAuthorizer:
         request: "RunRequest",
         principal: "Principal | None",
     ) -> None:
+        if principal is not None and principal.user_id is not None:
+            if self._user_lookup is None:
+                raise AuthorizationRevoked(
+                    "execution has no live user lookup"
+                )
+            user = await self._user_lookup.find_by_user_id(
+                tenant_id=principal.tenant_id,
+                user_id=principal.user_id,
+            )
+            if user is None or user.disabled_at is not None:
+                raise AuthorizationRevoked(
+                    "effective actor is missing or disabled"
+                )
         visible_to = (
             await self._authorization.resolve_user_context(principal)
             if principal is not None

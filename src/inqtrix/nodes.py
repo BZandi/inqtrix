@@ -9,6 +9,7 @@ strategy / settings abstractions defined in the ``inqtrix`` package.
 """
 
 from dataclasses import dataclass
+import contextvars
 import datetime as dt
 import inspect
 import json
@@ -17,6 +18,7 @@ import re
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from threading import Lock
 from typing import Any, Callable, Iterator, NamedTuple, Sequence, TypeVar
 
 from openai import OpenAIError
@@ -35,6 +37,10 @@ from inqtrix.evidence import (
     project_claim_verification_to_evidence,
     render_evidence_ledger_overview,
     select_section_evidence_records,
+)
+from inqtrix.evidence_claim_processing import (
+    claim_extraction_text as _shared_claim_extraction_text,
+    claim_provider_refs as _shared_claim_provider_refs,
 )
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.exceptions import (
@@ -71,6 +77,7 @@ from inqtrix.runtime_logging import (
     forensic_enabled,
     make_record_id,
     normalize_source_provenance,
+    sanitize_grounded_search_result,
 )
 from inqtrix.model_routing import describe_resolution, describe_unresolved_resolution
 from inqtrix.scoring import append_score_snapshot
@@ -87,9 +94,10 @@ from inqtrix.text import NEGATION_TOKENS, STOPWORDS, is_none_value, tokenize
 from inqtrix.urls import (
     count_allowed_links,
     domain_from_url,
-    extract_urls,
     normalize_url,
+    sanitize_error,
     sanitize_answer_links,
+    scrub_credential_urls,
     today,
 )
 
@@ -131,12 +139,11 @@ class AnswerAppendixSections(NamedTuple):
 # ``verification_basis == "verified_quality_source"``.
 #
 # Rationale: that basis is set in ``DefaultClaimConsolidator.consolidate()``
-# (`strategies/_claim_consolidation.py`) for claims that are supported by
-# *exactly one* citation from a primary- or mainstream-tier domain
-# (Reuters / Tagesschau / SEC / ECB / ...). The verification status stays
-# ``verified`` -- a single high-tier source is legitimate evidence -- but
-# we want the *next* research round to actively try to corroborate it
-# with an independent second source. This bonus, stacked on top of the
+# (`strategies/_claim_consolidation.py`) for claims supported by exactly one
+# provider-grounded primary or mainstream source. The status remains
+# ``verified`` for attributed use, but the *next* research round should
+# actively try to corroborate it with an independent second source. This
+# bonus, stacked on the
 # generic +5 for any verified claim with ``citation_count < 2`` further
 # down in :func:`_select_crosscheck_targets`, gives single-quality-source
 # claims a total ranking score of +9, putting them at the front of the
@@ -180,6 +187,8 @@ class SearchOutcome(NamedTuple):
 
     result: GroundedSearchResult
     notice: str | None
+    started_at: str
+    finished_at: str
 
 
 def _domain_filter_for_query_text(
@@ -216,57 +225,18 @@ def _claim_extraction_text(
     *,
     max_sources: int = 8,
 ) -> str:
-    """Append provider-neutral source provenance to claim extraction text."""
-    source_lines: list[str] = []
-    seen_urls: set[str] = set()
-    for record in citation_records:
-        url = normalize_url(str(record.get("canonical_url", "") or record.get("url", "") or ""))
-        if not url or url in seen_urls:
-            continue
-        seen_urls.add(url)
-        title = " ".join(str(record.get("title", "") or "").split())[:140]
-        date = " ".join(str(record.get("source_date", "") or "").split())[:80]
-        # Prefix with the provider rank/id so the model can resolve the
-        # answer's inline [n] / [web:n] citations to the matching source.
-        rank = record.get("rank")
-        prefix = f"[{rank}] {url}" if rank else f"- {url}"
-        if title:
-            prefix += f" | title: {title}"
-        if date:
-            prefix += f" | date: {date}"
-        source_lines.append(prefix)
-        if len(seen_urls) >= max_sources:
-            break
-    if not source_lines:
-        return answer_text
-    return (
-        f"{answer_text}\n\n"
-        "Quellenprovenienz aus normalisierten Suchergebnissen:\n"
-        + "\n".join(source_lines)
+    """Use the shared provider-grounded prompt projection."""
+    return _shared_claim_extraction_text(
+        answer_text,
+        citation_records,
+        max_sources=max_sources,
     )
 
 
+
 def _claim_provider_refs(citation_records: list[dict[str, Any]]) -> list[ProviderCitationRef]:
-    """Return provider-local citation refs for deterministic claim binding."""
-    refs: list[ProviderCitationRef] = []
-    seen: set[str] = set()
-    for record in citation_records:
-        rank = str(record.get("rank", "") or "").strip()
-        url = normalize_url(str(record.get("canonical_url", "") or record.get("url", "") or ""))
-        if not rank or not url:
-            continue
-        key = f"{rank}|{url}"
-        if key in seen:
-            continue
-        seen.add(key)
-        refs.append(
-            ProviderCitationRef(
-                ref=rank,
-                url=url,
-                title=str(record.get("title", "") or ""),
-            )
-        )
-    return refs
+    """Use the shared provider-ref projection for deterministic binding."""
+    return _shared_claim_provider_refs(citation_records)
 
 
 def _claim_text_needs_targeted_verification(claim_text: str) -> bool:
@@ -865,7 +835,7 @@ def _record_algorithm_failure(
     failures = s.setdefault("algorithm_failures", [])
     if isinstance(failures, list):
         failures.append(entry)
-    log.warning("ALGO-FAIL %s (%s): %s", phase, reason, message)
+    log.warning("ALGO-FAIL phase=%s reason=%s", phase, reason)
     _append_forensic_event(
         s,
         settings,
@@ -1304,13 +1274,28 @@ def _map_cancellable(
             that already failed fatally.
     """
     cancel_event = s.get("_cancel_event")
+    # Pool threads start with EMPTY contextvars; snapshot the submitting
+    # thread's context ONCE PER ITEM (a Context cannot be entered
+    # concurrently) so the metrics feature label and other ambient
+    # context survive the fan-out (scheduler precedent).
+    item_contexts = [contextvars.copy_context() for _ in items]
     if cancel_event is None:
+        # Keep the literal ex.map construct: its result iterator cancels
+        # the queued remainder when an item fails — the submit-and-
+        # gather shape would run every queued item to completion first.
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            return list(ex.map(fn, items))
+            return list(
+                ex.map(
+                    lambda ctx, item: ctx.run(fn, item),
+                    item_contexts,
+                    items,
+                )
+            )
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures: list[Future[_FanoutResult]] = [
-            ex.submit(fn, item) for item in items
+            ex.submit(ctx.run, fn, item)
+            for ctx, item in zip(item_contexts, items)
         ]
         pending: set[Future[_FanoutResult]] = set(futures)
         failed = False
@@ -1724,12 +1709,11 @@ def _compose_answer_sections(
                 ),
             )
             log.warning(
-                "TRACE section %d/%d '%s': token limit hit "
+                "TRACE section %d/%d: token limit hit "
                 "(finish_reason=%s, request_max_tokens=%d, "
                 "completion_tokens=%d, content_length=%d)",
                 index,
                 len(answer_sections),
-                section_spec.heading,
                 finish_reason,
                 section_request_max_tokens,
                 section_completion_tokens,
@@ -1746,11 +1730,10 @@ def _compose_answer_sections(
                 ),
             )
             log.warning(
-                "TRACE section %d/%d '%s': truncation signals detected "
+                "TRACE section %d/%d: truncation signals detected "
                 "(reasons=%s, finish_reason=%s)",
                 index,
                 len(answer_sections),
-                section_spec.heading,
                 section_reasons,
                 finish_reason,
             )
@@ -1787,9 +1770,8 @@ def _compose_answer_sections(
                 )
                 log.warning(
                     "TRACE compose: aborting after %d consecutive empty sections "
-                    "(last='%s', position=%d/%d, finish_reason=%s)",
+                    "(position=%d/%d, finish_reason=%s)",
                     consecutive_empty,
-                    section_spec.heading,
                     index,
                     len(answer_sections),
                     finish_reason or "unknown",
@@ -2534,8 +2516,8 @@ def classify(
         # the fallback visible in progress, logs and the iteration trace.
         _exc_label = type(exc).__name__
         log.warning(
-            "Classify-Fallback aktiviert (%s): %s — nutze deterministische Defaults",
-            _exc_label, exc,
+            "Classify-Fallback aktiviert (error_code=%s) — nutze deterministische Defaults",
+            _exc_label,
         )
         emit_progress(s, t(s, "classify_failed", label=_exc_label), severity="warning")
         s["done"] = False
@@ -3051,9 +3033,13 @@ def plan(
             t(s, "plan_new_queries", added=added, strategy_hint=strategy_hint),
         )
 
+    # Exact queries are durable run-audit data.  They must not be mirrored to
+    # ordinary stdout where operators outside the run's authorization scope
+    # may read them.  The protected query records below retain the complete
+    # text; the operational log needs only cardinality and stable ids.
     log.info(
-        "TRACE plan: round=%d new_queries=%s total=%d",
-        s["round"], json.dumps(new_q, ensure_ascii=False), len(s["queries"]),
+        "TRACE plan: round=%d new_query_count=%d total=%d",
+        s["round"], len(new_q), len(s["queries"]),
     )
 
     # If no new queries: answer directly (prevents infinite loop)
@@ -3278,6 +3264,159 @@ def search(
         search_kwargs["return_related"] = True
 
     _query_domain_filters = [_domain_filter_for_query(q) for q in new_q]
+    # Unwrap the tracing decorator: the timeline must show the REAL
+    # provider (AzureFoundryBingSearch, ...), never the wrapper class.
+    from inqtrix.runtime_logging import unwrap_provider
+
+    _search_provider_label = type(unwrap_provider(providers.search)).__name__
+    s.setdefault("query_records", [])
+    s.setdefault("source_records", {})
+    s.setdefault("provider_citation_records", [])
+    s.setdefault("evidence_ledger", [])
+    s.setdefault("answer_evidence_bindings", [])
+
+    # Register every invocation before the fan-out starts. A provider failure
+    # can abort the node before its ordinary evidence projection is reached;
+    # these stable slots plus the protected start event preserve the exact
+    # redacted query and let the failure path terminalise every submitted item.
+    _round_query_records: list[dict[str, Any]] = []
+    _query_started_monotonic: list[float] = []
+    _query_record_lock = Lock()
+    _search_parameters = {
+        key: value
+        for key, value in search_kwargs.items()
+        if key != "deadline"
+    }
+    for _qi, q in enumerate(new_q):
+        query_id = _query_id_for(
+            s,
+            round_index=s["round"],
+            query_index=offset + _qi,
+            query=q,
+        )
+        started_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        query_record = {
+            "query_id": query_id,
+            "invocation_id": query_id,
+            "round": s["round"],
+            "query_index": offset + _qi,
+            "query": scrub_credential_urls(q),
+            "domain_filter": _query_domain_filters[_qi] or [],
+            "provider": _search_provider_label,
+            "parameters": dict(_search_parameters)
+            | {"domain_filter": _query_domain_filters[_qi] or []},
+            "status": "running",
+            "notice": "",
+            "started_at": started_at,
+            "finished_at": "",
+            "duration_ms": 0,
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            },
+        }
+        _round_query_records.append(query_record)
+        _query_started_monotonic.append(time.monotonic())
+        s["query_records"].append(query_record)
+        _append_forensic_event(
+            s,
+            settings,
+            event="query_invocation_started",
+            node="search",
+            payload=query_record,
+        )
+        emit_run_event(
+            s,
+            "inqtrix.research.query.started",
+            {
+                key: query_record[key]
+                for key in (
+                    "invocation_id",
+                    "query_id",
+                    "round",
+                    "query_index",
+                    "query",
+                    "domain_filter",
+                    "provider",
+                    "parameters",
+                    "status",
+                    "started_at",
+                )
+            },
+        )
+
+    def _finalize_query_record(
+        query_index: int,
+        *,
+        status: str,
+        notice: str = "",
+        result: GroundedSearchResult | None = None,
+    ) -> None:
+        finished_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        duration_ms = max(
+            0,
+            int(
+                (time.monotonic() - _query_started_monotonic[query_index])
+                * 1000
+            ),
+        )
+        with _query_record_lock:
+            record = _round_query_records[query_index]
+            # The fan-out coordinator may terminalise an abandoned slot after
+            # a sibling failed. A late worker must never regress that terminal
+            # audit record.
+            if record.get("status") != "running":
+                return
+            record.update(
+                {
+                    "status": status,
+                    "notice": format_log_excerpt(
+                        scrub_credential_urls(notice),
+                        limit=512,
+                    ),
+                    "finished_at": finished_at,
+                    "duration_ms": duration_ms,
+                    "usage": {
+                        "prompt_tokens": max(
+                            0, int(getattr(result, "prompt_tokens", 0) or 0)
+                        ),
+                        "completion_tokens": max(
+                            0,
+                            int(getattr(result, "completion_tokens", 0) or 0),
+                        ),
+                    },
+                }
+            )
+
+    def _emit_query_finished_events() -> None:
+        for record in _round_query_records:
+            _append_forensic_event(
+                s,
+                settings,
+                event="query_invocation_finished",
+                node="search",
+                payload=record,
+            )
+            emit_run_event(
+                s,
+                "inqtrix.research.query.finished",
+                {
+                    key: record[key]
+                    for key in (
+                        "invocation_id",
+                        "query_id",
+                        "round",
+                        "query_index",
+                        "provider",
+                        "status",
+                        "notice",
+                        "started_at",
+                        "finished_at",
+                        "duration_ms",
+                        "usage",
+                    )
+                },
+            )
 
     # Parallel search
     def _search_one(item: tuple[int, str, list[str] | None]) -> SearchOutcome:
@@ -3286,20 +3425,50 @@ def search(
             domain_filter if search_capabilities.supports("domain_filter") else None
         )
         operation_label = f"{t(s, 'retry_operation_search')} {query_index + 1}/{len(new_q)}"
-        with _provider_retry_progress_context(
-            providers.search,
-            s,
-            operation_label=operation_label,
-            testing_mode=settings.testing_mode,
-        ):
-            result = providers.search.search(
-                q,
-                domain_filter=effective_domain_filter,
-                **search_kwargs,
+        try:
+            with _provider_retry_progress_context(
+                providers.search,
+                s,
+                operation_label=operation_label,
+                testing_mode=settings.testing_mode,
+            ):
+                result = providers.search.search(
+                    q,
+                    domain_filter=effective_domain_filter,
+                    **search_kwargs,
+                )
+            if not isinstance(result, GroundedSearchResult):
+                raise TypeError(
+                    "SearchProvider.search() must return GroundedSearchResult"
+                )
+            notice = _consume_nonfatal_notice(providers.search)
+            _finalize_query_record(
+                query_index,
+                # An empty provider result is still a successfully completed
+                # invocation. Evidence sufficiency is decided later and must
+                # not be conflated with transport/provider failure.
+                status="completed",
+                notice=str(notice or ""),
+                result=result,
             )
-        if not isinstance(result, GroundedSearchResult):
-            raise TypeError("SearchProvider.search() must return GroundedSearchResult")
-        return SearchOutcome(result, _consume_nonfatal_notice(providers.search))
+            record = _round_query_records[query_index]
+            return SearchOutcome(
+                result,
+                notice,
+                str(record["started_at"]),
+                str(record["finished_at"]),
+            )
+        except Exception as exc:
+            _finalize_query_record(
+                query_index,
+                status=(
+                    "cancelled"
+                    if isinstance(exc, AgentCancelled)
+                    else "failed"
+                ),
+                notice=sanitize_error(exc),
+            )
+            raise
 
     provider_cap = int(getattr(search_capabilities, "max_concurrency", 0) or 0)
     _n_workers = min(
@@ -3308,55 +3477,58 @@ def search(
         provider_cap or len(new_q),
     )
 
-    _outcomes = _map_cancellable(
-        s,
-        _search_one,
-        [
-            (query_index, q, domain_filter)
-            for query_index, (q, domain_filter) in enumerate(
-                zip(new_q, _query_domain_filters, strict=True)
-            )
-        ],
-        max_workers=_n_workers,
-        operation_label=t(s, "retry_operation_search"),
-        testing_mode=settings.testing_mode,
-    )
+    try:
+        _outcomes = _map_cancellable(
+            s,
+            _search_one,
+            [
+                (query_index, q, domain_filter)
+                for query_index, (q, domain_filter) in enumerate(
+                    zip(new_q, _query_domain_filters, strict=True)
+                )
+            ],
+            max_workers=_n_workers,
+            operation_label=t(s, "retry_operation_search"),
+            testing_mode=settings.testing_mode,
+        )
+    except Exception as exc:
+        terminal_status = (
+            "cancelled" if isinstance(exc, AgentCancelled) else "failed"
+        )
+        for query_index, record in enumerate(_round_query_records):
+            if record.get("status") == "running":
+                _finalize_query_record(
+                    query_index,
+                    status=terminal_status,
+                    notice=(
+                        "fan-out cancelled before this query completed"
+                        if terminal_status == "cancelled"
+                        else "fan-out stopped after a sibling query failed"
+                    ),
+                )
+        _emit_query_finished_events()
+        raise
+    _emit_query_finished_events()
     check_cancel_event(s)
-    results = [outcome.result for outcome in _outcomes]
+    # Provider prose, snippets and URLs are untrusted. Redact credential-
+    # bearing URLs before any claim prompt, checkpoint, ledger or UI event can
+    # observe them. Inqtrix does not follow those URLs; they remain user-facing
+    # provenance anchors for the provider-grounded search result.
+    results = [
+        sanitize_grounded_search_result(outcome.result) for outcome in _outcomes
+    ]
     notices = [outcome.notice for outcome in _outcomes]
 
-    _round_query_records: list[dict[str, Any]] = []
     _source_records_by_query: dict[int, list[dict[str, Any]]] = {}
     _citation_records_by_query: dict[int, list[dict[str, Any]]] = {}
     _existing_citation_ids = {
         str(record.get("citation_id", ""))
         for record in s.get("provider_citation_records", [])
     }
-    _search_provider_label = type(providers.search).__name__
-    s.setdefault("query_records", [])
-    s.setdefault("source_records", {})
-    s.setdefault("provider_citation_records", [])
-    s.setdefault("evidence_ledger", [])
-    s.setdefault("answer_evidence_bindings", [])
-
     for _qi, q in enumerate(new_q):
         r = results[_qi]
-        query_id = _query_id_for(
-            s,
-            round_index=s["round"],
-            query_index=offset + _qi,
-            query=q,
-        )
-        query_record = {
-            "query_id": query_id,
-            "round": s["round"],
-            "query_index": offset + _qi,
-            "query": q,
-            "domain_filter": _query_domain_filters[_qi] or [],
-            "provider": _search_provider_label,
-        }
-        _round_query_records.append(query_record)
-        s["query_records"].append(query_record)
+        query_record = _round_query_records[_qi]
+        query_id = str(query_record["query_id"])
 
         _all_source_urls = [src.url for src in r.sources if src.url]
         tier_explanations = _tier_explanations_for_urls(
@@ -3411,6 +3583,8 @@ def search(
             },
         )
 
+    # Azure Web Grounding is the complete web-evidence boundary. The linked
+    # pages remain user-verifiable destinations and are not fetched here.
     _query_details: list[dict[str, Any]] = []
     if _collect_query_details:
         for _qi, q in enumerate(new_q):
@@ -3475,23 +3649,27 @@ def search(
     tuning = settings.report_tuning
     _claim_inputs: list[tuple[int, str, list[str], list[ProviderCitationRef]]] = []
     for _qi, r in enumerate(results):
-        if r.answer:
-            claim_text = _claim_extraction_text(
-                r.answer,
-                _citation_records_by_query.get(_qi, []),
-                max_sources=tuning.claim_citation_cap,
-            )
-            claim_citations = [
-                normalize_url(str(record.get("canonical_url", "") or ""))
-                for record in _citation_records_by_query.get(_qi, [])
-                if normalize_url(str(record.get("canonical_url", "") or ""))
-            ] or list(r.citation_urls)
-            _claim_inputs.append((
-                _qi,
-                claim_text,
-                claim_citations,
-                _claim_provider_refs(_citation_records_by_query.get(_qi, [])),
-            ))
+        query_citations = _citation_records_by_query.get(_qi, [])
+        if not r.answer:
+            continue
+        claim_text = _claim_extraction_text(
+            r.answer,
+            query_citations,
+            max_sources=tuning.claim_citation_cap,
+        )
+        if not claim_text.strip():
+            continue
+        claim_citations = [
+            normalize_url(str(record.get("canonical_url", "") or ""))
+            for record in query_citations
+            if normalize_url(str(record.get("canonical_url", "") or ""))
+        ] or list(r.citation_urls)
+        _claim_inputs.append((
+            _qi,
+            claim_text,
+            claim_citations,
+            _claim_provider_refs(query_citations),
+        ))
 
     _claim_results: dict[int, tuple[list[dict[str, Any]], int, int]] = {}
     _claim_metadata: dict[int, dict[str, Any]] = {}
@@ -3663,6 +3841,47 @@ def search(
             metadata.get("unknown_provider_ref_count", 0) or 0
         )
         _claim_unbound_count += int(metadata.get("unbound_claim_count", 0) or 0)
+    for idx, metadata in _claim_metadata.items():
+        omitted_chars = int(metadata.get("input_omitted_chars", 0) or 0)
+        omitted_citations = int(metadata.get("citation_omitted_count", 0) or 0)
+        source_prompt_omissions = [
+            record
+            for record in _citation_records_by_query.get(idx, [])
+            if int(
+                record.get("claim_prompt_original_omitted_chars", 0)
+                or 0
+            )
+            > 0
+        ]
+        if omitted_chars or omitted_citations or source_prompt_omissions:
+            query_id = (
+                str(_round_query_records[idx].get("query_id", "") or "")
+                if idx < len(_round_query_records)
+                else ""
+            )
+            s.setdefault("evidence_omissions", []).append(
+                {
+                    "stage": "prompt",
+                    "record_ids": [
+                        str(record.get("source_id", "") or "")
+                        for record in source_prompt_omissions
+                        if str(record.get("source_id", "") or "")
+                    ]
+                    or ([query_id] if query_id else []),
+                    "count": max(
+                        1,
+                        omitted_citations + len(source_prompt_omissions),
+                    ),
+                    "reason": "claim_extraction_prompt_budget",
+                    "details": {
+                        "input_omitted_chars": omitted_chars,
+                        "citation_omitted_count": omitted_citations,
+                        "source_projection_omission_count": len(
+                            source_prompt_omissions
+                        ),
+                    },
+                }
+            )
 
     # Surface claim-binding health once per round when claims could not be
     # bound to a source. This is the visible counterpart to the forensic
@@ -3694,9 +3913,11 @@ def search(
     for _qi, r in enumerate(results):
         # Ingest a result that carries EITHER a synthesized answer OR cited
         # sources. GroundedSearchResult.sources is independent of .answer, so a
-        # provider may return citable sources without prose; those become
-        # source-context evidence records (claim extraction simply yields none
-        # without answer text). Skip only when both are empty.
+        # provider may return citable sources without prose. Successfully read
+        # original content has already entered the normal claim extraction,
+        # attribution, authority and consolidation path above; only an empty or
+        # failed extraction remains source-context-only. Skip only when both
+        # provider answer and discovered sources are empty.
         if not r.answer and not r.sources:
             continue
 
@@ -3822,6 +4043,8 @@ def search(
                 for src in r.sources
                 if src.rank and src.url
             },
+            "prompt_tokens": int(r.prompt_tokens or 0),
+            "completion_tokens": int(r.completion_tokens or 0),
         }
         _append_forensic_event(
             s,
@@ -3911,9 +4134,24 @@ def search(
                 node="search",
                 payload=_entry,
             )
-    claim_ledger = derive_claim_ledger_from_evidence(s.get("evidence_ledger", []) or [])
+    claim_ledger = derive_claim_ledger_from_evidence(
+        s.get("evidence_ledger", []) or [],
+    )
     if len(claim_ledger) > tuning.claim_ledger_cap:
-        _ledger_dropped_total += len(claim_ledger) - tuning.claim_ledger_cap
+        _dropped_claims = claim_ledger[:-tuning.claim_ledger_cap]
+        _ledger_dropped_total += len(_dropped_claims)
+        s.setdefault("evidence_omissions", []).append(
+            {
+                "stage": "claim",
+                "record_ids": [
+                    str(item.get("raw_claim_id", "") or "")
+                    for item in _dropped_claims
+                    if item.get("raw_claim_id")
+                ],
+                "count": len(_dropped_claims),
+                "reason": "claim_ledger_projection_budget",
+            }
+        )
         claim_ledger = claim_ledger[-tuning.claim_ledger_cap:]
 
     emit_progress(
@@ -3936,11 +4174,30 @@ def search(
         consolidated_claims_all,
         answer_contract=s.get("answer_contract", "general"),
     )
+    s["consolidated_claims_full"] = consolidated_claims_all
     consolidated_claims = strategies.claim_consolidation.materialize(
         consolidated_claims_all,
         max_total=tuning.materialize_max_total,
         max_unverified=tuning.materialize_max_unverified,
     )
+    if len(consolidated_claims_all) > len(consolidated_claims):
+        visible_ids = {
+            str(item.get("claim_id", "") or "")
+            for item in consolidated_claims
+        }
+        omitted_claim_ids = [
+            str(item.get("claim_id", "") or "")
+            for item in consolidated_claims_all
+            if str(item.get("claim_id", "") or "") not in visible_ids
+        ]
+        s.setdefault("evidence_omissions", []).append(
+            {
+                "stage": "prompt",
+                "record_ids": omitted_claim_ids,
+                "count": len(omitted_claim_ids),
+                "reason": "claim_materialization_budget",
+            }
+        )
     s["consolidated_claims"] = consolidated_claims
     claim_counts, claim_quality, np_total, np_verified = strategies.claim_consolidation.quality_metrics(
         consolidated_claims)
@@ -4058,11 +4315,12 @@ def search(
         )
 
     log.info(
-        "TRACE search: round=%d queries=%s sources_found=%d total_citations=%d "
-        "evidence_records=%d claims=%d claim_quality=%.2f",
-        s["round"], json.dumps(new_q, ensure_ascii=False),
-        sources_found, len(s["all_citations"]), len(s.get("evidence_ledger", []) or []),
-        len(consolidated_claims), claim_quality,
+        "TRACE search: round=%d query_count=%d sources_found=%d "
+        "total_citations=%d evidence_records=%d claims=%d "
+        "claim_quality=%.2f",
+        s["round"], len(new_q), sources_found, len(s["all_citations"]),
+        len(s.get("evidence_ledger", []) or []), len(consolidated_claims),
+        claim_quality,
     )
 
     # Aspect coverage is estimated directly from the EvidenceLedger: each
@@ -4135,10 +4393,14 @@ def search(
         payload=_search_score_snapshot,
     )
 
-    # Aggregate token usage from search provider + claim extraction.
-    s["total_prompt_tokens"] += _search_prompt_tokens + _claim_prompt_tokens
+    # Aggregate token usage from provider search and claim extraction.
+    s["total_prompt_tokens"] += (
+        _search_prompt_tokens
+        + _claim_prompt_tokens
+    )
     s["total_completion_tokens"] += (
-        _search_completion_tokens + _claim_completion_tokens
+        _search_completion_tokens
+        + _claim_completion_tokens
     )
 
     append_iteration_log(s, {
@@ -4564,7 +4826,9 @@ def evaluate(
                 f"hinzugekommen.\n"
             )
 
-    # Hint for negative evidence
+    # Repeated, independent Azure searches can make absence visible. The
+    # evaluator must still phrase that conclusion according to the observed
+    # provider results rather than claiming an exhaustive crawl.
     negative_evidence_hint = ""
     if s["round"] >= 2:
         _prev_conf = s.get("final_confidence", 0)
@@ -4728,8 +4992,8 @@ def evaluate(
         # No fail-open: on evaluate error stay conservative.
         _exc_label = type(exc).__name__
         log.warning(
-            "Evaluate-Fallback aktiviert (%s, round=%d, model=%s): %s",
-            _exc_label, s["round"], evaluate_model, exc,
+            "Evaluate-Fallback aktiviert (error_code=%s, round=%d, model=%s)",
+            _exc_label, s["round"], evaluate_model,
         )
         emit_progress(s, t(s, "evaluate_failed", label=_exc_label), severity="warning")
         conf = min(max(s.get("final_confidence", 0), 5), settings.confidence_stop - 2)
@@ -4789,8 +5053,11 @@ def evaluate(
     _prev_conf = s.get("final_confidence", 0)
     _n_citations = len(s.get("all_citations", []))
 
-    _falsification_just_triggered = strategies.stop_criteria.check_falsification(
-        s, conf, _prev_conf)
+    _falsification_just_triggered = (
+        strategies.stop_criteria.check_falsification(
+            s, conf, _prev_conf
+        )
+    )
     conf, _stagnation_detected = strategies.stop_criteria.check_stagnation(
         s, conf, _prev_conf, _n_citations, _falsification_just_triggered)
     _utility, _utility_stop = strategies.stop_criteria.compute_utility(
@@ -4877,10 +5144,10 @@ def evaluate(
 
     # --- Final stop logic ---
     log.info(
-        "TRACE evaluate: round=%d confidence=%d/%d gaps='%s' evidence_records=%d "
+        "TRACE evaluate: round=%d confidence=%d/%d gap_chars=%d evidence_records=%d "
         "quality=%.2f claim_quality=%.2f claims(v/c/u)=%d/%d/%d model=%s done=%s",
         s["round"], conf, settings.confidence_stop,
-        format_log_excerpt(s.get("gaps", ""), limit=300),
+        len(str(s.get("gaps", "") or "")),
         len(s.get("evidence_ledger", []) or []),
         quality_score, claim_quality,
         verified_claims, contested_claims, unverified_claims,
@@ -5491,7 +5758,10 @@ def answer(
                 answer_fallback_reason = (
                     "Die Antwort-Synthese hat das LLM-Timeout ueberschritten."
                 )
-                log.warning("TRACE answer fallback (timeout): %s", exc_timeout)
+                log.warning(
+                    "TRACE answer fallback (error_code=%s)",
+                    type(exc_timeout).__name__,
+                )
                 emit_progress(s, t(s, "answer_timeout_fallback"), severity="warning")
                 s["answer"] = _build_fallback_answer(
                     answer_fallback_reason,
@@ -5508,7 +5778,10 @@ def answer(
             BedrockAPIError,
         ) as e:
             provider_error_label = f"{type(e).__name__}: {e}"[:240]
-            log.error("Finale Antwort fehlgeschlagen: %s", e)
+            log.error(
+                "Finale Antwort fehlgeschlagen (error_code=%s)",
+                type(e).__name__,
+            )
             if strict_algorithm_mode:
                 phase = _answer_failure_phase(e)
                 composition_result = _build_answer_algorithm_failure(
@@ -5559,9 +5832,9 @@ def answer(
                         f"({fallback_error_label})."
                     )
                     log.warning(
-                        "TRACE answer fallback (fallback_model_failed model=%s): %s",
+                        "TRACE answer fallback (fallback_model_failed model=%s error_code=%s)",
                         fallback_model,
-                        e2,
+                        type(e2).__name__,
                     )
                     emit_progress(
                         s,
@@ -5582,8 +5855,8 @@ def answer(
                     "kein Fallback-Modell konfiguriert."
                 )
                 log.warning(
-                    "TRACE answer fallback (no_fallback_model): %s",
-                    e,
+                    "TRACE answer fallback (no_fallback_model error_code=%s)",
+                    type(e).__name__,
                 )
                 emit_progress(
                     s,
@@ -5886,7 +6159,12 @@ def answer(
     if n_sources:
         stats_parts.append(f"{n_sources} Quellen recherchiert")
     if rendered_record_count:
-        stats_parts.append(f"{rendered_record_count} Quellen im Evidence-Prompt")
+        rendered_record_label = (
+            "Evidenzbeleg" if rendered_record_count == 1 else "Evidenzbelege"
+        )
+        stats_parts.append(
+            f"{rendered_record_count} {rendered_record_label} im Evidence-Prompt"
+        )
     if allowed_link_count:
         stats_parts.append(f"{allowed_link_count} Quellen im Report verlinkt")
     if verified_claim_count:
@@ -5906,7 +6184,12 @@ def answer(
             f"{single_source_n}/{verified_claim_count} single-source ({ratio_pct}%)"
         )
     if omitted_record_count:
-        stats_parts.append(f"{omitted_record_count} Quellen wegen Budget ausgelassen")
+        omitted_record_label = (
+            "Evidenzbeleg" if omitted_record_count == 1 else "Evidenzbelege"
+        )
+        stats_parts.append(
+            f"{omitted_record_count} {omitted_record_label} wegen Budget ausgelassen"
+        )
     if _evidence_contract_status != "unknown":
         stats_parts.append(f"Evidence-Contract: {_evidence_contract_status}")
     if s.get("algorithm_failures"):
@@ -5932,7 +6215,6 @@ def answer(
         allowed_link_count, reference_link_count, additional_link_count, len(section_logs),
         n_rounds, elapsed, conf, finish_reason or "", bool(incomplete_reasons),
     )
-    log.debug("ANSWER text:\n%s", s["answer"])
 
     append_iteration_log(s, {
         "node": "answer",

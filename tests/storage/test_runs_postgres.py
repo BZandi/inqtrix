@@ -19,12 +19,24 @@ from importlib import import_module
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.exceptions import AgentProviderTimeout, AgentRateLimited
+from inqtrix.project.agent_sessions_ports import AgentSessionNotFound
+from inqtrix.project.agent_sessions_postgres import PostgresAgentSessionStore
+from inqtrix.project.knowledge_sessions_ports import KnowledgeSessionNotFound
+from inqtrix.project.knowledge_sessions_postgres import (
+    PostgresKnowledgeSessionStore,
+)
+from inqtrix.result import ResearchResult
+from inqtrix.runs.deletion_operations import (
+    DeletionTargetKind,
+    SessionDeletionContext,
+)
+from inqtrix.runs.deletion_postgres import PostgresDeletionOperationStore
 from inqtrix.runs.postgres_store import PostgresRunStore
 from inqtrix.server.runs import (
     RunActive,
@@ -33,16 +45,19 @@ from inqtrix.server.runs import (
     RunSessionActive,
 )
 from inqtrix.storage.db import build_engine, build_session_factory
-from inqtrix.storage.identity_orm import resource_shares, users
+from inqtrix.storage.agent_sessions_orm import agent_sessions
+from inqtrix.storage.deletions_orm import deletion_operations
+from inqtrix.storage.identity_orm import audit_log, resource_shares, users
 from inqtrix.storage.identity_postgres import PostgresIdentityBackend
+from inqtrix.storage.knowledge_sessions_orm import knowledge_sessions
 from inqtrix.storage.migrate import run_migrations
+from inqtrix.storage.runs_orm import run_events, runs
+from inqtrix.storage.usage_orm import llm_usage
+from inqtrix.state import build_run_snapshot
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 USER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -63,6 +78,7 @@ RUN_TEST_USERS = (
 )
 
 RUN_SUMMARY_KEYS = {
+    "access",
     "run_id",
     "status",
     "queue_position",
@@ -110,11 +126,18 @@ async def engine():
                 )
             await session.execute(text("DELETE FROM run_events"))
             await session.execute(
-                resource_shares.delete().where(
-                    resource_shares.c.resource_type == "run"
+                deletion_operations.delete().where(
+                    deletion_operations.c.target_kind.in_(
+                        ("agent_session", "knowledge_session")
+                    )
                 )
             )
+            await session.execute(
+                resource_shares.delete().where(resource_shares.c.resource_type == "run")
+            )
             await session.execute(text("DELETE FROM runs"))
+            await session.execute(text("DELETE FROM agent_sessions"))
+            await session.execute(text("DELETE FROM knowledge_sessions"))
             for user_id in RUN_TEST_USERS:
                 label = f"runs-pg-{user_id.hex}"
                 await session.execute(
@@ -156,10 +179,22 @@ async def store(engine):
     store.close()
 
 
-def wait_for_status(store, run_id, statuses, timeout=10.0):
+def wait_for_status(
+    store,
+    run_id,
+    statuses,
+    timeout=10.0,
+    *,
+    workspace_id=None,
+    visible_to=None,
+):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        summary = store.get(run_id)
+        summary = store.get(
+            run_id,
+            workspace_id=workspace_id,
+            visible_to=visible_to,
+        )
         if summary["status"] in statuses:
             return summary
         time.sleep(0.05)
@@ -177,6 +212,13 @@ def submit_noop(store, *, work=None, **kwargs):
             snapshot={"current_node": "answer", "done": True},
         )
 
+    if kwargs.get("kind") == "agent" and kwargs.get("session_id"):
+        seed_agent_session(
+            store,
+            str(kwargs["session_id"]),
+            created_by_user_id=kwargs.get("created_by_user_id"),
+            workspace_id=kwargs.get("workspace_id"),
+        )
     return store.submit(
         question=kwargs.pop("question", "Wie ist die Haftung geregelt?"),
         stack_name="default",
@@ -186,12 +228,82 @@ def submit_noop(store, *, work=None, **kwargs):
     )
 
 
+def seed_agent_session(
+    store: PostgresRunStore,
+    session_id: str,
+    *,
+    created_by_user_id: uuid.UUID | None = None,
+    workspace_id: str | None = None,
+) -> None:
+    """Create the durable session registry required by agent admission."""
+
+    async def _seed() -> None:
+        async with store._session("default") as session:
+            await session.execute(
+                pg_insert(agent_sessions)
+                .values(
+                    id=session_id,
+                    tenant_id="default",
+                    created_by_user_id=created_by_user_id,
+                    workspace_id=workspace_id,
+                    title="Agent session fixture",
+                    group_id=None,
+                    items_json="[]",
+                    lifecycle_status="active",
+                    created_at=time.time(),
+                    updated_at=time.time(),
+                )
+                .on_conflict_do_nothing(index_elements=(agent_sessions.c.id,))
+            )
+
+    store._call(_seed())
+
+
+def seed_knowledge_session(
+    store: PostgresRunStore,
+    session_id: str,
+    *,
+    created_by_user_id: uuid.UUID | None = None,
+    workspace_id: str | None = None,
+) -> None:
+    """Create the durable registry row required by Knowledge-run admission."""
+
+    async def _seed() -> None:
+        async with store._session("default") as session:
+            await session.execute(
+                pg_insert(knowledge_sessions)
+                .values(
+                    id=session_id,
+                    tenant_id="default",
+                    created_by_user_id=created_by_user_id,
+                    workspace_id=workspace_id,
+                    title="Knowledge session fixture",
+                    group_id=None,
+                    items_json="[]",
+                    lifecycle_status="active",
+                    created_at=time.time(),
+                    updated_at=time.time(),
+                )
+                .on_conflict_do_nothing(index_elements=(knowledge_sessions.c.id,))
+            )
+
+    store._call(_seed())
+
+
 class _RecordingDispatchQueue:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, str]] = []
 
     def enqueue(self, *, run_id: str, tenant_id: str) -> None:
         self.enqueued.append((run_id, tenant_id))
+
+
+class _RecordingDeletionQueue:
+    def __init__(self) -> None:
+        self.enqueued: list[tuple[str, str]] = []
+
+    def enqueue(self, *, operation_id: str, tenant_id: str) -> None:
+        self.enqueued.append((operation_id, tenant_id))
 
 
 def test_worker_claim_store_dispatches_children_and_parent_wakes(
@@ -212,6 +324,11 @@ def test_worker_claim_store_dispatches_children_and_parent_wakes(
         worker_id="pytest-claim-dispatch",
     )
     try:
+        seed_agent_session(
+            dispatching,
+            "session-dispatch",
+            workspace_id="ws-agent",
+        )
         parent = dispatching.submit(
             question="parent",
             stack_name="default",
@@ -224,20 +341,14 @@ def test_worker_claim_store_dispatches_children_and_parent_wakes(
                 "body": {"mode": "workspace_agent"},
             },
         )
-        assert (
-            dispatching.dispatch_status(parent["run_id"], "default")
-            == "queued"
-        )
+        assert dispatching.dispatch_status(parent["run_id"], "default") == "queued"
         assert dispatching.dispatch_status(parent["run_id"], "other") is None
         parent_claim = dispatching.claim_for_execution(
             parent["run_id"], "default", allow_takeover=False
         )
         assert parent_claim is not None
         assert parent_claim.workspace_id == "ws-agent"
-        assert (
-            dispatching.dispatch_status(parent["run_id"], "default")
-            == "running"
-        )
+        assert dispatching.dispatch_status(parent["run_id"], "default") == "running"
         child = dispatching.submit(
             question="child",
             stack_name="default",
@@ -305,10 +416,7 @@ def test_worker_claim_store_dispatches_children_and_parent_wakes(
         )
 
         assert dispatching.get(parent["run_id"])["status"] == "queued"
-        assert (
-            dispatching.dispatch_status(parent["run_id"], "default")
-            == "queued"
-        )
+        assert dispatching.dispatch_status(parent["run_id"], "default") == "queued"
         assert [run_id for run_id, _tenant in queue.enqueued] == [
             parent["run_id"],
             child["run_id"],
@@ -362,8 +470,7 @@ async def test_migration_scrubs_active_legacy_child_token_budget(
         },
     )
     migration = import_module(
-        "inqtrix.storage.migrations.versions."
-        "0043_agent_task_execution_contract"
+        "inqtrix.storage.migrations.versions." "0043_agent_task_execution_contract"
     )
     engine = build_engine(TEST_DATABASE_URL)
     factory = build_session_factory(engine)
@@ -380,9 +487,7 @@ async def test_migration_scrubs_active_legacy_child_token_budget(
                         {"run_id": child["run_id"]},
                     )
                 ).scalar_one()
-                await session.execute(
-                    text(migration._LEGACY_CHILD_BUDGET_BACKFILL_SQL)
-                )
+                await session.execute(text(migration._LEGACY_CHILD_BUDGET_BACKFILL_SQL))
                 after = (
                     await session.execute(
                         text(
@@ -584,6 +689,7 @@ def test_cancelled_child_park_miss_projects_and_wakes_parent(store) -> None:
         worker_id="pytest-cancelled-park",
     )
     try:
+        seed_agent_session(dispatching, "session-cancelled-park")
         parent = dispatching.submit(
             question="parent",
             stack_name="default",
@@ -643,9 +749,7 @@ def test_cancelled_child_park_miss_projects_and_wakes_parent(store) -> None:
                 if event["type"] == "inqtrix.agent.child.progress"
             ]
             assert projected[-1]["data"]["run_status"] == "cancelled"
-            assert projected[-1]["data"]["task_id"] == (
-                "task-cancelled-park"
-            )
+            assert projected[-1]["data"]["task_id"] == ("task-cancelled-park")
         finally:
             parent_events.close()
         assert queue.enqueued[-1] == (parent["run_id"], "default")
@@ -670,6 +774,81 @@ def test_submit_executes_and_keeps_the_wire_shape(store):
     assert result["answer"] == "fertig"
 
 
+def test_knowledge_result_receipt_survives_store_restart(store):
+    degradation = {
+        "reason": "vector_overfetch_cap",
+        "retrieval_mode": "dense",
+        "stage": "vector_candidate_pool",
+        "requested_candidate_pool": 40,
+        "returned_candidate_pool": 7,
+        "final_top_k": 4,
+        "final_evidence_complete": False,
+        "requested_top_k": 4,
+        "returned_hits": 2,
+        "candidate_cap": 64,
+    }
+    result_state = {
+        "knowledge_profile": {
+            "id": "standard",
+            "requested": "standard",
+            "auto_selected": False,
+            "auto_reason": "",
+            "degraded_stages": [],
+        },
+        "knowledge_gate": {
+            "enabled": True,
+            "sufficient": True,
+            "coverage": "full",
+            "rounds_used": 0,
+            "max_rounds": 1,
+        },
+        "knowledge_grounding": {"enabled": True},
+        "knowledge_retrieval": {
+            "degradations": [degradation, dict(degradation)]
+        },
+        "knowledge_candidates": 7,
+        "knowledge_evidence_used": 2,
+    }
+    exported = ResearchResult.from_raw(
+        {"answer": "Belegte Antwort", "result_state": result_state}
+    ).to_export_payload()
+    snapshot = build_run_snapshot(
+        result_state,
+        current_node="answer",
+        last_message="completed",
+    )
+
+    summary = submit_noop(
+        store,
+        work=lambda handle: handle.complete(exported, snapshot=snapshot),
+    )
+    wait_for_status(store, summary["run_id"], {"completed"})
+
+    restarted = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=None,
+        recover_orphans=False,
+        max_concurrent=2,
+        max_queue_size=10,
+        completed_ttl_seconds=300,
+        worker_id="pytest-knowledge-result-reload",
+    )
+    try:
+        restored = restarted.result(summary["run_id"])
+        restored_summary = restarted.get(summary["run_id"])
+        assert restored["knowledge_profile"]["id"] == "standard"
+        assert restored["knowledge_retrieval"] == {
+            "degradations": [degradation]
+        }
+        assert restored_summary["snapshot"]["knowledge_retrieval"] == (
+            restored["knowledge_retrieval"]
+        )
+        assert "queries" not in restored_summary["snapshot"]
+    finally:
+        restarted.close()
+
+
 def test_parallel_root_agent_session_claim_accepts_exactly_one(store):
     """The partial unique index is the cross-worker execution lease."""
     hold = threading.Event()
@@ -691,6 +870,7 @@ def test_parallel_root_agent_session_claim_accepts_exactly_one(store):
         )["run_id"]
 
     try:
+        seed_agent_session(store, "sess-pg-exclusive")
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(submit) for _ in range(2)]
             outcomes: list[object] = []
@@ -703,6 +883,489 @@ def test_parallel_root_agent_session_claim_accepts_exactly_one(store):
         assert sum(isinstance(item, RunSessionActive) for item in outcomes) == 1
     finally:
         hold.set()
+
+
+def test_agent_session_tombstone_blocks_children_until_runs_are_terminal(
+    store,
+) -> None:
+    """Deletion fences child admission and waits for worker termination."""
+
+    del store
+    queue = _RecordingDispatchQueue()
+    durable = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=None,
+        dispatch_queue=queue,
+        recover_orphans=False,
+        max_concurrent=2,
+        max_queue_size=10,
+        completed_ttl_seconds=300,
+        worker_id="pytest-session-deletion-fence",
+    )
+    session_id = "session-deletion-fence"
+    try:
+        seed_agent_session(durable, session_id)
+        root = durable.submit(
+            question="parent",
+            stack_name="default",
+            work=lambda _handle: None,
+            kind="agent",
+            session_id=session_id,
+            request_payload={"body": {"mode": "workspace_agent"}},
+        )
+        claim = durable.claim_for_execution(
+            root["run_id"], "default", allow_takeover=False
+        )
+        assert claim is not None
+
+        async def _tombstone() -> None:
+            async with durable._session("default") as session:
+                await session.execute(
+                    agent_sessions.update()
+                    .where(agent_sessions.c.id == session_id)
+                    .values(
+                        lifecycle_status="deleting",
+                        deletion_operation_id="del_session_fence",
+                        deletion_stage="queued",
+                    )
+                )
+
+        durable._call(_tombstone())
+
+        with pytest.raises(RunSessionActive):
+            durable.submit(
+                question="child",
+                stack_name="default",
+                work=lambda _handle: None,
+                kind="agent_child",
+                parent_run_id=root["run_id"],
+                root_run_id=root["run_id"],
+                request_payload={"body": {"origin_key": "late-child"}},
+            )
+
+        with pytest.raises(RuntimeError, match="still stopping"):
+            durable.prepare_agent_session_aggregate_deletion(
+                session_id,
+                tenant_id="default",
+                requester_user_id=None,
+                workspace_id=None,
+                run_ids=(root["run_id"],),
+            )
+        assert durable.mark_cancelled(
+            root["run_id"],
+            reason="session_deleting",
+            fence_attempt=claim.attempt,
+        )
+        durable.prepare_agent_session_aggregate_deletion(
+            session_id,
+            tenant_id="default",
+            requester_user_id=None,
+            workspace_id=None,
+            run_ids=(root["run_id"],),
+        )
+        durable.delete_agent_session_aggregate(
+            session_id,
+            tenant_id="default",
+            requester_user_id=None,
+            workspace_id=None,
+            run_ids=(root["run_id"],),
+        )
+        assert not any(
+            durable.agent_session_residuals(
+                session_id,
+                tenant_id="default",
+                requester_user_id=None,
+                workspace_id=None,
+                run_ids=(root["run_id"],),
+            ).values()
+        )
+    finally:
+        durable.close()
+
+
+def test_knowledge_session_deletion_removes_only_its_owned_run_aggregate(
+    store,
+) -> None:
+    """Two saved answers are deleted without trusting foreign run ids."""
+
+    session_id = "knowledge-session-delete-owned"
+    workspace_id = "ws-knowledge-owner"
+    seed_knowledge_session(
+        store,
+        session_id,
+        created_by_user_id=OWNER_1,
+        workspace_id=workspace_id,
+    )
+    owned = [
+        submit_noop(
+            store,
+            question=question,
+            mode="knowledge",
+            session_id=session_id,
+            created_by_user_id=OWNER_1,
+            created_by_tenant_id="default",
+            workspace_id=workspace_id,
+        )["run_id"]
+        for question in ("Bekannte Frage", "Unbeantwortbare Frage")
+    ]
+    for run_id in owned:
+        wait_for_status(
+            store,
+            run_id,
+            {"completed"},
+            workspace_id=workspace_id,
+            visible_to=UserContext(
+                principal=Principal(
+                    user_id=OWNER_1,
+                    kind="oidc_session",
+                    tenant_id="default",
+                    role="member",
+                )
+            ),
+        )
+
+    foreign = (
+        "run_knowledge_foreign_owner",
+        "run_knowledge_foreign_workspace",
+        "run_knowledge_foreign_tenant",
+    )
+
+    async def _seed_foreign_runs() -> None:
+        admin_engine = build_engine(TEST_DATABASE_URL)
+        factory = build_session_factory(admin_engine)
+        now = time.time()
+        rows = (
+            {
+                "run_id": foreign[0],
+                "tenant_id": "default",
+                "workspace_id": workspace_id,
+                "created_by_user_id": OWNER_2,
+                "created_by_tenant_id": "default",
+            },
+            {
+                "run_id": foreign[1],
+                "tenant_id": "default",
+                "workspace_id": "ws-knowledge-foreign",
+                "created_by_user_id": OWNER_1,
+                "created_by_tenant_id": "default",
+            },
+            {
+                "run_id": foreign[2],
+                "tenant_id": "tenant-foreign",
+                "workspace_id": workspace_id,
+                "created_by_user_id": OWNER_1,
+                "created_by_tenant_id": "tenant-foreign",
+            },
+        )
+        try:
+            async with factory() as session:
+                async with session.begin():
+                    await session.execute(
+                        runs.insert(),
+                        [
+                            {
+                                **row,
+                                "status": "completed",
+                                "mode": "knowledge",
+                                "kind": "standard",
+                                "session_id": f"foreign-{index}",
+                                "question": "Foreign content",
+                                "stack_name": "default",
+                                "execution_scopes": [],
+                                "agent_overrides": {},
+                                "request_payload": {},
+                                "snapshot": {"done": True},
+                                "result": {"answer": "must survive"},
+                                "event_seq": 1,
+                                "created_at": now + index,
+                                "finished_at": now + index,
+                            }
+                            for index, row in enumerate(rows)
+                        ],
+                    )
+                    await session.execute(
+                        run_events.insert(),
+                        [
+                            {
+                                "run_id": run_id,
+                                "sequence": 1,
+                                "tenant_id": row["tenant_id"],
+                                "type": "inqtrix.node.finished",
+                                "created_at": now + index,
+                                "data": {"answer": "must survive"},
+                            }
+                            for index, (run_id, row) in enumerate(
+                                zip(foreign, rows, strict=True)
+                            )
+                        ],
+                    )
+                    await session.execute(
+                        llm_usage.insert(),
+                        {
+                            "tenant_id": "default",
+                            "user_id": OWNER_1,
+                            "workspace_id": workspace_id,
+                            "run_id": owned[0],
+                            "feature": "knowledge",
+                            "operation": "chat",
+                            "model": "test-model",
+                            "input_tokens": 11,
+                            "output_tokens": 7,
+                            "request_count": 1,
+                            "duration_ms": 25,
+                            "outcome": "success",
+                            "created_at": now,
+                        },
+                    )
+        finally:
+            await admin_engine.dispose()
+
+    store._call(_seed_foreign_runs())
+
+    malicious_ids = (*owned, *foreign)
+    deletion_queue = _RecordingDeletionQueue()
+    deletion_store = PostgresDeletionOperationStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=deletion_queue,
+        max_concurrent=1,
+        completed_ttl_seconds=3600,
+        worker_id="knowledge-session-context-test",
+        recover_orphans=False,
+    )
+    try:
+        summary = deletion_store.submit(
+            target_kind=DeletionTargetKind.KNOWLEDGE_SESSION,
+            target_id=session_id,
+            manifest=(),
+            tenant_id="default",
+            created_by_user_id=OWNER_1,
+            workspace_id=workspace_id,
+            work=lambda _handle: None,
+            session_context=SessionDeletionContext(
+                target_kind=DeletionTargetKind.KNOWLEDGE_SESSION,
+                session_id=session_id,
+                run_ids=malicious_ids,
+            ),
+            total_items=2,
+        )
+        record = deletion_store.get_record(
+            str(summary["operation_id"]),
+            tenant_id="default",
+            created_by_user_id=OWNER_1,
+            workspace_id=workspace_id,
+        )
+        assert record.session_context == SessionDeletionContext(
+            target_kind=DeletionTargetKind.KNOWLEDGE_SESSION,
+            session_id=session_id,
+            run_ids=tuple(owned),
+        )
+        assert deletion_queue.enqueued == [
+            (str(summary["operation_id"]), "default")
+        ]
+    finally:
+        deletion_store.close()
+
+    with pytest.raises(RunSessionActive):
+        submit_noop(
+            store,
+            question="Must not race the deletion fence",
+            mode="knowledge",
+            session_id=session_id,
+            created_by_user_id=OWNER_1,
+            created_by_tenant_id="default",
+            workspace_id=workspace_id,
+        )
+
+    with pytest.raises(RuntimeError, match="outside its owner scope"):
+        store.prepare_knowledge_session_aggregate_deletion(
+            session_id,
+            tenant_id="default",
+            requester_user_id=OWNER_1,
+            workspace_id=workspace_id,
+            run_ids=malicious_ids,
+        )
+
+    store.prepare_knowledge_session_aggregate_deletion(
+        session_id,
+        tenant_id="default",
+        requester_user_id=OWNER_1,
+        workspace_id=workspace_id,
+        run_ids=tuple(owned),
+    )
+    store.delete_knowledge_session_aggregate(
+        session_id,
+        tenant_id="default",
+        requester_user_id=OWNER_1,
+        workspace_id=workspace_id,
+        run_ids=tuple(owned),
+    )
+    assert not any(
+        store.knowledge_session_residuals(
+            session_id,
+            tenant_id="default",
+            requester_user_id=OWNER_1,
+            workspace_id=workspace_id,
+            run_ids=tuple(owned),
+        ).values()
+    )
+
+    async def _counts() -> tuple[int, int, int, int, int, int]:
+        admin_engine = build_engine(TEST_DATABASE_URL)
+        factory = build_session_factory(admin_engine)
+        try:
+            async with factory() as session:
+                owned_runs = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(runs)
+                        .where(runs.c.run_id.in_(owned))
+                    )
+                    or 0
+                )
+                owned_events = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(run_events)
+                        .where(run_events.c.run_id.in_(owned))
+                    )
+                    or 0
+                )
+                foreign_runs = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(runs)
+                        .where(runs.c.run_id.in_(foreign))
+                    )
+                    or 0
+                )
+                foreign_events = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(run_events)
+                        .where(run_events.c.run_id.in_(foreign))
+                    )
+                    or 0
+                )
+                retained_usage = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(llm_usage)
+                        .where(llm_usage.c.run_id.in_(owned))
+                    )
+                    or 0
+                )
+                retained_audit = int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(audit_log)
+                        .where(
+                            audit_log.c.action == "run.deleted",
+                            audit_log.c.resource_id.in_(owned),
+                        )
+                    )
+                    or 0
+                )
+                return (
+                    owned_runs,
+                    owned_events,
+                    foreign_runs,
+                    foreign_events,
+                    retained_usage,
+                    retained_audit,
+                )
+        finally:
+            await admin_engine.dispose()
+
+    assert store._call(_counts()) == (0, 0, 3, 3, 1, 2)
+
+
+@pytest.mark.asyncio
+async def test_retained_deletion_receipts_block_session_recreation(engine) -> None:
+    """Delayed autosaves cannot recreate a terminally deleted session."""
+
+    now = time.time()
+    factory = build_session_factory(engine)
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                deletion_operations.insert(),
+                [
+                    {
+                        "operation_id": "del_agent_session_receipt",
+                        "tenant_id": "default",
+                        "target_kind": "agent_session",
+                        "target_id": "session-deleted-agent",
+                        "manifest": [],
+                        "context": {},
+                        "status": "deleted",
+                        "stage": "deleted",
+                        "completed_items": 0,
+                        "total_items": 0,
+                        "workspace_id": None,
+                        "created_by_user_id": None,
+                        "created_at": now,
+                        "updated_at": now,
+                        "finished_at": now,
+                    },
+                    {
+                        "operation_id": "del_knowledge_session_receipt",
+                        "tenant_id": "default",
+                        "target_kind": "knowledge_session",
+                        "target_id": "session-deleted-knowledge",
+                        "manifest": [],
+                        "context": {},
+                        "status": "deleted",
+                        "stage": "deleted",
+                        "completed_items": 0,
+                        "total_items": 0,
+                        "workspace_id": None,
+                        "created_by_user_id": None,
+                        "created_at": now,
+                        "updated_at": now,
+                        "finished_at": now,
+                    },
+                ],
+            )
+
+    agent_store = PostgresAgentSessionStore(
+        engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE
+    )
+    knowledge_store = PostgresKnowledgeSessionStore(
+        engine=build_engine(TEST_DATABASE_URL), app_role=APP_ROLE
+    )
+    try:
+        with pytest.raises(AgentSessionNotFound):
+            await agent_store.claim_session(
+                id="session-deleted-agent",
+                title="stale",
+                created_at=now,
+                created_by_user_id=None,
+                workspace_id=None,
+            )
+        with pytest.raises(KnowledgeSessionNotFound):
+            await knowledge_store.claim_session(
+                id="session-deleted-knowledge",
+                title="stale",
+                created_at=now,
+                created_by_user_id=None,
+                workspace_id=None,
+            )
+        with pytest.raises(KnowledgeSessionNotFound):
+            await knowledge_store.upsert_session(
+                id="session-deleted-knowledge",
+                title="stale",
+                items_json="[]",
+                group_id=None,
+                created_at=now,
+                updated_at=now,
+                created_by_user_id=None,
+                workspace_id=None,
+            )
+    finally:
+        await agent_store.aclose()
+        await knowledge_store.aclose()
 
 
 def test_metrics_snapshot_counts_running_rows(store):
@@ -743,6 +1406,34 @@ def test_metrics_snapshot_counts_running_rows(store):
     assert store.metrics_snapshot().active == 0
 
 
+def test_owned_run_handle_reads_elapsed_time_without_public_visibility(store):
+    observed: list[float] = []
+    completed = threading.Event()
+
+    def work(handle):
+        observed.append(handle.total_elapsed_seconds())
+        handle.complete(
+            {"answer": "done"},
+            snapshot={"current_node": "answer", "done": True},
+        )
+        completed.set()
+
+    summary = submit_noop(
+        store,
+        work=work,
+        created_by_user_id=OWNER_1,
+        created_by_tenant_id="default",
+    )
+    assert completed.wait(timeout=10)
+    owner = UserContext(principal=Principal(user_id=OWNER_1, kind="oidc_session"))
+    final = store.get(summary["run_id"], visible_to=owner)
+
+    assert final["status"] == "completed"
+    assert observed and observed[0] >= 0.0
+    with pytest.raises(RunNotFound):
+        store.get(summary["run_id"])
+
+
 def test_import_completed_run_is_idempotent_and_owner_scoped(store):
     summary = store.import_completed_run(
         source_run_id="local_imported_pg",
@@ -758,7 +1449,8 @@ def test_import_completed_run_is_idempotent_and_owner_scoped(store):
     run_id = summary["run_id"]
     assert run_id != "local_imported_pg"
     assert summary["status"] == "completed"
-    assert store.result(run_id)["answer"] == "the report body"
+    owner_1 = _scoped(OWNER_1)
+    assert store.result(run_id, visible_to=owner_1)["answer"] == "the report body"
 
     # Idempotent re-import for the same owner: same row, body untouched.
     again = store.import_completed_run(
@@ -770,7 +1462,7 @@ def test_import_completed_run_is_idempotent_and_owner_scoped(store):
         created_by_tenant_id="default",
     )
     assert again["run_id"] == run_id
-    assert store.result(run_id)["answer"] == "the report body"
+    assert store.result(run_id, visible_to=owner_1)["answer"] == "the report body"
 
     # A foreign principal importing the SAME id gets a fresh id; A stays intact.
     foreign = store.import_completed_run(
@@ -782,8 +1474,10 @@ def test_import_completed_run_is_idempotent_and_owner_scoped(store):
         created_by_tenant_id="default",
     )
     assert foreign["run_id"] != run_id
-    assert store.result(run_id)["answer"] == "the report body"
-    assert store.result(foreign["run_id"])["answer"] == "owner B body"
+    assert store.result(run_id, visible_to=owner_1)["answer"] == "the report body"
+    assert store.result(
+        foreign["run_id"], visible_to=_scoped(OWNER_2)
+    )["answer"] == "owner B body"
 
 
 def test_delete_removes_terminal_run_owner_scoped(store):
@@ -812,9 +1506,11 @@ def test_delete_removes_terminal_run_owner_scoped(store):
             workspace_id="ws_other",
             requester_user_id=OWNER_1,
         )
-    assert (
-        store.get(run_id, workspace_id="ws_owner")["run_id"] == run_id
-    )
+    assert store.get(
+        run_id,
+        workspace_id="ws_owner",
+        visible_to=_scoped(OWNER_1),
+    )["run_id"] == run_id
 
     # The owner deletes it durably; the row (and its cascaded events) are gone.
     store.delete(
@@ -911,10 +1607,7 @@ def test_cancel_of_queued_run_is_immediate(store):
         events = store.subscribe(queued["run_id"])
         try:
             assert events.replay[-1]["type"] == "inqtrix.run.cancelled"
-            assert (
-                events.replay[-1]["data"]["reason"]
-                == "cancelled_before_start"
-            )
+            assert events.replay[-1]["data"]["reason"] == "cancelled_before_start"
         finally:
             events.close()
     finally:
@@ -959,12 +1652,15 @@ def test_scoped_visibility_denies_with_404_semantics(store):
         created_by_user_id=USER_A,
         created_by_tenant_id="default",
     )
-    wait_for_status(store, summary["run_id"], {"completed"})
+    wait_for_status(
+        store,
+        summary["run_id"],
+        {"completed"},
+        visible_to=_scoped(USER_A),
+    )
 
     foreign = UserContext(
-        principal=Principal(
-            user_id=USER_B, kind="oidc_session", tenant_id="default"
-        ),
+        principal=Principal(user_id=USER_B, kind="oidc_session", tenant_id="default"),
         workspace_ids=(),
     )
     with pytest.raises(RunNotFound):
@@ -972,14 +1668,10 @@ def test_scoped_visibility_denies_with_404_semantics(store):
     assert store.list(visible_to=foreign) == []
 
     owner = UserContext(
-        principal=Principal(
-            user_id=USER_A, kind="oidc_session", tenant_id="default"
-        ),
+        principal=Principal(user_id=USER_A, kind="oidc_session", tenant_id="default"),
         workspace_ids=(),
     )
-    assert store.get(summary["run_id"], visible_to=owner)["status"] == (
-        "completed"
-    )
+    assert store.get(summary["run_id"], visible_to=owner)["status"] == ("completed")
 
 
 def test_claim_fencing_discards_zombie_terminal_writes(store):
@@ -1000,21 +1692,14 @@ def test_claim_fencing_discards_zombie_terminal_writes(store):
         run_id = third["run_id"]
         assert store.get(run_id)["status"] == "queued"
 
-        first = store.claim_for_execution(
-            run_id, "default", allow_takeover=False
-        )
+        first = store.claim_for_execution(run_id, "default", allow_takeover=False)
         assert first is not None and first.attempt == 1
         # A fresh duplicate message must NOT steal a healthy run...
         assert (
-            store.claim_for_execution(
-                run_id, "default", allow_takeover=False
-            )
-            is None
+            store.claim_for_execution(run_id, "default", allow_takeover=False) is None
         )
         # ...but a reclaim (owner stopped heartbeating) takes over.
-        second = store.claim_for_execution(
-            run_id, "default", allow_takeover=True
-        )
+        second = store.claim_for_execution(run_id, "default", allow_takeover=True)
         assert second is not None and second.attempt == 2
 
         # The zombie's write (old fence) is a discarded no-op...
@@ -1102,9 +1787,7 @@ def test_worker_shape_store_never_sweeps_foreign_rows(store):
         try:
             # get() runs the lazy cleanup — the foreign RUNNING row
             # must survive it untouched.
-            assert (
-                worker_shaped.get(running["run_id"])["status"] == "running"
-            )
+            assert worker_shaped.get(running["run_id"])["status"] == "running"
         finally:
             worker_shaped.close()
     finally:
@@ -1193,18 +1876,14 @@ def test_ttl_cleanup_removes_old_terminal_runs(store):
             time.sleep(0.2)
         else:
             pytest.fail("terminal run was never TTL-evicted")
-        assert all(
-            item["run_id"] != summary["run_id"] for item in store.list()
-        )
+        assert all(item["run_id"] != summary["run_id"] for item in store.list())
     finally:
         store.close()
 
 
 def _scoped(user_id: uuid.UUID) -> UserContext:
     return UserContext(
-        principal=Principal(
-            user_id=user_id, kind="oidc_session", tenant_id="default"
-        ),
+        principal=Principal(user_id=user_id, kind="oidc_session", tenant_id="default"),
         workspace_ids=(),
     )
 
@@ -1230,8 +1909,18 @@ def test_live_direct_share_admits_reads_and_gates_cancel(store):
         created_by_tenant_id="default",
         workspace_id="ws-recipient",
     )
-    wait_for_status(store, shared["run_id"], {"completed"})
-    wait_for_status(store, own["run_id"], {"completed"})
+    wait_for_status(
+        store,
+        shared["run_id"],
+        {"completed"},
+        visible_to=_scoped(SHARE_OWNER),
+    )
+    wait_for_status(
+        store,
+        own["run_id"],
+        {"completed"},
+        visible_to=_scoped(SHARE_RECIPIENT),
+    )
     recipient = _scoped(SHARE_RECIPIENT)
     identity = PostgresIdentityBackend(
         session_factory=store._session_factory,
@@ -1262,9 +1951,7 @@ def test_live_direct_share_admits_reads_and_gates_cancel(store):
 
     summary = store.get(shared["run_id"], visible_to=recipient)
     assert summary["access"] == {"mode": "shared", "permission": "view"}
-    assert store.get(own["run_id"], visible_to=recipient)["access"] == {
-        "mode": "owner"
-    }
+    assert store.get(own["run_id"], visible_to=recipient)["access"] == {"mode": "owner"}
 
     listed = store.list(
         workspace_id="ws-recipient",
@@ -1282,8 +1969,7 @@ def test_live_direct_share_admits_reads_and_gates_cancel(store):
     subscription = store.subscribe(shared["run_id"], visible_to=recipient)
     try:
         assert any(
-            event["type"] == "inqtrix.run.completed"
-            for event in subscription.replay
+            event["type"] == "inqtrix.run.completed" for event in subscription.replay
         )
     finally:
         subscription.close()
@@ -1317,9 +2003,7 @@ def test_live_direct_share_admits_reads_and_gates_cancel(store):
         store.get(shared["run_id"], visible_to=recipient)
     assert {
         item["run_id"]
-        for item in store.list(
-            workspace_id="ws-recipient", visible_to=recipient
-        )
+        for item in store.list(workspace_id="ws-recipient", visible_to=recipient)
     } == {own["run_id"]}
     with pytest.raises(RunNotFound):
         store.get(shared["run_id"], visible_to=_scoped(INTRUDER))
@@ -1412,9 +2096,7 @@ def test_waiting_lifecycle_parks_resumes_and_completes(store):
         types = [event["type"] for event in events.replay]
         assert "inqtrix.run.waiting" in types
         queued = [
-            event
-            for event in events.replay
-            if event["type"] == "inqtrix.run.queued"
+            event for event in events.replay if event["type"] == "inqtrix.run.queued"
         ]
         assert queued[-1]["data"].get("resumed") is True
         sequences = [event["sequence"] for event in events.replay]
@@ -1448,14 +2130,49 @@ def test_cancel_while_waiting_cascades_over_children(store):
         events = store.subscribe(run_id)
         try:
             assert events.replay[-1]["type"] == "inqtrix.run.cancelled"
-            assert (
-                events.replay[-1]["data"]["reason"]
-                == "cancelled_while_waiting"
-            )
+            assert events.replay[-1]["data"]["reason"] == "cancelled_while_waiting"
         finally:
             events.close()
     with pytest.raises(RunActive):
         store.resume_run(parent["run_id"])
+
+
+def test_parent_failure_cascades_over_children_with_reason(store):
+    """A FAILED parent cancels its live children stamped ``parent_failed``.
+
+    The orphan-cleanup path distinct from an explicit cancel: the failure
+    runs through ``_terminal_db``'s FAILED branch (fenced after the CAS),
+    the subtree lock, and ``_cancel_row_db``/``_cancel_waiting_row_db``
+    with the cascade reason threaded through — verified against real
+    Postgres, where the fencing and lock order cannot be unit-simulated.
+    """
+    parent = submit_noop(
+        store,
+        work=lambda handle: handle.wait("waiting_for_input"),
+        kind="agent",
+    )
+    wait_for_status(store, parent["run_id"], {"waiting_for_input"})
+    child = submit_noop(
+        store,
+        question="Teilaufgabe",
+        work=lambda handle: handle.wait("waiting_for_input"),
+        kind="agent_child",
+        parent_run_id=parent["run_id"],
+        root_run_id=parent["run_id"],
+    )
+    wait_for_status(store, child["run_id"], {"waiting_for_input"})
+
+    assert store.fail(parent["run_id"], "Simulierter Elternfehler") is True
+
+    assert store.get(parent["run_id"])["status"] == "failed"
+    child_final = wait_for_status(store, child["run_id"], {"cancelled"})
+    assert child_final["status"] == "cancelled"
+    events = store.subscribe(child["run_id"])
+    try:
+        assert events.replay[-1]["type"] == "inqtrix.run.cancelled"
+        assert events.replay[-1]["data"]["reason"] == "parent_failed"
+    finally:
+        events.close()
 
 
 def test_waiting_ttl_auto_cancels_with_approval_timeout(engine):
@@ -1571,9 +2288,7 @@ def test_waiting_child_ttl_projects_terminal_and_wakes_parent(store):
         child_events = impatient.subscribe(child_id["value"])
         try:
             assert child_events.replay[-1]["type"] == "inqtrix.run.cancelled"
-            assert child_events.replay[-1]["data"]["reason"] == (
-                "approval_timeout"
-            )
+            assert child_events.replay[-1]["data"]["reason"] == ("approval_timeout")
         finally:
             child_events.close()
 
@@ -1660,8 +2375,7 @@ def test_stuck_row_failsafe_spares_waiting_rows(store, engine):
                 async with session.begin():
                     await session.execute(
                         text(
-                            "UPDATE runs SET created_at = :old "
-                            "WHERE run_id = :rid"
+                            "UPDATE runs SET created_at = :old " "WHERE run_id = :rid"
                         ),
                         {"old": time.time() - 30 * 86_400, "rid": run_id},
                     )
@@ -1680,9 +2394,9 @@ def test_stuck_row_failsafe_spares_waiting_rows(store, engine):
 def test_waiting_ttl_sweep_does_not_deadlock_concurrent_dispatch(engine):
     """TTL sweep firing while runs dispatch must not freeze the store.
 
-    Regression for the review P1: the sweep runs on the store's event
-    loop; releasing local closures there while a dispatcher holds the
-    store lock blocked on that loop deadlocked every later call.
+    The sweep runs on the store's event loop. Releasing local closures there
+    while a dispatcher holds the store lock and waits on that loop deadlocks
+    every later call.
     """
     impatient = PostgresRunStore(
         engine=build_engine(TEST_DATABASE_URL),
@@ -1772,42 +2486,29 @@ def test_fenced_park_with_pending_cancel_resolves_as_cancel(store):
         own = submit_noop(store, work=slow)["run_id"]
         zombie = submit_noop(store, work=slow)["run_id"]
 
-        claim = store.claim_for_execution(
-            own, "default", allow_takeover=False
-        )
+        claim = store.claim_for_execution(own, "default", allow_takeover=False)
         assert claim is not None and claim.attempt == 1
         # Two-phase request against the running claim...
         store.cancel(own)
         # ...then the worker parks: the pending cancel wins, the run
         # ends CANCELLED — not RunActive -> worker fail() -> FAILED.
-        store.mark_waiting(
-            own, status="waiting_for_approval", fence_attempt=1
-        )
+        store.mark_waiting(own, status="waiting_for_approval", fence_attempt=1)
         assert store.get(own)["status"] == "cancelled"
         events = store.subscribe(own)
         try:
             assert events.replay[-1]["type"] == "inqtrix.run.cancelled"
-            assert (
-                events.replay[-1]["data"]["reason"]
-                == "cancelled_while_waiting"
-            )
+            assert events.replay[-1]["data"]["reason"] == "cancelled_while_waiting"
         finally:
             events.close()
 
         # The zombie guard stays: a superseded attempt's park neither
         # parks nor cancels the live attempt's run.
-        first = store.claim_for_execution(
-            zombie, "default", allow_takeover=False
-        )
+        first = store.claim_for_execution(zombie, "default", allow_takeover=False)
         assert first is not None and first.attempt == 1
-        second = store.claim_for_execution(
-            zombie, "default", allow_takeover=True
-        )
+        second = store.claim_for_execution(zombie, "default", allow_takeover=True)
         assert second is not None and second.attempt == 2
         with pytest.raises(RunActive, match="another worker attempt"):
-            store.mark_waiting(
-                zombie, status="waiting_for_approval", fence_attempt=1
-            )
+            store.mark_waiting(zombie, status="waiting_for_approval", fence_attempt=1)
         assert store.get(zombie)["status"] == "running"
     finally:
         release.set()
@@ -1871,6 +2572,7 @@ def test_child_projection_cannot_follow_parent_terminal_event(store):
     release_projection = threading.Event()
     errors: list[BaseException] = []
     try:
+        seed_agent_session(projector, "session-projection-order")
         parent = projector.submit(
             question="parent",
             stack_name="default",
@@ -1886,9 +2588,7 @@ def test_child_projection_cannot_follow_parent_terminal_event(store):
             kind="agent_child",
             parent_run_id=parent["run_id"],
             root_run_id=parent["run_id"],
-            request_payload={
-                "body": {"parent_task_id": "task-projection-order"}
-            },
+            request_payload={"body": {"parent_task_id": "task-projection-order"}},
         )
         original_append = projector._append_events_db
 
@@ -1905,9 +2605,7 @@ def test_child_projection_cannot_follow_parent_terminal_event(store):
                 for event_type, _payload in events
             ):
                 projection_selected.set()
-                assert await asyncio.to_thread(
-                    release_projection.wait, 10.0
-                )
+                assert await asyncio.to_thread(release_projection.wait, 10.0)
             await original_append(session, run_id, tenant_id, events)
 
         projector._append_events_db = MethodType(  # type: ignore[method-assign]
@@ -2083,9 +2781,7 @@ def test_children_park_self_heals_when_child_already_terminal(store):
     # RUNNING and no-ops — the park-time self-heal must close the gap.
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
-        if parent.child_ids and store.get(parent.child_ids[0])[
-            "status"
-        ] == "completed":
+        if parent.child_ids and store.get(parent.child_ids[0])["status"] == "completed":
             break
         time.sleep(0.05)
     else:
@@ -2136,8 +2832,9 @@ def test_per_user_cap_admission_counts_queued_and_running(engine):
 
     from inqtrix.server.runs import RunPerUserLimit
 
+    del engine  # fixture cleanup engine belongs to pytest's event loop
     store = PostgresRunStore(
-        engine=engine,
+        engine=build_engine(TEST_DATABASE_URL),
         app_role=APP_ROLE,
         queue=None,
         max_concurrent=3,
@@ -2177,6 +2874,206 @@ def test_per_user_cap_admission_counts_queued_and_running(engine):
     finally:
         hold.set()
         store.close()
+
+
+def test_close_drains_active_local_worker_before_stopping_database_loop(engine):
+    """A terminal write in flight must finish before its event loop closes."""
+    del engine  # fixture performs isolated database cleanup before the test
+    store = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=None,
+        recover_orphans=False,
+        max_concurrent=1,
+        max_queue_size=2,
+        completed_ttl_seconds=300,
+        worker_id="pytest-close-drain",
+    )
+    started = threading.Event()
+    release = threading.Event()
+    terminal_write_finished = threading.Event()
+
+    def work(handle):
+        started.set()
+        assert release.wait(timeout=10.0)
+        handle.complete({"answer": "done", "metrics": {}})
+        terminal_write_finished.set()
+
+    store.submit(
+        question="Close drain",
+        stack_name="default",
+        work=work,
+        request_payload={"question": "Close drain"},
+    )
+    assert started.wait(timeout=5.0)
+    closer = threading.Thread(target=store.close)
+    closer.start()
+    try:
+        time.sleep(0.1)
+        assert closer.is_alive()
+    finally:
+        release.set()
+    closer.join(timeout=10.0)
+
+    assert not closer.is_alive()
+    assert terminal_write_finished.is_set()
+    assert store._loop.is_closed()
+
+
+def test_close_drains_unclosed_event_subscription_before_disposing_engine(engine):
+    """Store shutdown owns every poller even if an SSE consumer disappears."""
+    del engine  # fixture performs isolated database cleanup before the test
+    queue = _RecordingDispatchQueue()
+    store = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=queue,
+        recover_orphans=False,
+        max_concurrent=1,
+        max_queue_size=2,
+        completed_ttl_seconds=300,
+        worker_id="pytest-close-subscription",
+    )
+    summary = store.submit(
+        question="Open stream",
+        stack_name="default",
+        work=lambda handle: None,
+        request_payload={"question": "Open stream"},
+    )
+    subscription = store.subscribe(summary["run_id"])
+    poller = subscription._thread
+    assert poller is not None and poller.is_alive()
+    assert subscription in store._subscriptions
+
+    store.close()
+
+    assert not poller.is_alive()
+    assert store._subscriptions == set()
+    assert store._loop.is_closed()
+
+
+def test_subscription_start_is_atomic_with_store_close(engine, monkeypatch):
+    """Shutdown cannot join a registered poller before Thread.start()."""
+    del engine  # fixture performs isolated database cleanup before the test
+    queue = _RecordingDispatchQueue()
+    store = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=queue,
+        recover_orphans=False,
+        max_concurrent=1,
+        max_queue_size=2,
+        completed_ttl_seconds=300,
+        worker_id="pytest-subscription-start-race",
+    )
+    summary = store.submit(
+        question="Race stream startup",
+        stack_name="default",
+        work=lambda handle: None,
+        request_payload={"question": "Race stream startup"},
+    )
+    entered_start = threading.Event()
+    release_start = threading.Event()
+    original_start = threading.Thread.start
+
+    def controlled_start(thread):
+        if thread.name.startswith("inqtrix-run-events-"):
+            entered_start.set()
+            assert release_start.wait(timeout=10.0)
+        return original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", controlled_start)
+    subscriptions = []
+    subscribe_errors = []
+    close_errors = []
+
+    def subscribe():
+        try:
+            subscriptions.append(store.subscribe(summary["run_id"]))
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            subscribe_errors.append(exc)
+
+    def close_store():
+        try:
+            store.close()
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            close_errors.append(exc)
+
+    subscriber = threading.Thread(target=subscribe, name="pytest-subscribe")
+    subscriber.start()
+    assert entered_start.wait(timeout=5.0)
+    closer = threading.Thread(target=close_store, name="pytest-close")
+    closer.start()
+    try:
+        time.sleep(0.1)
+        assert closer.is_alive()
+    finally:
+        release_start.set()
+    subscriber.join(timeout=10.0)
+    closer.join(timeout=10.0)
+
+    assert not subscriber.is_alive()
+    assert not closer.is_alive()
+    assert subscribe_errors == []
+    assert close_errors == []
+    assert len(subscriptions) == 1
+    poller = subscriptions[0]._thread
+    assert poller is not None and not poller.is_alive()
+    assert store._subscriptions == set()
+    assert store._loop.is_closed()
+
+
+def test_consumer_close_does_not_block_on_inflight_subscription_read(
+    engine, monkeypatch
+):
+    """An SSE disconnect must not join a database poller on the API loop."""
+    del engine  # fixture performs isolated database cleanup before the test
+    queue = _RecordingDispatchQueue()
+    store = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=queue,
+        recover_orphans=False,
+        max_concurrent=1,
+        max_queue_size=2,
+        completed_ttl_seconds=300,
+        worker_id="pytest-subscription-consumer-close",
+    )
+    summary = store.submit(
+        question="Disconnect stream",
+        stack_name="default",
+        work=lambda handle: None,
+        request_payload={"question": "Disconnect stream"},
+    )
+    read_started = threading.Event()
+    release_read = threading.Event()
+
+    def blocked_read(_run_id, _tenant_id, _after_sequence):
+        read_started.set()
+        assert release_read.wait(timeout=10.0)
+        return []
+
+    monkeypatch.setattr(store, "_events_after", blocked_read)
+    subscription = store.subscribe(summary["run_id"])
+    poller = subscription._thread
+    assert poller is not None
+    assert read_started.wait(timeout=5.0)
+    try:
+        started = time.monotonic()
+        subscription.close()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.5
+        assert poller.is_alive()
+        assert subscription in store._subscriptions
+    finally:
+        release_read.set()
+    poller.join(timeout=10.0)
+
+    assert not poller.is_alive()
+    assert subscription not in store._subscriptions
+    store.close()
+    assert store._loop.is_closed()
 
 
 def test_list_page_keyset_walks_history_and_positions_queued(store):

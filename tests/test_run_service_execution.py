@@ -51,6 +51,105 @@ class _Algorithm:
         )
 
 
+class _CompletedAlgorithm:
+    def run(self, _request, *, runtime, context) -> AgentResult:
+        del runtime, context
+        return AgentResult(
+            answer="Done",
+            raw={
+                "answer": "Done",
+                "usage": {},
+                "result_state": {},
+            },
+        )
+
+    def capabilities(self) -> dict[str, str]:
+        return {"terminal_node": "answer"}
+
+
+class _CompletedKnowledgeAlgorithm:
+    def run(self, _request, *, runtime, context) -> AgentResult:
+        del runtime, context
+        degradation = {
+            "reason": "vector_candidate_stalled",
+            "retrieval_mode": "dense",
+            "stage": "vector_candidate_pool",
+            "requested_candidate_pool": 40,
+            "returned_candidate_pool": 6,
+            "final_top_k": 4,
+            "final_evidence_complete": False,
+            "requested_top_k": 4,
+            "returned_hits": 2,
+            "candidate_cap": 64,
+        }
+        return AgentResult(
+            answer="Done",
+            result_type="knowledge_result",
+            raw={
+                "answer": "Done",
+                "usage": {},
+                "result_state": {
+                    "knowledge_profile": {
+                        "id": "standard",
+                        "requested": "standard",
+                        "auto_selected": False,
+                        "auto_reason": "",
+                        "degraded_stages": [],
+                    },
+                    "knowledge_gate": {
+                        "enabled": True,
+                        "sufficient": True,
+                        "coverage": "full",
+                        "rounds_used": 0,
+                        "max_rounds": 1,
+                    },
+                    "knowledge_grounding": {
+                        "enabled": True,
+                        "marker": "_knowledge_grounding_parsed",
+                        "status": "verified",
+                        "failure_code": None,
+                        "quotes_total": 1,
+                        "quotes_verified": 1,
+                        "quotes": [
+                            {
+                                "label": "K1",
+                                "text": "private source text",
+                                "verified": True,
+                            }
+                        ],
+                    },
+                    "knowledge_retrieval": {
+                        "degradations": [degradation, dict(degradation)]
+                    },
+                    "knowledge_candidates": 6,
+                    "knowledge_evidence_used": 2,
+                    "queries": ["private question"],
+                },
+            },
+        )
+
+    def capabilities(self) -> dict[str, str]:
+        return {"terminal_node": "answer"}
+
+
+class _CompletedHandle(_Handle):
+    def __init__(self, *, total_elapsed: float) -> None:
+        super().__init__()
+        self._total_elapsed = total_elapsed
+        self.payload: dict | None = None
+        self.snapshot: dict | None = None
+
+    def total_elapsed_seconds(self) -> float:
+        return self._total_elapsed
+
+    def emit_answer(self, answer: str) -> None:
+        assert answer == "Done"
+
+    def complete(self, result: dict, snapshot=None) -> None:
+        self.payload = result
+        self.snapshot = snapshot
+
+
 def _execute(handle: _Handle, *, reason: str) -> None:
     execute_run_request(
         handle,
@@ -89,3 +188,65 @@ def test_client_cancel_wins_even_when_a_global_token_cap_is_active() -> None:
     _execute(handle, reason="token_budget_exceeded")
 
     assert handle.calls == [("cancel", "client_requested_cancel")]
+
+
+def test_exported_elapsed_time_keeps_the_full_resumed_run_duration() -> None:
+    handle = _CompletedHandle(total_elapsed=240.25)
+
+    execute_run_request(
+        handle,
+        algorithm=_CompletedAlgorithm(),
+        run_request=SimpleNamespace(mode="research"),
+        resolved=SimpleNamespace(
+            providers=SimpleNamespace(),
+            strategies=SimpleNamespace(),
+            agent_settings=SimpleNamespace(),
+        ),
+        runtime=SimpleNamespace(
+            settings=SimpleNamespace(
+                quota=SimpleNamespace(max_tokens_per_run=500)
+            )
+        ),
+        principal=None,
+    )
+
+    assert handle.payload is not None
+    assert handle.payload["metrics"]["elapsed_seconds"] == 240.25
+
+
+def test_completed_knowledge_result_persists_safe_receipt_and_snapshot() -> None:
+    handle = _CompletedHandle(total_elapsed=4.5)
+
+    execute_run_request(
+        handle,
+        algorithm=_CompletedKnowledgeAlgorithm(),
+        run_request=SimpleNamespace(mode="knowledge"),
+        resolved=SimpleNamespace(
+            providers=SimpleNamespace(),
+            strategies=SimpleNamespace(),
+            agent_settings=SimpleNamespace(),
+        ),
+        runtime=SimpleNamespace(
+            settings=SimpleNamespace(
+                quota=SimpleNamespace(max_tokens_per_run=500)
+            )
+        ),
+        principal=None,
+    )
+
+    assert handle.payload is not None
+    assert handle.snapshot is not None
+    assert handle.payload["knowledge_profile"] == {
+        "id": "standard",
+        "requested": "standard",
+        "auto_selected": False,
+        "degraded_stages": [],
+    }
+    assert "auto_reason" not in handle.payload["knowledge_profile"]
+    assert "quotes" not in handle.payload["knowledge_grounding"]
+    assert "queries" not in handle.payload
+    assert len(handle.payload["knowledge_retrieval"]["degradations"]) == 1
+    assert handle.snapshot["knowledge_retrieval"] == (
+        handle.payload["knowledge_retrieval"]
+    )
+    assert handle.snapshot["knowledge_evidence_used"] == 2

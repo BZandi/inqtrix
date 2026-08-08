@@ -6,11 +6,11 @@ Revises: 0023_knowledge_chunk_page_number
 Records the backend knowledge-document id each index member was ingested as, so
 "remove from index" can delete the exact document from the searchable collection
 without a full rebuild. Without this persisted, the id lived only in the
-in-memory reducer and was lost on every reload, so a post-reload removal degraded
-to local-only while the document stayed searchable server-side. Nullable with no
-default — existing rows stay ``NULL`` (ingested before this was tracked), which
-reads as "no tracked id" and falls back to local-only removal + the reconcile
-sweep, exactly as for an older index. Mirrors ``server_collection_model``.
+in-memory reducer and was lost on every reload, so a post-reload removal could
+misreport local success while the document stayed searchable server-side.
+Nullable with no default — existing rows stay ``NULL`` (ingested before this
+was tracked) and are reconciled through stable source identity before exact
+durable removal. Mirrors ``server_collection_model``.
 
 ``IF NOT EXISTS`` / ``IF EXISTS`` keep this idempotent across a freshly created
 database (create_all reads an ORM that already carries the column) and an

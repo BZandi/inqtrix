@@ -94,16 +94,16 @@ The markers below are the canonical hook points for operators. Each marker is bo
 
 ## Forensic events
 
-Set `OBSERVABILITY_PROFILE=forensic` and log at `DEBUG` level to emit detailed lineage through the same logger and iteration-log path. Forensic mode is semantically complete, but it does not log raw provider request bodies, headers, SDK responses, or credentials.
+Set `OBSERVABILITY_PROFILE=forensic` to populate detailed lineage in the protected iteration-log/audit path. At `DEBUG` level the ordinary logger receives only a content-minimized projection: IDs, lifecycle/status fields, models, counters, usage and timings. Exact queries, URLs, provider prose, snippets, claim/evidence text and prompt views remain solely in the authorized redacted audit representation; raw provider request bodies, headers, SDK responses and credentials enter neither sink.
 
 | Event | Meaning |
 |-------|---------|
-| `query_record` | Query ID, round, index, domain filter, source IDs, citation IDs. |
-| `source_record` | Source ID, canonical URL, domain, provider, tier, tier reason, access status. |
-| `provider_citation_record` | Provider citation provenance: query ID, source ID, rank, origin, title/snippet preview. |
+| `query_record` | Protected audit: exact query plus IDs and parameters. Operational log: query/source/citation IDs, round, index, provider. |
+| `source_record` | Protected audit: source URL/domain and provenance. Operational log: source IDs, provider, tier and access status. |
+| `provider_citation_record` | Protected audit: title/snippet/URL provenance. Operational log: query/source/citation IDs, rank, origin and provider. |
 | `query_summary` | Per-query summary, claim counts, and claim-extraction mode (`structured_output` vs. `legacy_text_json`). |
-| `evidence_record` | Source/citation-level EvidenceRecord with source passages, source snippets, and raw claim supports. |
-| `claim_record` | Raw extracted claim with query/source/citation IDs. |
+| `evidence_record` | Protected audit: source passages, snippets and raw supports. Operational log: evidence/query/source/citation IDs, tier, provider and counts/status. |
+| `claim_record` | Protected audit: raw extracted claim and support. Operational log: claim/query/evidence/source/citation IDs and categorical status. |
 | `claim_merge` | Consolidated claim with member raw-claim IDs, status, support/contradiction, source IDs. |
 | `evidence_verification_projection` | Aggregate projection of consolidated verification back onto EvidenceRecords. |
 | `evidence_overview_render` | EvidenceOverview render counts (`rendered_record_count`, `omitted_record_count`, visible `allowed_urls` size, visible label count, `label_by_evidence_id` size) and evidence-depth diagnostics for answer synthesis. |

@@ -33,6 +33,8 @@ from inqtrix.exceptions import (
     AgentTokenBudgetExceeded,
 )
 from inqtrix.i18n import t
+from inqtrix.observability import semconv
+from inqtrix.observability.otel import operation_span
 from inqtrix.providers.base import ProviderContext
 from inqtrix.result import ResearchResult, ResearchResultExportOptions
 from inqtrix.runtime_logging import log_run_end, log_run_start
@@ -95,25 +97,55 @@ def default_graph_config(
                 "snapshot": build_run_snapshot(s, current_node=node_name),
             },
         )
-        try:
-            result = fn(s, providers=providers, strategies=strategies, settings=settings)
-        except Exception:
-            emit_run_event(
-                s,
-                "inqtrix.node.failed",
-                {
-                    "node": node_name,
-                    "snapshot": build_run_snapshot(s, current_node=node_name),
-                },
+        # One span per graph node: the LLM/search call spans (provider
+        # wrappers) and the forensic span events (stop cascade, answer
+        # sections, failures) nest under it — the trace waterfall shows
+        # the round structure without touching the run_events surface.
+        with operation_span(
+            node_name,
+            {
+                semconv.INQTRIX_NODE: node_name,
+                semconv.INQTRIX_ROUND: int(s.get("round", 0) or 0),
+            },
+        ) as node_span:
+            try:
+                result = fn(
+                    s,
+                    providers=providers,
+                    strategies=strategies,
+                    settings=settings,
+                )
+            except Exception:
+                emit_run_event(
+                    s,
+                    "inqtrix.node.failed",
+                    {
+                        "node": node_name,
+                        "snapshot": build_run_snapshot(
+                            s, current_node=node_name
+                        ),
+                    },
+                )
+                raise
+            result["_current_node"] = node_name
+            finished_snapshot = build_run_snapshot(
+                result, current_node=node_name
             )
-            raise
-        result["_current_node"] = node_name
+            if node_span is not None:
+                # Derived counters only (the snapshot contract already
+                # excludes raw ledgers/provider payloads).
+                for key, value in finished_snapshot.items():
+                    if isinstance(value, bool) or not isinstance(
+                        value, (int, float)
+                    ):
+                        continue
+                    node_span.set_attribute(f"inqtrix.{key}", value)
         emit_run_event(
             result,
             "inqtrix.node.finished",
             {
                 "node": node_name,
-                "snapshot": build_run_snapshot(result, current_node=node_name),
+                "snapshot": finished_snapshot,
             },
         )
         return result
@@ -189,7 +221,11 @@ def get_agent(
     The bounded cache is protected by a lock so concurrent HTTP requests
     cannot observe a graph compiled for a different settings variant.
     """
-    key = (id(providers), id(strategies), _settings_fingerprint(settings))
+    key: _GraphCacheKey = (
+        id(providers),
+        id(strategies),
+        _settings_fingerprint(settings),
+    )
     with _graph_cache_lock:
         cached = _graph_cache.get(key)
         if cached is not None:
@@ -303,7 +339,10 @@ def _run_direct_chat(
         # both a late client cancel and the server-owned token ceiling.
         check_cancel_event(state)
     except AgentCancelled as exc:
-        log.info("Chat-only run stopped: %s", exc)
+        log.info(
+            "Chat-only run stopped (error_type=%s)",
+            type(exc).__name__,
+        )
         state["cancelled"] = True
         state["cancel_reason"] = (
             "token_budget_exceeded"
@@ -328,7 +367,10 @@ def _run_direct_chat(
         }
     except AgentRateLimited as exc:
         emit_progress(state, t(state, "run_aborted", exc=exc))
-        log.error("ABBRUCH (chat-only): %s", exc)
+        log.error(
+            "ABBRUCH (chat-only, error_type=%s)",
+            type(exc).__name__,
+        )
         state["_terminal_failure"] = {
             "type": "rate_limited",
             "message": str(exc),
@@ -442,7 +484,7 @@ def run(
             "result_state": {},
         }
 
-    # "Chat ohne Websuche"-Kurzschluss (ADR-WS-14): wenn der Caller
+    # "Chat ohne Websuche"-Kurzschluss: wenn der Caller
     # ``skip_search=True`` setzt, umgehen wir den kompletten
     # classify/plan/search/evaluate/answer-Graphen und rufen direkt den
     # LLM-Provider mit Frage + History. Nützlich für UI-Clients, die
@@ -495,7 +537,7 @@ def run(
         # the streaming layer set the event, and the next node-boundary
         # probe raised. Return a marked-cancelled state instead of
         # propagating; the streaming generator already stopped emitting.
-        log.info("Run stopped: %s", exc)
+        log.info("Run stopped (error_type=%s)", type(exc).__name__)
         state["cancelled"] = True
         state["cancel_reason"] = (
             "token_budget_exceeded"
@@ -520,7 +562,7 @@ def run(
         }
     except AgentRateLimited as exc:
         emit_progress(state, t(state, "run_aborted", exc=exc))
-        log.error("ABBRUCH: %s", exc)
+        log.error("ABBRUCH (error_type=%s)", type(exc).__name__)
         state["_terminal_failure"] = {
             "type": "rate_limited",
             "message": str(exc),
@@ -698,7 +740,7 @@ def run_test(
     try:
         result = agent.invoke(state)
     except AgentRateLimited as exc:
-        log.error("ABBRUCH (test): %s", exc)
+        log.error("ABBRUCH (test, error_type=%s)", type(exc).__name__)
         elapsed = time.monotonic() - t0
         log_run_end(
             run_id=state.get("_run_id"),

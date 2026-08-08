@@ -4,7 +4,7 @@
 
 ## Scope
 
-How Inqtrix classifies URLs into quality tiers, how the aggregate source-quality score is computed, and how to extend or replace the default tiering for a different domain landscape. Tiering is a quality and observability signal after retrieval; normal searches are not pre-filtered by the tier table.
+How Inqtrix classifies URLs into discovery-quality tiers, how the aggregate source-quality score is computed, and how to extend or replace the default tiering for a different domain landscape. Tiering is an observability, ranking, and search-control signal after retrieval; normal searches are not pre-filtered by the tier table. A tier never verifies a claim, and an `unknown` tier never removes the provider-grounded search result from synthesis.
 
 ## Tier classification
 
@@ -107,7 +107,7 @@ Source tiering is consumed by several guardrail caps in [Stop criteria](stop-cri
 
 - **No-citation cap** — caps confidence at 6 if zero citations accumulated.
 - **Low >> high cap** — caps at 7 if low-tier sources dominate over primary/mainstream.
-- **Missing-primary cap** — caps at 8 if claims flagged `needs_primary` have no primary source.
+- **Missing-primary cap** — caps at 8 if a claim flagged `needs_primary` has no primary-tier provider-grounded support.
 
 ## Related docs
 

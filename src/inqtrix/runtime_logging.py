@@ -1,22 +1,34 @@
-"""Helpers for structured runtime logging.
+"""Helpers for protected run audit and content-minimized runtime logging.
 
-Keeps provider/model metadata extraction and iteration-entry formatting in
-one place so normal runtime logs and testing-mode iteration logs stay
-semantically aligned.
+Provider/model metadata extraction, audit sanitization and the stricter
+container-log projection live together so their boundary stays explicit.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import uuid
 from hashlib import sha1
 from typing import Any
 
-from inqtrix.search_result import GroundedSearchResult
+from inqtrix.observability.context import current_log_context
+from inqtrix.observability.otel import add_span_event, span_is_recording
+from inqtrix.search_result import GroundedSearchResult, GroundedSource
 from inqtrix.settings import AgentSettings
-from inqtrix.urls import domain_from_url, normalize_url, sanitize_error
+from inqtrix.evidence_limits import (
+    OBSERVATION_TEXT_BYTES_LIMIT,
+    bounded_utf8_prefix,
+)
+from inqtrix.urls import (
+    CredentialBearingUrlError,
+    domain_from_url,
+    normalize_url,
+    redact_credential_url,
+    safe_public_url_identity,
+    sanitize_error,
+    scrub_credential_urls,
+)
 
 log = logging.getLogger("inqtrix")
 
@@ -43,9 +55,9 @@ _SENSITIVE_EVENT_KEYS = frozenset({
     "x_key",
 })
 
-# Generous bound for evidence-content fields in the forensic log. State keeps
-# the full text; this only prevents a single log line from growing unbounded.
+# Persistence bound for evidence-content fields in protected iteration logs.
 _LOG_CONTENT_CAP = 20000
+_NARRATION_TEXT_CAP = 400
 
 _TEXT_CAPS = {
     "answer_segment_preview": 500,
@@ -58,8 +70,8 @@ _TEXT_CAPS = {
     "context_preview": 1200,
     "query": 240,
     "status_reason": 180,
-    # Evidence content is uncapped in state; the forensic log mirrors it with a
-    # generous bound so logged records are not misleadingly thinner than state.
+    # Keep reconstructable audit text bounded without admitting it to ordinary
+    # container/file logs (which use ``_console_iteration_projection``).
     "evidence_snippet": _LOG_CONTENT_CAP,
     "snippet": _LOG_CONTENT_CAP,
     "claim_text": _LOG_CONTENT_CAP,
@@ -79,13 +91,224 @@ _COMMON_EVENT_KEYS = frozenset({
     "node",
     "run_id",
     "timestamp",
+    # Correlation envelope stamped by emit_runtime_event: joins a
+    # forensic line with its OTel trace and HTTP request. Values are
+    # ids only (the console projection keeps ``*_id`` tokens); subject
+    # fields (user/workspace/tenant) ride the JSON formatter's context
+    # instead of the payload.
+    "trace_id",
+    "span_id",
+    "request_id",
 })
+
+# ``iteration_logs`` are protected run-audit data.  They deliberately retain
+# the redacted queries, source text and prompt views needed to reconstruct a
+# run.  Container/file logs have a different audience and therefore receive a
+# fail-closed operational projection: identifiers, lifecycle/status fields,
+# models, counters, usage and timings only.  Keep this policy separate from
+# ``sanitize_event_payload`` so tightening console visibility never destroys
+# evidence in the persisted audit representation.
+_CONSOLE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:+-]{1,180}$")
+_CONSOLE_MODEL_RE = re.compile(r"^[A-Za-z0-9_.:@+/-]{1,180}$")
+
+_CONSOLE_ENUM_FIELDS = frozenset({
+    "access_status",
+    "answer_contract",
+    "binding_status",
+    "claim_extraction_mode",
+    "claim_extraction_schema",
+    "claim_status",
+    "claim_type",
+    "effort",
+    "effort_source",
+    "engine",
+    "event",
+    "evidence_contract_status",
+    "fallback",
+    "finish_reason",
+    "kind",
+    "model",
+    "model_source",
+    "node",
+    "origin",
+    "phase",
+    "polarity",
+    "provider",
+    "record_type",
+    "report_profile",
+    "requested_tier",
+    "run_mode",
+    "status",
+    "tier",
+    "verification",
+    "verification_basis",
+})
+
+_CONSOLE_CODE_FIELDS = frozenset({
+    "error_code",
+    "failure_code",
+    "final_stop_reason",
+    "reason",
+    "status_reason",
+    "stop_reason",
+    "suppressed_stop_reason",
+})
+
+_CONSOLE_BOOLEAN_FIELDS = frozenset({
+    "active",
+    "available",
+    "blocking",
+    "cancelled",
+    "complete",
+    "done",
+    "enabled",
+    "failed",
+    "final",
+    "incomplete",
+    "limit_hit",
+    "parsed",
+    "report_eligible",
+    "supported",
+})
+
+_CONSOLE_NUMERIC_FIELDS = frozenset({
+    "active_round",
+    "attempt",
+    "completion_tokens",
+    "confidence",
+    "confidence_stop",
+    "duration_ms",
+    "duration_s",
+    "elapsed_ms",
+    "elapsed_s",
+    "event_seq",
+    "final_confidence",
+    "max_rounds",
+    "min_rounds",
+    "pages_read",
+    "position",
+    "prompt_tokens",
+    "quality_score",
+    "query_index",
+    "rank",
+    "round",
+    "rows_matched",
+    "rows_scanned",
+    "sequence",
+    "sources_found",
+    "timestamp",
+    "total",
+    "total_citations",
+    "total_completion_tokens",
+    "total_prompt_tokens",
+    "utility_score",
+})
+
+_CONSOLE_COUNT_MAP_FIELDS = frozenset({
+    "claim_extraction_modes",
+    "claim_status_counts",
+    "source_tier_counts",
+})
+
+_CONSOLE_NUMERIC_SUFFIXES = (
+    "_attempt",
+    "_attempts",
+    "_bytes",
+    "_chars",
+    "_count",
+    "_depth",
+    "_duration_ms",
+    "_duration_s",
+    "_dropped",
+    "_elapsed_ms",
+    "_elapsed_s",
+    "_executed",
+    "_extracted",
+    "_failures",
+    "_fallbacks",
+    "_found",
+    "_index",
+    "_kept",
+    "_length",
+    "_pages",
+    "_rank",
+    "_rows",
+    "_round",
+    "_sanitized",
+    "_selected",
+    "_score",
+    "_seconds",
+    "_tokens",
+    "_utilization",
+)
+
+_CONSOLE_BOOLEAN_SUFFIXES = (
+    "_active",
+    "_attempted",
+    "_available",
+    "_blocking",
+    "_cancelled",
+    "_complete",
+    "_done",
+    "_enabled",
+    "_failed",
+    "_fallback",
+    "_final",
+    "_hit",
+    "_incomplete",
+    "_parsed",
+    "_supported",
+)
 
 # Per-event allowlists for forensic events. Events without a schema entry
 # fall back to the recursive drop-list + URL/secret redaction in
 # :func:`_sanitize_value` (hybrid policy: strict allowlist for the
 # forensic-lineage events, drop-list for ``iteration_summary`` headers).
 _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
+    # A bounded technical retrieval verdict.  Queries, excerpts and source ids
+    # are deliberately absent because this event may cross a child boundary.
+    "inqtrix.knowledge.retrieval.degraded": frozenset({
+        "task_id",
+        "attempt",
+        "query_index",
+        "reason",
+        "retrieval_mode",
+        "stage",
+        "requested_candidate_pool",
+        "returned_candidate_pool",
+        "final_top_k",
+        "final_evidence_complete",
+        "requested_top_k",
+        "returned_hits",
+        "candidate_cap",
+    }),
+    # Canonical hydration excluded unsafe candidates. The event contains only
+    # a stable warning code, bounded aggregate count and remediation metadata;
+    # source ids, excerpts and queries are never valid fields.
+    "inqtrix.knowledge.retrieval.warning": frozenset({
+        "task_id",
+        "attempt",
+        "query_index",
+        "code",
+        "reason",
+        "stage",
+        "count",
+        "recommended_action",
+    }),
+    # Knowledge quote verification is a terminal evidence decision.  It may
+    # cross a delegated child boundary, so retain only bounded status/count
+    # lineage and never the quote/source text itself.
+    "inqtrix.knowledge.grounding.checked": frozenset({
+        "task_id",
+        "attempt",
+        "query_index",
+        "marker",
+        "status",
+        "failure_code",
+        "format_repaired",
+        "quotes_total",
+        "quotes_verified",
+    }),
     # Agent-Desk narration (plan B2): a strict allowlist so the prose
     # channel can never grow surprise fields — the transcript renders
     # the payload verbatim.
@@ -165,14 +388,72 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
         "reason",
     }),
     "query_record": frozenset({
+        "invocation_id",
         "query_id",
         "round",
         "query_index",
         "query",
         "domain_filter",
         "provider",
+        "parameters",
+        "status",
+        "notice",
+        "started_at",
+        "finished_at",
+        "duration_ms",
+        "usage",
         "source_ids",
         "citation_ids",
+    }),
+    "query_invocation_started": frozenset({
+        "invocation_id",
+        "query_id",
+        "round",
+        "query_index",
+        "query",
+        "domain_filter",
+        "provider",
+        "parameters",
+        "status",
+        "started_at",
+    }),
+    "query_invocation_finished": frozenset({
+        "invocation_id",
+        "query_id",
+        "round",
+        "query_index",
+        "provider",
+        "status",
+        "notice",
+        "started_at",
+        "finished_at",
+        "duration_ms",
+        "usage",
+    }),
+    "inqtrix.research.query.started": frozenset({
+        "invocation_id",
+        "query_id",
+        "round",
+        "query_index",
+        "query",
+        "domain_filter",
+        "provider",
+        "parameters",
+        "status",
+        "started_at",
+    }),
+    "inqtrix.research.query.finished": frozenset({
+        "invocation_id",
+        "query_id",
+        "round",
+        "query_index",
+        "provider",
+        "status",
+        "notice",
+        "started_at",
+        "finished_at",
+        "duration_ms",
+        "usage",
     }),
     "source_record": frozenset({
         "source_id",
@@ -427,25 +708,6 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
 }
 
 
-def _serialize_payload(payload: dict[str, Any]) -> str:
-    """Render a pre-sanitized payload as stable JSON for debug logs.
-
-    The caller is responsible for sanitising the payload (via
-    :func:`sanitize_event_payload`) before invoking this helper so that the
-    ``_RedactSecretsFilter`` in ``logging_config.py`` does not corrupt the
-    JSON structure.  The filter's ``sanitize_error`` regex
-    ``https?://[^\\s]+`` can consume trailing quotes, turning
-    ``"url": "https://x"`` into ``"url": "[URL]`` (missing closing quote).
-    Pre-sanitising replaces URLs while the value is still a plain string,
-    keeping JSON delimiters intact.
-    """
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        default=str,
-    )
-
 
 def new_run_id() -> str:
     """Return an opaque, log-safe identifier for one research run."""
@@ -474,12 +736,11 @@ def _cap_text(key: object, text: str) -> str:
 
 
 def format_log_excerpt(text: Any, *, limit: int = 300) -> str:
-    """Return a compact, word-boundary excerpt for human-facing log lines.
+    """Return a compact word-boundary excerpt for protected audit fields.
 
-    Structured event payloads keep the longer sanitized value in the same
-    logfile. This helper is only for INFO-level trace lines where a hard
-    slice would otherwise cut German words in the middle and hide that the
-    text was abbreviated.
+    The operational console projection omits the resulting prose. This helper
+    remains useful for bounded answer-segment audit records where a hard slice
+    would cut words in the middle and hide that the text was abbreviated.
     """
     normalized = " ".join(str(text or "").split())
     if len(normalized) <= limit:
@@ -511,7 +772,7 @@ def _sanitize_value(value: Any) -> Any:
 
 
 def sanitize_event_payload(event: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Return a sanitized copy of *payload* ready for logs and exports.
+    """Return a sanitized copy of *payload* ready for protected audit/export.
 
     Two-layer policy:
 
@@ -535,31 +796,215 @@ def sanitize_event_payload(event: str, payload: dict[str, Any]) -> dict[str, Any
     if schema is not None:
         allowed = schema | _COMMON_EVENT_KEYS
         payload = {k: v for k, v in payload.items() if k in allowed}
+    if event == "inqtrix.agent.narration" and isinstance(payload.get("text"), str):
+        # Narration is rendered verbatim as plain text.  It is a compact
+        # process-status channel, never storage for an answer body.  Keep the
+        # bound event-specific instead of weakening evidence/audit fields that
+        # legitimately use the general 20k protected-log cap.
+        payload = dict(payload)
+        payload["text"] = format_log_excerpt(
+            payload["text"],
+            limit=_NARRATION_TEXT_CAP,
+        )
     sanitized = _sanitize_value(payload)
     return sanitized if isinstance(sanitized, dict) else {}
 
 
-def emit_runtime_event(
-    event: str,
-    payload: dict[str, Any],
-    *,
-    prefix: str | None = None,
-    level: int = logging.DEBUG,
-) -> None:
-    """Emit one sanitized runtime event through the existing logger.
+def _console_token(value: Any) -> str | None:
+    """Return one bounded operational token, never prose or a URL."""
 
-    The function is the central structured-log path. It does not install
-    handlers or create a parallel sink; it only formats an allowlisted,
-    recursively sanitized JSON payload and lets ``logging_config`` apply
-    the existing handler-level redaction once more.
+    text = str(value or "").strip()
+    if not text or not _CONSOLE_TOKEN_RE.fullmatch(text):
+        return None
+    return text
+
+
+def _console_model_token(value: Any) -> str | None:
+    """Return a provider/model label while rejecting URL- or path-shaped data."""
+
+    text = str(value or "").strip()
+    if (
+        not text
+        or not _CONSOLE_MODEL_RE.fullmatch(text)
+        or "://" in text
+        or text.startswith(("/", "./", "../"))
+        or "//" in text
+    ):
+        return None
+    return text
+
+
+def _console_key_is_id(key: str) -> bool:
+    normalized = key.lstrip("_")
+    return normalized == "id" or normalized.endswith("_id")
+
+
+def _console_key_is_id_list(key: str) -> bool:
+    normalized = key.lstrip("_")
+    return normalized == "ids" or normalized.endswith("_ids")
+
+
+def _console_key_is_code_list(key: str) -> bool:
+    normalized = key.lstrip("_")
+    return normalized in {"codes", "reasons"} or normalized.endswith(
+        ("_codes", "_reasons")
+    )
+
+
+def _console_numeric_key(key: str) -> bool:
+    normalized = key.lstrip("_")
+    return normalized in _CONSOLE_NUMERIC_FIELDS or normalized.endswith(
+        _CONSOLE_NUMERIC_SUFFIXES
+    )
+
+
+def _console_boolean_key(key: str) -> bool:
+    normalized = key.lstrip("_")
+    return normalized in _CONSOLE_BOOLEAN_FIELDS or normalized.endswith(
+        _CONSOLE_BOOLEAN_SUFFIXES
+    )
+
+
+def _project_console_value(key: str, value: Any) -> Any:
+    """Project one audit value into the non-content operational log schema.
+
+    Unknown values fail closed.  Mapping containers are traversed so useful
+    counters inside e.g. ``usage`` or ``section_logs`` remain visible, while
+    their prose siblings (headings, prompt previews, snippets) are omitted.
     """
-    if not log.isEnabledFor(level):
+
+    normalized_key = key.lstrip("_")
+
+    if isinstance(value, dict):
+        if normalized_key == "usage":
+            usage: dict[str, int | float] = {}
+            for raw_child_key, raw_child_value in value.items():
+                child_key = str(raw_child_key)
+                if (
+                    _console_numeric_key(child_key)
+                    and isinstance(raw_child_value, (int, float))
+                    and not isinstance(raw_child_value, bool)
+                ):
+                    usage[child_key] = raw_child_value
+            return usage or None
+
+        if normalized_key in _CONSOLE_COUNT_MAP_FIELDS:
+            counts: dict[str, int | float] = {}
+            for raw_child_key, raw_child_value in value.items():
+                child_key = _console_token(raw_child_key)
+                if (
+                    child_key is not None
+                    and isinstance(raw_child_value, (int, float))
+                    and not isinstance(raw_child_value, bool)
+                ):
+                    counts[child_key] = raw_child_value
+            return counts or None
+
+        projected: dict[str, Any] = {}
+        for raw_child_key, raw_child_value in value.items():
+            child_key = str(raw_child_key)
+            child_value = _project_console_value(child_key, raw_child_value)
+            if child_value is not None:
+                projected[child_key] = child_value
+        return projected or None
+
+    if isinstance(value, (list, tuple)):
+        if _console_key_is_id_list(key) or _console_key_is_code_list(key):
+            tokens = [
+                token
+                for item in value
+                if (token := _console_token(item)) is not None
+            ]
+            return tokens or None
+        projected_items = [
+            projected
+            for item in value
+            if isinstance(item, dict)
+            and (projected := _project_console_value(key, item)) is not None
+        ]
+        return projected_items or None
+
+    if isinstance(value, bool):
+        return value if _console_boolean_key(key) else None
+
+    if isinstance(value, (int, float)):
+        return value if _console_numeric_key(key) else None
+
+    if _console_key_is_id(key):
+        return _console_token(value)
+
+    if normalized_key in {"engine", "model"} or normalized_key.endswith("_model"):
+        return _console_model_token(value)
+
+    if (
+        normalized_key in _CONSOLE_ENUM_FIELDS
+        or normalized_key in _CONSOLE_CODE_FIELDS
+        or normalized_key.endswith(
+            (
+                "_effort",
+                "_kind",
+                "_mode",
+                "_phase",
+                "_provider",
+                "_status",
+                "_tier",
+                "_type",
+            )
+        )
+    ):
+        return _console_token(value)
+
+    return None
+
+
+def _console_iteration_projection(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return the fail-closed container/file-log view of an audit entry."""
+
+    projected = _project_console_value("iteration", entry)
+    if not isinstance(projected, dict):
+        return {}
+    # Keep the log line classifiable even for a future event whose content
+    # fields are all intentionally withheld.
+    projected.setdefault("event", "iteration_summary")
+    return projected
+
+
+
+def emit_runtime_event(event: str, payload: dict[str, Any]) -> None:
+    """Attach one content-minimized runtime event to the current span.
+
+    The ONE path for lineage events (stop cascades, answer sections,
+    algorithm failures, iteration summaries). Recording requires an
+    active span: ``INQTRIX_TRACING`` decides where those events are
+    kept, ``OBSERVABILITY_PROFILE`` how deep they go, and the settings
+    validator warns when depth is configured without a sink.
+
+    The audit sanitizer first drops credentials and bounds retained
+    fields; the stricter projection then admits only operational
+    identifiers, codes, statuses, models, counters, usage and timings.
+    Exact queries, URLs, evidence, prompts and provider prose therefore
+    cannot reach the event even when a caller supplies them — full
+    content lives ONLY on the dedicated content attributes, behind the
+    capture policy.
+    """
+    if not span_is_recording():
         return
     event_payload = dict(payload)
     event_payload.setdefault("event", event)
+    # The event hangs on its span, so trace and span ids need no
+    # repeating. The request id does: it is the join key back to the
+    # HTTP request and its log lines, and nothing on the span carries
+    # it. ``setdefault`` never overwrites a caller-provided value.
+    request_id = current_log_context().get("request_id")
+    if request_id:
+        event_payload.setdefault("request_id", request_id)
     sanitized = sanitize_event_payload(event, event_payload)
-    message_prefix = prefix or f"EVENT {event}"
-    log.log(level, "%s: %s", message_prefix, _serialize_payload(sanitized))
+    console_payload = _console_iteration_projection(sanitized)
+    console_event = str(console_payload.get("event", "iteration_summary"))
+    # Attached to the CURRENT span (node/tool/run), so the waterfall
+    # shows the lineage in place instead of in a separate stream that
+    # has to be joined by hand.
+    add_span_event(console_event, console_payload)
 
 
 def normalize_source_provenance(
@@ -585,8 +1030,13 @@ def normalize_source_provenance(
         Tuple of ``(source_records, citation_records)`` represented as
         plain dicts ready for state storage and structured logging.
     """
-    grounded = result
+    grounded = sanitize_grounded_search_result(result)
     tier_explanations = tier_explanations or {}
+    safe_tier_explanations = {
+        normalize_url(redact_credential_url(str(url))): dict(explanation)
+        for url, explanation in tier_explanations.items()
+        if normalize_url(redact_credential_url(str(url)))
+    }
     source_records: list[dict[str, Any]] = []
     citation_records: list[dict[str, Any]] = []
     seen_sources: set[str] = set()
@@ -597,11 +1047,18 @@ def normalize_source_provenance(
         canonical_url = normalize_url(url)
         if not canonical_url:
             continue
+        try:
+            safe_public_url_identity(url)
+            source_access_status = access_status
+        except CredentialBearingUrlError:
+            source_access_status = "blocked_credentials"
+        except ValueError:
+            continue
         rank = int(source.rank or index)
         origin = str(source.origin or "provider_source")
         source_id = make_record_id("src", canonical_url)
         citation_id = make_record_id("cit", query_id, rank, canonical_url, origin)
-        explanation = tier_explanations.get(canonical_url, {})
+        explanation = safe_tier_explanations.get(canonical_url, {})
 
         if source_id not in seen_sources:
             seen_sources.add(source_id)
@@ -617,7 +1074,7 @@ def normalize_source_provenance(
                     "origin": origin,
                     "tier": explanation.get("tier", "unknown"),
                     "tier_reason": explanation.get("tier_reason", ""),
-                    "access_status": access_status,
+                    "access_status": source_access_status,
                 }
             )
 
@@ -635,10 +1092,88 @@ def normalize_source_provenance(
                 "snippet": source.snippet,
                 "source_date": str(source.date or "")[:80],
                 "last_updated": str(source.last_updated or "")[:80],
+                "annotation_start": source.annotation_start,
+                "annotation_end": source.annotation_end,
             }
         )
 
     return source_records, citation_records
+
+
+def sanitize_grounded_search_result(
+    result: GroundedSearchResult,
+) -> GroundedSearchResult:
+    """Remove URL credentials before provider output enters run state.
+
+    A credential-bearing source remains visible as a redacted, blocked
+    discovery record instead of disappearing silently. Linked pages are not
+    fetched.
+    """
+
+    safe_answer = _bounded_provider_evidence_text(result.answer)
+    offsets_preserved = safe_answer == result.answer
+    safe_sources: list[GroundedSource] = []
+    for source in result.sources:
+        raw_url = str(source.url or "").strip()
+        if not raw_url:
+            continue
+        try:
+            safe_url = safe_public_url_identity(raw_url).url
+        except CredentialBearingUrlError:
+            safe_url = redact_credential_url(raw_url)
+        except ValueError:
+            # An invalid URL cannot be a durable source identity.  Its title
+            # and snippet may still be represented by the provider synthesis,
+            # but the malformed target itself is not persisted.
+            continue
+        safe_sources.append(
+            GroundedSource(
+                url=safe_url,
+                title=_bounded_provider_evidence_text(source.title),
+                snippet=_bounded_provider_evidence_text(source.snippet),
+                date=_bounded_provider_evidence_text(source.date),
+                last_updated=_bounded_provider_evidence_text(
+                    source.last_updated
+                ),
+                rank=source.rank,
+                origin=source.origin,
+                annotation_start=(
+                    source.annotation_start if offsets_preserved else None
+                ),
+                annotation_end=(
+                    source.annotation_end if offsets_preserved else None
+                ),
+            )
+        )
+    return GroundedSearchResult(
+        answer=safe_answer,
+        sources=safe_sources,
+        related_questions=[
+            _bounded_provider_evidence_text(value)
+            for value in result.related_questions
+        ],
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+    )
+
+
+def _bounded_provider_evidence_text(value: str) -> str:
+    """Redact and visibly bound provider prose before state or prompts."""
+
+    safe = scrub_credential_urls(value)
+    prefix, omitted = bounded_utf8_prefix(
+        safe,
+        max_bytes=OBSERVATION_TEXT_BYTES_LIMIT,
+    )
+    if not omitted:
+        return prefix
+    marker = "\n[...provider evidence truncated at persistence limit...]"
+    marker_bytes = len(marker.encode("utf-8"))
+    prefix, _ = bounded_utf8_prefix(
+        safe,
+        max_bytes=OBSERVATION_TEXT_BYTES_LIMIT - marker_bytes,
+    )
+    return prefix + marker
 
 
 def forensic_enabled(settings: AgentSettings) -> bool:
@@ -646,11 +1181,22 @@ def forensic_enabled(settings: AgentSettings) -> bool:
     return str(getattr(settings, "observability_profile", "summary")).lower() == "forensic"
 
 
-def _unwrap_provider(provider: object) -> object:
-    """Return the wrapped provider for ConfiguredLLMProvider-like adapters."""
-    if type(provider).__name__ == "ConfiguredLLMProvider" and hasattr(provider, "_provider"):
-        return getattr(provider, "_provider")
-    return provider
+def unwrap_provider(provider: object) -> object:
+    """Return the innermost provider behind adapter/tracing shells.
+
+    Follows the ``_provider`` chain (ConfiguredLLMProvider, the tracing
+    wrappers) to a fixed point so run-start metadata names the real
+    backend class, never a wrapper.
+    """
+    seen: set[int] = set()
+    current = provider
+    while id(current) not in seen:
+        seen.add(id(current))
+        wrapped = getattr(current, "_provider", None)
+        if wrapped is None:
+            break
+        current = wrapped
+    return current
 
 
 def _clean_value(value: Any) -> Any:
@@ -661,7 +1207,7 @@ def _clean_value(value: Any) -> Any:
 
 def describe_llm_provider(provider: object) -> dict[str, Any]:
     """Extract human-readable runtime metadata for the active LLM provider."""
-    resolved = _unwrap_provider(provider)
+    resolved = unwrap_provider(provider)
     metadata: dict[str, Any] = {
         "provider": type(resolved).__name__,
     }
@@ -707,7 +1253,7 @@ def describe_llm_provider(provider: object) -> dict[str, Any]:
 
 def describe_search_provider(provider: object) -> dict[str, Any]:
     """Extract human-readable runtime metadata for the active search provider."""
-    resolved = _unwrap_provider(provider)
+    resolved = unwrap_provider(provider)
     metadata: dict[str, Any] = {
         "provider": type(resolved).__name__,
     }
@@ -789,22 +1335,33 @@ def log_run_start(
     search = metadata["search"]
     run_settings = metadata["settings"]
 
+    safe_run_id = _console_token(metadata.get("run_id")) or "-"
+    safe_run_mode = _console_token(run_mode) or "unknown"
+    safe_report_profile = (
+        _console_token(run_settings.get("report_profile")) or "unknown"
+    )
+    safe_observability_profile = (
+        _console_token(run_settings.get("observability_profile")) or "unknown"
+    )
+    safe_llm_provider = _console_token(llm.get("provider")) or "unknown"
+    safe_search_provider = _console_token(search.get("provider")) or "unknown"
+
     log.info(
         "RUN start: id=%s mode=%s profile=%s observability=%s llm=%s reasoning=%s classify=%s evaluate=%s claim_extract=%s default_max_tokens=%s context_window_tokens=%s required_context_window_tokens=%s search=%s engine=%s max_rounds=%d confidence_stop=%d max_total_seconds=%d testing_mode=%s question_len=%d history_len=%d",
-        metadata.get("run_id") or "-",
-        run_mode,
-        run_settings.get("report_profile") or "compact",
-        run_settings.get("observability_profile") or "summary",
-        llm.get("provider") or "unknown",
-        llm.get("reasoning_model") or "-",
-        llm.get("classify_model") or "-",
-        llm.get("evaluate_model") or "-",
-        llm.get("claim_extract_model") or "-",
+        safe_run_id,
+        safe_run_mode,
+        safe_report_profile,
+        safe_observability_profile,
+        safe_llm_provider,
+        _console_model_token(llm.get("reasoning_model")) or "-",
+        _console_model_token(llm.get("classify_model")) or "-",
+        _console_model_token(llm.get("evaluate_model")) or "-",
+        _console_model_token(llm.get("claim_extract_model")) or "-",
         llm.get("default_max_tokens") if llm.get("default_max_tokens") is not None else "-",
         llm.get("context_window_tokens") if llm.get("context_window_tokens") is not None else "-",
         run_settings.get("required_context_window_tokens") or "-",
-        search.get("provider") or "unknown",
-        search.get("engine") or "-",
+        safe_search_provider,
+        _console_model_token(search.get("engine")) or "-",
         run_settings["max_rounds"],
         run_settings["confidence_stop"],
         run_settings["max_total_seconds"],
@@ -812,7 +1369,7 @@ def log_run_start(
         metadata["question_length"],
         metadata["history_length"],
     )
-    emit_runtime_event("run_start", metadata, prefix="RUN metadata")
+    emit_runtime_event("run_start", metadata)
 
 
 def log_run_end(
@@ -850,23 +1407,26 @@ def log_run_end(
     }
     log.info(
         "RUN end: id=%s mode=%s status=%s reason=%s elapsed=%.1fs round=%s confidence=%s citations=%s",
-        payload["run_id"] or "-",
-        run_mode,
-        status,
-        payload["reason"] or "-",
+        _console_token(payload["run_id"]) or "-",
+        _console_token(run_mode) or "unknown",
+        _console_token(status) or "unknown",
+        _console_token(payload["reason"]) or "-",
         elapsed_s,
         payload["round"],
         payload["final_confidence"],
         payload["total_citations"],
     )
-    emit_runtime_event("run_end", payload, prefix="RUN metadata")
+    emit_runtime_event("run_end", payload)
 
 
 def log_iteration_entry(entry: dict[str, Any]) -> None:
-    """Write a structured iteration payload to DEBUG logs."""
-    node = str(entry.get("node", "unknown"))
-    emit_runtime_event(
-        str(entry.get("event", "iteration_summary")),
-        entry,
-        prefix=f"ITERATION {node}",
-    )
+    """Write the non-content operational projection to DEBUG logs.
+
+    ``entry`` itself is the protected audit representation and is not mutated.
+    Exact queries, provider prose, source/claim/evidence text, prompt views and
+    URLs therefore remain available to the authorized run result while never
+    being mirrored into ordinary container or file logs.
+    """
+    console_entry = _console_iteration_projection(entry)
+    event = str(console_entry.get("event", "iteration_summary"))
+    emit_runtime_event(event, console_entry)

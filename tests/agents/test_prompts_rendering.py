@@ -1,4 +1,4 @@
-"""Drift tripwire of the rendering-capabilities SSOT (plan M1 S5).
+"""Drift tripwire for the rendering-capabilities source of truth.
 
 The block tells the model what the FRONTEND renderer actually supports
 (MarkdownRenderer.tsx: remark-gfm, rehype-katex, bounded Shiki highlighting,

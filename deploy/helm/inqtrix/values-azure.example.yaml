@@ -1,8 +1,10 @@
 # Example overlay for an Azure-backed Inqtrix demo.
 #
-# This file intentionally contains no secrets. Pass API keys and generated
-# secrets through `secret.data.*` on the Helm command line, a private values
-# file, or an external Secret.
+# This public file intentionally contains no secrets. Every enabled bundled
+# service now requires an explicit credential: postgres.auth.password,
+# qdrant.apiKey, valkey.password, and s3.secretKey. Supply them together with
+# provider/session credentials through a private values file (recommended),
+# `secret.data.*` where applicable, or a complete external Secret.
 #
 # The overlay bundles Postgres, Qdrant, Valkey AND an S3 object store (MinIO) for a
 # self-contained, one-command demo. Qdrant, Valkey and MinIO also run on OpenShift
@@ -58,8 +60,8 @@ qdrant:
 valkey:
   enabled: true
 
-# Bundled MinIO object store. Override s3.accessKey / s3.secretKey for anything beyond
-# a local trial. Works on vanilla Kubernetes and OpenShift.
+# Bundled MinIO object store. s3.secretKey is required; no fallback credential
+# exists. Works on vanilla Kubernetes and OpenShift.
 s3:
   enabled: true
 

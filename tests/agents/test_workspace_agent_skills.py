@@ -1,7 +1,7 @@
-"""Skill runtime in the phase machine (plan M3 `3.4`/`3.5`, M3a).
+"""Skill runtime in the phase machine.
 
 Trajectories over the full platform path: the point check answers from
-context or queues a structured question through the M1 gate, answers
+context or queues a structured question through the clarification gate, answers
 substitute into the ``{{name}}`` slots of the planner/answer prompts,
 ``requires_plan`` overrides the plan gate (strictest wins), and the
 runs router rejects invisible skills and unknown directives loudly.

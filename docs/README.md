@@ -37,6 +37,7 @@ Start here when you know what you want to do but not which page owns it. The roo
 | Understand the workspace agent (plans, approvals, child runs, memo canvas) | [Agent platform](architecture/agent-platform.md) |
 | Understand the live editor data and trust model | [Editor collaboration](architecture/editor-collaboration.md) |
 | Debug a bad or expensive run | [Debugging runs](observability/debugging-runs.md), [Logging](observability/logging.md), [Forensic cookbook](observability/forensic-cookbook.md), [Troubleshooting](reference/troubleshooting.md) |
+| Add or change instrumentation (spans, events, attributes) | [Tracing legend](observability/tracing-legend.md) |
 | Scrape metrics / wire readiness probes | [Metrics](observability/metrics.md) |
 | Learn why a run stopped | [Stop criteria](scoring-and-stopping/stop-criteria.md), [Score ledger](scoring-and-stopping/score-ledger.md), [Confidence](scoring-and-stopping/confidence.md), [Aspect coverage](scoring-and-stopping/aspect-coverage.md) |
 | Add a custom provider or strategy | [Writing a custom provider](providers/writing-a-custom-provider.md), [Strategies](architecture/strategies.md) |

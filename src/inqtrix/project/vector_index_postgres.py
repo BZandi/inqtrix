@@ -15,9 +15,10 @@ avoid an N+1.
 from __future__ import annotations
 
 import uuid
+import time
 from collections import defaultdict
 
-from sqlalchemy import delete, select, tuple_
+from sqlalchemy import delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.pagination import encode_cursor
@@ -27,10 +28,12 @@ from inqtrix.project.base_session_store import (
 )
 from inqtrix.project.vector_index_ports import (
     VectorIndexHistoryEntry,
+    VectorIndexMemberUnavailable,
     VectorIndexMember,
     VectorIndexNotFound,
     VectorIndexRecord,
 )
+from inqtrix.project.asset_lifecycle import lock_asset_lifecycle
 from inqtrix.project.scoped_upsert import ResourceScope, delete_scoped_postgres
 from inqtrix.project.scoped_upsert import scoped_postgres_upsert
 from inqtrix.storage.vector_index_orm import (
@@ -38,6 +41,7 @@ from inqtrix.storage.vector_index_orm import (
     vector_index_members,
     vector_index_records,
 )
+from inqtrix.storage.asset_records_orm import asset_records
 
 # Mutable record columns for the on-conflict upsert (everything except the
 # PK, created_at, and the ownership anchor — never reassigned).
@@ -72,6 +76,38 @@ class PostgresVectorIndexStore(BaseSessionStore):
         members = tuple(members)
         history = tuple(history)
         async with self._session() as session:
+            member_ids = sorted({member.file_id for member in members})
+            for asset_id in member_ids:
+                await lock_asset_lifecycle(
+                    session,
+                    tenant_id=_DEFAULT_TENANT,
+                    created_by_user_id=created_by_user_id,
+                    workspace_id=workspace_id,
+                    asset_id=asset_id,
+                )
+            if member_ids:
+                active_ids = set(
+                    (
+                        await session.execute(
+                            select(asset_records.c.id).where(
+                                asset_records.c.tenant_id == _DEFAULT_TENANT,
+                                asset_records.c.id.in_(member_ids),
+                                asset_records.c.created_by_user_id.is_not_distinct_from(
+                                    created_by_user_id
+                                ),
+                                asset_records.c.workspace_id.is_not_distinct_from(
+                                    workspace_id
+                                ),
+                                asset_records.c.lifecycle_status == "active",
+                            )
+                        )
+                    ).scalars()
+                )
+                unavailable = [
+                    asset_id for asset_id in member_ids if asset_id not in active_ids
+                ]
+                if unavailable:
+                    raise VectorIndexMemberUnavailable(unavailable[0])
             row = (await session.execute(record_stmt)).first()
             if row is None:
                 raise VectorIndexNotFound(id)
@@ -138,6 +174,94 @@ class PostgresVectorIndexStore(BaseSessionStore):
                 tenant_id=_DEFAULT_TENANT, scope=scope,
                 not_found=VectorIndexNotFound,
             )
+
+    async def set_deletion_state(
+        self,
+        index_id: str,
+        *,
+        scope: ResourceScope,
+        status: str,
+        error: str | None,
+    ) -> None:
+        async with self._session() as session:
+            result = await session.execute(
+                update(vector_index_records)
+                .where(
+                    vector_index_records.c.tenant_id == _DEFAULT_TENANT,
+                    vector_index_records.c.id == index_id,
+                    vector_index_records.c.created_by_user_id.is_not_distinct_from(
+                        scope.created_by_user_id
+                    ),
+                    vector_index_records.c.workspace_id.is_not_distinct_from(
+                        scope.workspace_id
+                    ),
+                )
+                .values(status=status, last_error=error, updated_at=time.time())
+                .returning(vector_index_records.c.id)
+            )
+            if result.scalar_one_or_none() is None:
+                raise VectorIndexNotFound(index_id)
+
+    async def count_index(self, index_id: str, *, scope: ResourceScope) -> int:
+        async with self._session() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(vector_index_records)
+                    .where(
+                        vector_index_records.c.tenant_id == _DEFAULT_TENANT,
+                        vector_index_records.c.id == index_id,
+                        vector_index_records.c.created_by_user_id.is_not_distinct_from(
+                            scope.created_by_user_id
+                        ),
+                        vector_index_records.c.workspace_id.is_not_distinct_from(
+                            scope.workspace_id
+                        ),
+                    )
+                )
+                or 0
+            )
+
+    async def remove_asset_memberships(
+        self, file_id: str, *, scope: ResourceScope
+    ) -> int:
+        owned_indexes = select(vector_index_records.c.id).where(
+            vector_index_records.c.tenant_id == _DEFAULT_TENANT,
+            vector_index_records.c.created_by_user_id.is_not_distinct_from(
+                scope.created_by_user_id
+            ),
+            vector_index_records.c.workspace_id.is_not_distinct_from(
+                scope.workspace_id
+            ),
+        )
+        stmt = delete(vector_index_members).where(
+            vector_index_members.c.tenant_id == _DEFAULT_TENANT,
+            vector_index_members.c.file_id == file_id,
+            vector_index_members.c.index_id.in_(owned_indexes),
+        )
+        async with self._session() as session:
+            result = await session.execute(stmt)
+        return max(0, int(result.rowcount or 0))
+
+    async def count_asset_memberships(
+        self, file_id: str, *, scope: ResourceScope
+    ) -> int:
+        owned_indexes = select(vector_index_records.c.id).where(
+            vector_index_records.c.tenant_id == _DEFAULT_TENANT,
+            vector_index_records.c.created_by_user_id.is_not_distinct_from(
+                scope.created_by_user_id
+            ),
+            vector_index_records.c.workspace_id.is_not_distinct_from(
+                scope.workspace_id
+            ),
+        )
+        query = select(func.count()).select_from(vector_index_members).where(
+            vector_index_members.c.tenant_id == _DEFAULT_TENANT,
+            vector_index_members.c.file_id == file_id,
+            vector_index_members.c.index_id.in_(owned_indexes),
+        )
+        async with self._session() as session:
+            return int((await session.execute(query)).scalar_one())
 
     # -- children --------------------------------------------------------- #
 

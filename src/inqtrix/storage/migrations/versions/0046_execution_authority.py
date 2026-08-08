@@ -2,7 +2,6 @@
 
 Revision ID: 0046_execution_authority
 Revises: 0045_canonical_user_ids
-Create Date: 2026-07-14
 
 Imported reports no longer reuse a client-controlled id as the public run id.
 ``source_run_id`` is an owner-scoped idempotency key while ``run_id`` remains

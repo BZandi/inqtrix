@@ -191,6 +191,8 @@ export function detachProjectResourceGraph(
       delete detached.access
       delete detached.collaboration
       delete detached.metadataRevision
+      delete detached.recovery
+      delete detached.serverSynced
       return [detached.id, detached]
     }),
   )
@@ -232,10 +234,15 @@ export function detachProjectResourceGraph(
     const id = replace(maps.fileAssets, asset.id)
     return [id, {
       ...asset,
+      deletionError: null,
+      deletionOperationId: null,
+      deletionStage: null,
       groupId: replaceNullable(maps.fileGroups, asset.groupId),
       id,
+      lifecycleStatus: 'active' as const,
       sectionId: replace(maps.fileSections, asset.sectionId),
       serverFileId: null,
+      serverSynced: false,
     }]
   }))
   const vectorIndexes = Object.fromEntries(
@@ -369,7 +376,15 @@ export function detachProjectResourceGraph(
     fileLibrarySections: Object.fromEntries(
       Object.values(state.fileLibrarySections).map((section) => {
         const id = replace(maps.fileSections, section.id)
-        return [id, { ...section, id }]
+        return [id, {
+          ...section,
+          deletionError: null,
+          deletionOperationId: null,
+          deletionStage: null,
+          id,
+          lifecycleStatus: 'active' as const,
+          serverSynced: false,
+        }]
       }),
     ),
     indexingJobs: {},

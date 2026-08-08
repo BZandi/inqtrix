@@ -9,6 +9,7 @@ approval decision commits or rolls back TOGETHER with the run's
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from importlib import import_module
 import os
 import threading
@@ -19,6 +20,7 @@ from typing import Any, Callable
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.agents.control_ports import (
     ApprovalRecord,
@@ -45,15 +47,13 @@ from inqtrix.storage.agent_control_postgres import PostgresAgentControlStore
 from inqtrix.storage.db import build_engine, build_session_factory
 from inqtrix.storage.identity_postgres import PostgresIdentityBackend
 from inqtrix.storage.migrate import run_migrations
+from inqtrix.storage.agent_sessions_orm import agent_sessions
 
 from tests.storage._canonical_users import ensure_canonical_users
 
 TEST_DATABASE_URL = os.environ.get("INQTRIX_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL,
-    reason="INQTRIX_TEST_DATABASE_URL not set (Postgres integration)",
-)
+pytestmark = pytest.mark.postgres
 
 APP_ROLE = "inqtrix_app"
 OWNER_USER_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -168,6 +168,27 @@ def _parked_agent_run(
             assert resumed_release.wait(timeout=10.0)
         handle.complete({"answer": "fortgesetzt"})
 
+    async def _seed_session() -> None:
+        async with run_store._session("default") as session:
+            await session.execute(
+                pg_insert(agent_sessions)
+                .values(
+                    id=session_id,
+                    tenant_id="default",
+                    created_by_user_id=owner_user_id,
+                    workspace_id=None,
+                    title="Agent control fixture",
+                    group_id=None,
+                    items_json="[]",
+                    lifecycle_status="active",
+                    created_at=time.time(),
+                    updated_at=time.time(),
+                )
+                .on_conflict_do_nothing(index_elements=(agent_sessions.c.id,))
+            )
+
+    run_store._call(_seed_session())
+
     summary = run_store.submit(
         question="Agentenauftrag",
         stack_name="default",
@@ -185,6 +206,44 @@ def _parked_agent_run(
         == "waiting_for_approval"
     )
     return run_id
+
+
+def _completed_agent_child(
+    run_store: PostgresRunStore,
+    *,
+    parent_run_id: str,
+    parent_task_id: str,
+    attempt: int,
+    owner_user_id: uuid.UUID,
+) -> str:
+    def work(handle: Any) -> None:
+        handle.complete({"answer": f"child attempt {attempt}"})
+
+    summary = run_store.submit(
+        question=f"Child research attempt {attempt}",
+        stack_name="default",
+        work=work,
+        request_payload={
+            "question": "Child research",
+            "body": {
+                "mode": "research",
+                "parent_task_id": parent_task_id,
+                "parent_task_attempt": attempt,
+            },
+        },
+        kind="agent_child",
+        parent_run_id=parent_run_id,
+        root_run_id=parent_run_id,
+        created_by_user_id=owner_user_id,
+        created_by_tenant_id="default",
+    )
+    child_run_id = summary["run_id"]
+    visible_to = _scoped(owner_user_id)
+    _wait_until(
+        lambda: run_store.get(child_run_id, visible_to=visible_to)["status"]
+        == "completed"
+    )
+    return child_run_id
 
 
 def _scoped(user_id: uuid.UUID) -> UserContext:
@@ -281,8 +340,8 @@ async def test_decision_and_resume_commit_together(service, run_store):
 async def test_plan_approval_rejects_subject_from_another_run(
     service, run_store
 ):
-    run_a = _parked_agent_run(run_store)
-    run_b = _parked_agent_run(run_store)
+    run_a = _parked_agent_run(run_store, session_id="sess-pg-a")
+    run_b = _parked_agent_run(run_store, session_id="sess-pg-b")
     await service.store.save_plan(
         run_id=run_a,
         plan=PlanRecord(
@@ -414,7 +473,21 @@ async def test_migration_backfills_legacy_decided_plan_subject(
 async def test_task_transition_retry_and_terminal_contract_postgres(
     service, run_store
 ):
-    run_id = _parked_agent_run(run_store)
+    run_id = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    child_1 = _completed_agent_child(
+        run_store,
+        parent_run_id=run_id,
+        parent_task_id="task-pg",
+        attempt=1,
+        owner_user_id=OWNER_USER_ID,
+    )
+    child_2 = _completed_agent_child(
+        run_store,
+        parent_run_id=run_id,
+        parent_task_id="task-pg",
+        attempt=2,
+        owner_user_id=OWNER_USER_ID,
+    )
     await service.store.save_plan(
         run_id=run_id,
         plan=PlanRecord(
@@ -440,22 +513,22 @@ async def test_task_transition_retry_and_terminal_contract_postgres(
         plan_id="plan-task-pg",
         task_id="task-pg",
         status="running",
-        child_run_id="child-pg-1",
+        child_run_id=child_1,
     )
     retry = await service.store.transition_plan_task(
         run_id=run_id,
         plan_id="plan-task-pg",
         task_id="task-pg",
         status="running",
-        child_run_id="child-pg-2",
+        child_run_id=child_2,
     )
-    assert retry.child_run_id == "child-pg-2"
+    assert retry.child_run_id == child_2
     terminal = await service.store.transition_plan_task(
         run_id=run_id,
         plan_id="plan-task-pg",
         task_id="task-pg",
         status="insufficient_evidence",
-        child_run_id="child-pg-2",
+        child_run_id=child_2,
         result_summary="One source remained after verification.",
         result_payload={
             "claims": [{"text": "One source remained."}],
@@ -622,43 +695,47 @@ async def test_shared_editor_task_cancel_reaches_child_postgres(
 
 
 @pytest.mark.asyncio
-async def test_missing_child_rolls_back_task_cancel_postgres(
-    service, run_store
+async def test_deleting_child_run_clears_task_reference_without_deleting_task(
+    control_store, run_store
 ) -> None:
-    run_id = _parked_agent_run(run_store)
-    await service.store.save_plan(
+    run_id = _parked_agent_run(run_store, owner_user_id=OWNER_USER_ID)
+    child_run_id = _completed_agent_child(
+        run_store,
+        parent_run_id=run_id,
+        parent_task_id="research",
+        attempt=1,
+        owner_user_id=OWNER_USER_ID,
+    )
+    plan = PlanRecord(
+        plan_id="plan-child-reference-pg",
         run_id=run_id,
-        plan=PlanRecord(
-            plan_id="plan-missing-child-pg",
-            run_id=run_id,
-            version=1,
-            status="approved",
-            created_by="agent",
-        ),
-        tasks=[
-            PlanTaskRecord(
-                task_id="research",
-                plan_id="plan-missing-child-pg",
-                run_id=run_id,
-                ordinal=0,
-                title="Research",
-                tool_kind="web_research",
-                status="running",
-                child_run_id="run-missing-child-pg",
-            )
-        ],
+        version=1,
+        status="approved",
+        created_by="agent",
+    )
+    task = PlanTaskRecord(
+        task_id="research",
+        plan_id=plan.plan_id,
+        run_id=run_id,
+        ordinal=0,
+        title="Research",
+        tool_kind="web_research",
+        status="running",
+        child_run_id=child_run_id,
+    )
+    saved_plan = await control_store.save_plan(
+        run_id=run_id,
+        plan=plan,
+        tasks=[task],
     )
 
-    with pytest.raises(RunNotFound):
-        await service.request_task_cancel(
-            run_id,
-            "research",
-            workspace_id=None,
-            principal=None,
-        )
+    run_store.delete(child_run_id, requester_user_id=OWNER_USER_ID)
 
-    _plan, tasks = await service.store.get_plan(run_id)
-    assert tasks[0].status == "running"
+    with pytest.raises(RunNotFound):
+        run_store.get(child_run_id, visible_to=_scoped(OWNER_USER_ID))
+    stored_plan, stored_tasks = await control_store.get_plan(run_id)
+    assert stored_plan == saved_plan
+    assert stored_tasks == [replace(task, child_run_id=None)]
 
 
 @pytest.mark.asyncio
@@ -1010,6 +1087,12 @@ async def test_revoked_effective_actor_cannot_persist_runtime_artifact_postgres(
             )
     finally:
         release.set()
+        _wait_until(
+            lambda: run_store.get(
+                run_id, visible_to=_scoped(OWNER_USER_ID)
+            )["status"]
+            == "failed"
+        )
 
 
 @pytest.mark.asyncio

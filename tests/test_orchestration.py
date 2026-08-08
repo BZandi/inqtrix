@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from queue import Queue
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -1253,6 +1254,29 @@ def test_answer_composes_sections_with_full_body_citation_pool():
     assert state["iteration_logs"][-1]["allowed_citation_count"] == 12
     assert state["iteration_logs"][-1]["section_logs"][0]["limit_hit"] is True
     assert state["iteration_logs"][-1]["section_logs"][0]["accepted_with_limit"] is True
+    rendered_record_count = state["iteration_logs"][-1][
+        "rendered_evidence_record_count"
+    ]
+    rendered_record_label = (
+        "Evidenzbeleg" if rendered_record_count == 1 else "Evidenzbelege"
+    )
+    assert (
+        f"{rendered_record_count} {rendered_record_label} im Evidence-Prompt"
+        in state["answer"]
+    )
+    assert "Quellen im Evidence-Prompt" not in state["answer"]
+    omitted_record_count = state["iteration_logs"][-1][
+        "omitted_evidence_record_count"
+    ]
+    if omitted_record_count:
+        omitted_record_label = (
+            "Evidenzbeleg" if omitted_record_count == 1 else "Evidenzbelege"
+        )
+        assert (
+            f"{omitted_record_count} {omitted_record_label} wegen Budget ausgelassen"
+            in state["answer"]
+        )
+        assert "Quellen wegen Budget ausgelassen" not in state["answer"]
 
 
 def test_answer_preserves_source_context_and_references_without_bundles():
@@ -1399,23 +1423,35 @@ def test_answer_prompt_diagnostics_counts_claimless_sources():
     assert diagnostics["consolidated_claim_count"] == 1
 
 
-def test_claim_extraction_text_uses_source_map_without_snippet_cap():
+def test_claim_extraction_text_keeps_provider_answer_before_complete_snippet():
+    provider_snippet = (
+        "This provider snippet must remain complete in the projection. " * 24
+    ) + "UNIQUE_SNIPPET_END"
+    citation_record = {
+        "rank": 2,
+        "canonical_url": "https://example.com/source",
+        "title": "Example Source",
+        "source_date": "2026-05-24",
+        "snippet": provider_snippet,
+    }
     text = _claim_extraction_text(
         "Provider answer with inline refs [2].",
-        [
-            {
-                "rank": 2,
-                "canonical_url": "https://example.com/source",
-                "title": "Example Source",
-                "source_date": "2026-05-24",
-                "snippet": "This long snippet should not be copied into the source map. " * 20,
-            }
-        ],
+        [citation_record],
     )
 
-    assert "[2] https://example.com/source | title: Example Source | date: 2026-05-24" in text
-    assert "snippet:" not in text
-    assert "This long snippet should not be copied" not in text
+    assert (
+        "[2] https://example.com/source | title: Example Source | date: 2026-05-24"
+        in text
+    )
+    assert "PROVIDER_SNIPPET[2]:" in text
+    assert provider_snippet in text
+    assert "UNIQUE_SNIPPET_END" in text
+    assert "Zusammenhängende, web-gegroundete Provider-Antwort:" in text
+    assert "Provider answer with inline refs [2]." in text
+    assert text.index("Provider answer with inline refs [2].") < text.index(
+        "Vom Websuchanbieter zurückgegebene Quellenmetadaten:"
+    )
+    assert "claim_prompt_provider_snippet_omitted_chars" not in citation_record
 
 
 def test_bare_evidence_labels_expand_to_markdown_links():

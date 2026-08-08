@@ -1,6 +1,37 @@
 /** Wire types of the `/v1/shares*` + `/v1/users/search` surface. */
 
 export type SharePermissionValue = 'edit' | 'suggest' | 'view'
+export type EditorShareLinkPermission = 'comment' | SharePermissionValue
+
+export type EditorShareLink = {
+  created_at: number
+  expires_at: number
+  id: string
+  label: string
+  last_accessed_at: number | null
+  permission: EditorShareLinkPermission
+  revision: number
+  revoked_at: number | null
+  session_count: number
+  successful_open_count: number
+  updated_at: number
+}
+
+export type CreatedEditorShareLink = EditorShareLink & {
+  password: string
+  url: string
+}
+
+export type EditorAccessSummary = {
+  direct_share_count: number
+  guest_link_count: number
+  guest_open_count: number
+  guest_session_count: number
+  last_guest_accessed_at: number | null
+  object: 'editor_access_summary'
+  share_links: EditorShareLink[]
+  window: '7d' | '30d'
+}
 
 /** Existing shareable resources intentionally keep their original two-level
  * access contract. `suggest` is grantable only for editor documents. */

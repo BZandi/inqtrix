@@ -229,6 +229,58 @@ async def test_workspace_role_never_implies_resource_access():
 
 
 @pytest.mark.asyncio
+async def test_sharing_master_switch_suspends_without_deleting_grants() -> None:
+    """The module gate removes live access and preserves reactivation state."""
+    identity = MemoryIdentityStore()
+    identity.add_share(
+        recipient_user_id=user_id("alice"),
+        resource_type="editor_document",
+        resource_id="ed_suspended",
+        permission=SharePermission.EDIT,
+        granted_by_user_id=user_id("owner"),
+    )
+    disabled = AuthorizationService(
+        members=identity,
+        shares=identity,
+        audit=identity,
+        sharing_enabled=False,
+    )
+    enabled = AuthorizationService(
+        members=identity,
+        shares=identity,
+        audit=identity,
+        sharing_enabled=True,
+    )
+    alice = oidc_principal("alice")
+    owner = oidc_principal("owner")
+
+    assert not await disabled.can(
+        alice,
+        SharePermission.VIEW,
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="default",
+        resource_type="editor_document",
+        resource_id="ed_suspended",
+    )
+    assert await disabled.can(
+        owner,
+        SharePermission.EDIT,
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="default",
+        resource_type="editor_document",
+        resource_id="ed_suspended",
+    )
+    assert await enabled.can(
+        alice,
+        SharePermission.EDIT,
+        owner_user_id=user_id("owner"),
+        resource_tenant_id="default",
+        resource_type="editor_document",
+        resource_id="ed_suspended",
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("granted", "minimum", "allowed"),
     [
@@ -380,7 +432,17 @@ async def test_require_denial_raises_not_found_and_is_audited(caplog):
                 resource_type="prompt_template", resource_id="r1",
             )
 
-    assert any("authz denied" in message for message in caplog.messages)
+    authz_messages = [
+        message for message in caplog.messages if "authz denied" in message
+    ]
+    assert any("actor_ref=usr_" in message for message in authz_messages)
+    assert all(str(user_id("alice")) not in message for message in authz_messages)
+    assert all("resource_ref=res_" in message for message in authz_messages)
+    assert all(
+        "resource=prompt_template/r1" not in message
+        for message in authz_messages
+    )
+    assert all("permission" not in message for message in authz_messages)
     assert len(store.audit_entries) == 1
     entry = store.audit_entries[0]
     assert entry.action == "authz.denied"

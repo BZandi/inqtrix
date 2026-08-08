@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -32,11 +33,16 @@ if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
 _HISTORY_ACTIVITY_TYPES = frozenset(
-    {"direct", "suggestion", "decision", "system"}
+    {"direct", "suggestion", "decision", "system", "comment"}
 )
 _OPEN_ACTIVITY_TYPES = frozenset(
-    {"insertion", "deletion", "modification"}
+    {"insertion", "deletion", "replacement", "format", "structure"}
 )
+_COMMENT_STATUSES = frozenset({"all", "open", "resolved"})
+_MAX_COMMENT_BODY = 8_192
+_MAX_COMMENT_QUOTE = 1_600
+_MAX_COMMENT_ANCHOR = 8_192
+_MAX_COMMENT_MENTIONS = 50
 
 
 def build_router(container: "AppContainer") -> APIRouter:
@@ -240,6 +246,264 @@ def build_router(container: "AppContainer") -> APIRouter:
             ),
         }
 
+    @router.get(
+        "/v1/editor/documents/{document_id}/collaboration/comments"
+    )
+    async def list_comments(
+        document_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        try:
+            since_revision = _bounded_integer(
+                req.query_params.get("since_revision", "0"),
+                field="since_revision",
+                minimum=0,
+            )
+            limit = _bounded_integer(
+                req.query_params.get("limit", "100"),
+                field="limit",
+                minimum=1,
+                maximum=200,
+            )
+            status = req.query_params.get("status", "all")
+            if status not in _COMMENT_STATUSES:
+                raise ValueError("status muss all, open oder resolved sein")
+            return await service.list_comments(
+                document_id=document_id,
+                since_revision=since_revision,
+                status=cast(Literal["all", "open", "resolved"], status),
+                limit=limit,
+                principal=principal,
+                visible_to=visible_to,
+            )
+        except Exception as exc:
+            response = _public_error(exc)
+            if response is not None:
+                return response
+            raise
+
+    @router.post(
+        "/v1/editor/documents/{document_id}/collaboration/comments"
+    )
+    async def create_comment(
+        document_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        body = await _json_object(req)
+        if body is None:
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        try:
+            generation, expected_revision, command_id = _comment_command(body)
+            result = await service.create_comment(
+                document_id=document_id,
+                generation=generation,
+                thread_id=_uuid_field(body, "thread_id"),
+                message_id=_uuid_field(body, "message_id"),
+                anchor=_comment_anchor(body.get("anchor")),
+                quote_text=_comment_quote(body.get("quote")),
+                body_markdown=_comment_body(body.get("body_markdown")),
+                mention_user_ids=_comment_mentions(body.get("mention_user_ids")),
+                expected_revision=expected_revision,
+                command_id=command_id,
+                principal=principal,
+                visible_to=visible_to,
+            )
+        except Exception as exc:
+            response = _public_error(exc)
+            if response is not None:
+                return response
+            raise
+        return result
+
+    @router.post(
+        "/v1/editor/documents/{document_id}/collaboration/comments/"
+        "{thread_id}/replies"
+    )
+    async def reply_to_comment(
+        document_id: str,
+        thread_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        body = await _json_object(req)
+        if body is None:
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        try:
+            generation, expected_revision, command_id = _comment_command(body)
+            result = await service.reply_to_comment(
+                document_id=document_id,
+                generation=generation,
+                thread_id=_uuid_value(thread_id, field="thread_id"),
+                message_id=_uuid_field(body, "message_id"),
+                body_markdown=_comment_body(body.get("body_markdown")),
+                mention_user_ids=_comment_mentions(body.get("mention_user_ids")),
+                expected_revision=expected_revision,
+                command_id=command_id,
+                principal=principal,
+                visible_to=visible_to,
+            )
+        except Exception as exc:
+            response = _public_error(exc)
+            if response is not None:
+                return response
+            raise
+        return result
+
+    @router.patch(
+        "/v1/editor/documents/{document_id}/collaboration/comments/{thread_id}"
+    )
+    async def update_comment_thread(
+        document_id: str,
+        thread_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        body = await _json_object(req)
+        if body is None:
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        try:
+            generation, expected_revision, command_id = _comment_command(body)
+            status = body.get("status")
+            if status not in {"open", "resolved"}:
+                raise ValueError("status muss open oder resolved sein")
+            result = await service.set_comment_status(
+                document_id=document_id,
+                generation=generation,
+                thread_id=_uuid_value(thread_id, field="thread_id"),
+                status=cast(Literal["open", "resolved"], status),
+                expected_revision=expected_revision,
+                command_id=command_id,
+                principal=principal,
+                visible_to=visible_to,
+            )
+        except Exception as exc:
+            response = _public_error(exc)
+            if response is not None:
+                return response
+            raise
+        return result
+
+    @router.patch(
+        "/v1/editor/documents/{document_id}/collaboration/comments/"
+        "{thread_id}/messages/{message_id}"
+    )
+    async def update_comment_message(
+        document_id: str,
+        thread_id: str,
+        message_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        body = await _json_object(req)
+        if body is None:
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        try:
+            generation, expected_revision, command_id = _comment_command(body)
+            result = await service.update_comment_message(
+                document_id=document_id,
+                generation=generation,
+                thread_id=_uuid_value(thread_id, field="thread_id"),
+                message_id=_uuid_value(message_id, field="message_id"),
+                body_markdown=_comment_body(body.get("body_markdown")),
+                mention_user_ids=_comment_mentions(body.get("mention_user_ids")),
+                delete_message=False,
+                expected_revision=expected_revision,
+                command_id=command_id,
+                principal=principal,
+                visible_to=visible_to,
+            )
+        except Exception as exc:
+            response = _public_error(exc)
+            if response is not None:
+                return response
+            raise
+        return result
+
+    @router.delete(
+        "/v1/editor/documents/{document_id}/collaboration/comments/"
+        "{thread_id}/messages/{message_id}"
+    )
+    async def delete_comment_message(
+        document_id: str,
+        thread_id: str,
+        message_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        body = await _json_object(req)
+        if body is None:
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        try:
+            generation, expected_revision, command_id = _comment_command(body)
+            result = await service.update_comment_message(
+                document_id=document_id,
+                generation=generation,
+                thread_id=_uuid_value(thread_id, field="thread_id"),
+                message_id=_uuid_value(message_id, field="message_id"),
+                body_markdown=None,
+                mention_user_ids=(),
+                delete_message=True,
+                expected_revision=expected_revision,
+                command_id=command_id,
+                principal=principal,
+                visible_to=visible_to,
+            )
+        except Exception as exc:
+            response = _public_error(exc)
+            if response is not None:
+                return response
+            raise
+        return result
+
+    @router.post(
+        "/v1/editor/documents/{document_id}/collaboration/comments/read"
+    )
+    async def mark_comments_read(
+        document_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        body = await _json_object(req)
+        if body is None:
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        try:
+            generation = _integer_field(body, "generation", minimum=1)
+            revision = _integer_field(body, "revision", minimum=0)
+            last_read_revision = await service.mark_comments_read(
+                document_id=document_id,
+                generation=generation,
+                revision=revision,
+                principal=principal,
+                visible_to=visible_to,
+            )
+        except Exception as exc:
+            response = _public_error(exc)
+            if response is not None:
+                return response
+            raise
+        return {"last_read_revision": last_read_revision}
+
     @router.post(
         "/v1/editor/documents/{document_id}/collaboration/projection:flush"
     )
@@ -423,6 +687,141 @@ async def _json_object(request: Request) -> dict[str, Any] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _bounded_integer(
+    value: Any,
+    *,
+    field: str,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} muss eine Ganzzahl sein") from exc
+    if isinstance(value, bool) or parsed < minimum:
+        raise ValueError(f"{field} ist ausserhalb des erlaubten Bereichs")
+    if maximum is not None and parsed > maximum:
+        raise ValueError(f"{field} ist ausserhalb des erlaubten Bereichs")
+    return parsed
+
+
+def _integer_field(
+    body: dict[str, Any],
+    field: str,
+    *,
+    minimum: int,
+) -> int:
+    value = body.get(field)
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise ValueError(f"{field} muss eine gueltige Ganzzahl sein")
+    return value
+
+
+def _uuid_value(value: Any, *, field: str) -> uuid.UUID:
+    if not isinstance(value, str) or len(value) > 64:
+        raise ValueError(f"{field} muss eine UUID sein")
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} muss eine UUID sein") from exc
+
+
+def _uuid_field(body: dict[str, Any], field: str) -> uuid.UUID:
+    return _uuid_value(body.get(field), field=field)
+
+
+def _comment_command(
+    body: dict[str, Any],
+) -> tuple[int, int, uuid.UUID]:
+    return (
+        _integer_field(body, "generation", minimum=1),
+        _integer_field(body, "expected_revision", minimum=0),
+        _uuid_field(body, "command_id"),
+    )
+
+
+def _comment_body(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("body_markdown muss ein String sein")
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > _MAX_COMMENT_BODY
+        or "\x00" in normalized
+    ):
+        raise ValueError("body_markdown ist leer oder zu lang")
+    return normalized
+
+
+def _comment_quote(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > _MAX_COMMENT_QUOTE:
+        raise ValueError("quote muss ein kurzer String sein")
+    if "\x00" in value:
+        raise ValueError("quote enthaelt ungueltige Zeichen")
+    return value
+
+
+def _comment_mentions(value: Any) -> tuple[uuid.UUID, ...]:
+    if value is None:
+        return ()
+    if (
+        not isinstance(value, list)
+        or len(value) > _MAX_COMMENT_MENTIONS
+    ):
+        raise ValueError("mention_user_ids muss eine kurze Liste sein")
+    parsed = tuple(
+        _uuid_value(item, field="mention_user_ids") for item in value
+    )
+    if len(set(parsed)) != len(parsed):
+        raise ValueError("mention_user_ids darf keine Duplikate enthalten")
+    return parsed
+
+
+def _comment_anchor(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("anchor muss ein Objekt sein")
+    if (
+        len(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        > _MAX_COMMENT_ANCHOR
+    ):
+        raise ValueError("anchor ist zu gross")
+    required_text = ("quoteBefore", "selectedText", "quoteAfter")
+    if any(
+        not isinstance(value.get(field), str)
+        for field in required_text
+    ):
+        raise ValueError("anchor enthaelt ungueltige Textfelder")
+    if any(
+        len(cast(str, value[field])) > _MAX_COMMENT_QUOTE
+        for field in required_text
+    ):
+        raise ValueError("anchor enthaelt zu lange Textfelder")
+    start = value.get("from")
+    end = value.get("to")
+    if (
+        not isinstance(start, int)
+        or isinstance(start, bool)
+        or start < 0
+        or not isinstance(end, int)
+        or isinstance(end, bool)
+        or end < start
+    ):
+        raise ValueError("anchor enthaelt einen ungueltigen Bereich")
+    for field in ("relativeFrom", "relativeTo"):
+        relative = value.get(field)
+        if relative is not None and (
+            not isinstance(relative, str) or len(relative) > 4096
+        ):
+            raise ValueError("anchor enthaelt eine ungueltige relative Position")
+    return dict(value)
 
 
 def _public_error(exc: Exception):

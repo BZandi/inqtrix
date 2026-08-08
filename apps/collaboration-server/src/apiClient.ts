@@ -93,6 +93,9 @@ export class FastApiCollaborationClient implements CollaborationApi {
       generation: positiveInteger(payload, 'generation'),
       leaseId: requiredString(payload, 'lease_id'),
       permission: collaborationAccess(payload.permission),
+      policyCursor: payload.policy_cursor === undefined
+        ? 0
+        : nonNegativeInteger(payload, 'policy_cursor'),
       protocolVersion: positiveInteger(payload, 'protocol_version'),
       schemaHash: sha256String(payload, 'schema_hash'),
       schemaVersion: positiveInteger(payload, 'schema_version'),
@@ -119,13 +122,24 @@ export class FastApiCollaborationClient implements CollaborationApi {
       'GET',
     ))
     const updates = requiredArray(payload, 'updates').map((value, index) => {
-      return parseLoadedUpdate(value, `updates[${index}]`)
+      return parseLoadedUpdate(
+        value,
+        `updates[${index}]`,
+        this.settings.frameLimitBytes,
+      )
     })
     const snapshotValue = payload.snapshot
     const snapshot = snapshotValue === null
       ? null
-      : parseLoadedSnapshot(snapshotValue, 'snapshot')
-    const snapshotCandidates = parseSnapshotCandidates(payload)
+      : parseLoadedSnapshot(
+          snapshotValue,
+          'snapshot',
+          this.settings.documentLimitBytes,
+        )
+    const snapshotCandidates = parseSnapshotCandidates(payload, {
+      documentLimitBytes: this.settings.documentLimitBytes,
+      frameLimitBytes: this.settings.frameLimitBytes,
+    })
     return {
       documentId: requiredString(payload, 'document_id'),
       generation: positiveInteger(payload, 'generation'),
@@ -187,9 +201,14 @@ export class FastApiCollaborationClient implements CollaborationApi {
         actor_kind: actorKind(input.actorKind),
         actor_user_id: input.actorUserId,
         change_kind: changeKind(input.changeKind),
+        change_summary: {
+          edits: input.changeSummary.edits,
+          omitted_edit_count: input.changeSummary.omittedEditCount,
+        },
         command_id: input.commandId ?? null,
         command_payload_hash: input.commandPayloadHash,
         decision: input.decision,
+        decision_outcome: input.decisionOutcome,
         epoch: input.fence.epoch,
         expected_sequence: input.expectedSequence ?? null,
         generation: input.generation,
@@ -201,6 +220,7 @@ export class FastApiCollaborationClient implements CollaborationApi {
           created_at: patch.createdAt,
           kinds: patch.kinds,
           patch_id: patch.patchId,
+          superseded_suggestion_ids: patch.supersededSuggestionIds,
         })),
         suggestions: input.suggestions.map((suggestion) => ({
           author_id: suggestion.authorId,
@@ -453,7 +473,13 @@ export class FastApiCollaborationClient implements CollaborationApi {
   }
 }
 
-function parseSnapshotCandidates(payload: JsonRecord): LoadedDocumentState['snapshotCandidates'] {
+function parseSnapshotCandidates(
+  payload: JsonRecord,
+  limits: {
+    documentLimitBytes: number
+    frameLimitBytes: number
+  },
+): LoadedDocumentState['snapshotCandidates'] {
   const value = payload.snapshot_candidates
   if (value === undefined) return undefined
   if (!Array.isArray(value) || value.length < 1 || value.length > 2) {
@@ -462,9 +488,17 @@ function parseSnapshotCandidates(payload: JsonRecord): LoadedDocumentState['snap
   const candidates = value.map((candidate, index) => {
     const item = record(candidate)
     return {
-      snapshot: parseLoadedSnapshot(item, `snapshot_candidates[${index}]`),
+      snapshot: parseLoadedSnapshot(
+        item,
+        `snapshot_candidates[${index}]`,
+        limits.documentLimitBytes,
+      ),
       updates: requiredArray(item, 'updates').map((update, updateIndex) => (
-        parseLoadedUpdate(update, `snapshot_candidates[${index}].updates[${updateIndex}]`)
+        parseLoadedUpdate(
+          update,
+          `snapshot_candidates[${index}].updates[${updateIndex}]`,
+          limits.frameLimitBytes,
+        )
       )),
     }
   })
@@ -476,22 +510,45 @@ function parseSnapshotCandidates(payload: JsonRecord): LoadedDocumentState['snap
   return candidates
 }
 
-function parseLoadedSnapshot(value: unknown, label: string) {
+function parseLoadedSnapshot(
+  value: unknown,
+  label: string,
+  documentLimitBytes: number,
+) {
   const item = record(value)
   return {
     coveredSequence: nonNegativeInteger(item, 'covered_sequence'),
     stateHash: sha256String(item, 'state_hash'),
-    stateUpdate: base64Bytes(item, 'state_update_base64', `${label}.state_update_base64`),
-    stateVector: base64Bytes(item, 'state_vector_base64', `${label}.state_vector_base64`),
+    stateUpdate: base64Bytes(
+      item,
+      'state_update_base64',
+      `${label}.state_update_base64`,
+      documentLimitBytes,
+    ),
+    stateVector: base64Bytes(
+      item,
+      'state_vector_base64',
+      `${label}.state_vector_base64`,
+      documentLimitBytes,
+    ),
   }
 }
 
-function parseLoadedUpdate(value: unknown, label: string) {
+function parseLoadedUpdate(
+  value: unknown,
+  label: string,
+  frameLimitBytes: number,
+) {
   const item = record(value)
   return {
     hash: sha256String(item, 'update_hash'),
     sequence: positiveInteger(item, 'sequence'),
-    update: base64Bytes(item, 'update_base64', `${label}.update_base64`),
+    update: base64Bytes(
+      item,
+      'update_base64',
+      `${label}.update_base64`,
+      frameLimitBytes,
+    ),
   }
 }
 
@@ -588,6 +645,10 @@ function verifiedUser(value: unknown): VerifiedUser {
   return {
     color,
     id: requiredString(payload, 'id'),
+    kind: payload.kind === 'guest' ? 'guest' : 'user',
+    ...(typeof payload.link_label === 'string'
+      ? { linkLabel: payload.link_label }
+      : {}),
     name: requiredString(payload, 'name'),
   }
 }
@@ -624,7 +685,7 @@ function actorKind(value: CollaborationActorKind): CollaborationActorKind {
 }
 
 function actorKindValue(value: unknown): CollaborationActorKind {
-  if (value !== 'assistant' && value !== 'agent' && value !== 'human' && value !== 'system') {
+  if (value !== 'assistant' && value !== 'agent' && value !== 'guest' && value !== 'human' && value !== 'system') {
     throw new ApiRequestError(503, 'invalid_internal_response')
   }
   return value
@@ -641,12 +702,27 @@ function serverChangeKind(value: unknown): PersistedCommand['changeKind'] {
   return value
 }
 
-function base64Bytes(payload: JsonRecord, key: string, label: string): Uint8Array {
-  const value = requiredString(payload, key)
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+function base64Bytes(
+  payload: JsonRecord,
+  key: string,
+  label: string,
+  maxDecodedBytes: number,
+): Uint8Array {
+  const value = payload[key]
+  const maxEncodedLength = Math.ceil(maxDecodedBytes / 3) * 4
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > maxEncodedLength
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+  ) {
     throw new ApiRequestError(503, `invalid_${label.replace(/[^a-z0-9]/gi, '_')}`)
   }
-  return new Uint8Array(Buffer.from(value, 'base64'))
+  const decoded = new Uint8Array(Buffer.from(value, 'base64'))
+  if (decoded.byteLength > maxDecodedBytes) {
+    throw new ApiRequestError(503, `invalid_${label.replace(/[^a-z0-9]/gi, '_')}`)
+  }
+  return decoded
 }
 
 function bytesBase64(value: Uint8Array): string {

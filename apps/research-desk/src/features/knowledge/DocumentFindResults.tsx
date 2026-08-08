@@ -2,9 +2,11 @@ import { useMemo } from 'react'
 import { FileText, SearchCheck } from '@/components/icons'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
-import type { KnowledgeSearchHit } from '@/features/researchRuns/types'
+import type { KnowledgeSearchHit, KnowledgeSearchWarning } from '@/features/researchRuns/types'
 import type { DocumentHitGroup } from './findGrouping'
 import { findTermMatches, searchTermsFromQuery, splitByRanges } from './highlight'
+import { RetrievalDegradationNotice } from './RetrievalDegradationNotice'
+import { knowledgeSearchWarningNotice } from './retrievalDegradation'
 
 export type FindResultsState = 'idle' | 'short' | 'searching' | 'ready' | 'error'
 
@@ -21,6 +23,7 @@ export function DocumentFindResults({
   onOpenSnippet,
   query,
   state,
+  warnings,
 }: {
   collectionTitleFor: (collectionId: string) => string | null
   error: string | null
@@ -28,9 +31,19 @@ export function DocumentFindResults({
   onOpenSnippet: (hit: KnowledgeSearchHit) => void
   query: string
   state: FindResultsState
+  warnings: KnowledgeSearchWarning[]
 }) {
   const { t } = useLocale()
   const terms = useMemo(() => searchTermsFromQuery(query), [query])
+  const warningNotices = warnings.map(
+    (warning) => knowledgeSearchWarningNotice(warning, t.knowledge),
+  )
+  const warningMessages = warningNotices
+    .filter((notice) => notice.tone === 'warning')
+    .map((notice) => notice.message)
+  const informationalMessages = warningNotices
+    .filter((notice) => notice.tone === 'informational')
+    .map((notice) => notice.message)
 
   if (state === 'idle') {
     return (
@@ -64,15 +77,21 @@ export function DocumentFindResults({
   }
   if (groups.length === 0) {
     return (
-      <FindEmptyState
-        hint={t.knowledge.findEmptyHint}
-        title={t.knowledge.findEmptyTitle}
-      />
+      <div className="space-y-3">
+        <RetrievalDegradationNotice announce messages={informationalMessages} tone="informational" />
+        <RetrievalDegradationNotice announce messages={warningMessages} />
+        <FindEmptyState
+          hint={t.knowledge.findEmptyHint}
+          title={t.knowledge.findEmptyTitle}
+        />
+      </div>
     )
   }
 
   return (
     <div className={cn('space-y-4', state === 'searching' && 'opacity-60')}>
+      <RetrievalDegradationNotice announce messages={informationalMessages} tone="informational" />
+      <RetrievalDegradationNotice announce messages={warningMessages} />
       {groups.map((group) => {
         const collectionTitle = collectionTitleFor(group.collectionId)
         const meta = [
@@ -94,7 +113,7 @@ export function DocumentFindResults({
                     onClick={() => onOpenSnippet(hit)}
                     type="button"
                   >
-                    <SnippetText terms={terms} text={hit.text} />
+                    <SnippetText terms={terms} text={hit.excerpt} />
                   </button>
                 </li>
               ))}

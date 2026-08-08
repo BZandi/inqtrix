@@ -2,18 +2,19 @@
 
 Thin per-surface router mirroring ``chat_history.py``: parse, delegate to
 :class:`~inqtrix.services.editor_persistence_service.EditorPersistenceService`,
-serialize. Documents are private per-owner within a workspace (no sharing
-surface in M6b). The list endpoint returns document METADATA only; the
-single-document GET returns the body (load-on-open).
+serialize. The list endpoint returns visible owned and accepted-shared document
+METADATA only; the single-document GET returns the body (load-on-open).
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Request
 
+from inqtrix.auth.log_redaction import pseudonymous_log_reference
 from inqtrix.auth.permissions import AccessMode, ResourceAccess, SharePermission
 from inqtrix.auth.principal import Principal, UserContext
 from inqtrix.pagination import (
@@ -31,8 +32,14 @@ from inqtrix.project.editor_ports import (
     EditorDocument,
     EditorFolder,
     FolderNotFound,
+    SuggestionDraftNotFound,
+    SuggestionDraftRevisionConflict,
+    suggestion_draft_payload,
 )
-from inqtrix.services.editor_persistence_service import EditorValidationError
+from inqtrix.services.editor_persistence_service import (
+    EditorValidationError,
+    SuggestionDraftTooLarge,
+)
 from inqtrix.services.request_parsing import (
     error_response,
     workspace_id_from_request,
@@ -41,24 +48,35 @@ from inqtrix.services.request_parsing import (
 if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
+log = logging.getLogger("inqtrix")
+
 
 def _caller_user_id(principal: Principal) -> uuid.UUID | None:
     return principal.user_id if principal.kind in ("oidc_session", "pat") else None
 
 
-def _access_payload(access: ResourceAccess | None) -> dict[str, str]:
+def _access_payload(
+    access: ResourceAccess | None,
+    *,
+    owner: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Public editor access contract with effective write permission."""
     if access is not None and access.mode is AccessMode.SHARED:
-        return {
+        payload: dict[str, Any] = {
             "mode": "shared",
             "permission": (access.permission or SharePermission.VIEW).value,
         }
+        if owner is not None:
+            payload["owner"] = owner
+        return payload
     return {"mode": "owner", "permission": SharePermission.EDIT.value}
 
 
 def _document_meta_payload(
     document: EditorDocument,
     access: ResourceAccess | None = None,
+    *,
+    owner: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Document WITHOUT the body — the list shape."""
     return {
@@ -74,7 +92,7 @@ def _document_meta_payload(
         "updated_at": document.updated_at,
         "content_mode": document.content_mode,
         "metadata_revision": document.metadata_revision,
-        "access": _access_payload(access),
+        "access": _access_payload(access, owner=owner),
         "collaboration": (
             {
                 "generation": document.collaboration_generation,
@@ -82,6 +100,7 @@ def _document_meta_payload(
                 "persisted_sequence": document.persisted_sequence,
                 "projection_sequence": document.projection_sequence,
                 "projection_updated_at": document.projection_updated_at,
+                "comment_revision": document.collaboration_comment_revision,
             }
             if document.content_mode == "collaboration"
             else None
@@ -92,10 +111,12 @@ def _document_meta_payload(
 def _document_detail_payload(
     document: EditorDocument,
     access: ResourceAccess | None = None,
+    *,
+    owner: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Document WITH the body — the get-one / upsert-response shape."""
     return {
-        **_document_meta_payload(document, access),
+        **_document_meta_payload(document, access, owner=owner),
         "content_markdown": document.content_markdown,
     }
 
@@ -125,6 +146,11 @@ def _comment_payload(comment: EditorComment) -> dict[str, Any]:
             if comment.created_by_user_id is not None
             else None
         ),
+        "suggestion_draft": (
+            suggestion_draft_payload(comment.suggestion_draft)
+            if comment.suggestion_draft is not None
+            else None
+        ),
     }
 
 
@@ -138,6 +164,55 @@ def build_router(container: "AppContainer") -> APIRouter:
     router = APIRouter()
     principal_dep = container.principal_dependency
     user_context_dep = container.user_context_dependency
+    users = getattr(container.auth_provider, "users", None)
+
+    async def _owner_profiles(
+        documents: list[tuple[EditorDocument, ResourceAccess]],
+        *,
+        tenant_id: str,
+    ) -> dict[uuid.UUID, Any]:
+        owner_ids = tuple(
+            {
+                document.created_by_user_id
+                for document, access in documents
+                if access.mode is AccessMode.SHARED
+                and document.created_by_user_id is not None
+            }
+        )
+        if users is None or not owner_ids:
+            return {}
+        return await users.profiles_for_user_ids(
+            tenant_id=tenant_id,
+            user_ids=owner_ids,
+        )
+
+    def _owner_payload(
+        document: EditorDocument,
+        access: ResourceAccess,
+        profiles: dict[uuid.UUID, Any],
+    ) -> dict[str, str] | None:
+        if (
+            access.mode is not AccessMode.SHARED
+            or document.created_by_user_id is None
+        ):
+            return None
+        owner_id = document.created_by_user_id
+        profile = profiles.get(owner_id)
+        if profile is None:
+            log.warning(
+                "editor shared-document owner profile missing",
+                extra={
+                    "document_ref": pseudonymous_log_reference(
+                        "res", document.id
+                    ),
+                    "owner_ref": pseudonymous_log_reference("usr", owner_id),
+                },
+            )
+            return {"id": str(owner_id), "name": "Unknown user"}
+        return {
+            "id": str(owner_id),
+            "name": profile.display_name or profile.email or "Unknown user",
+        }
 
     # -- documents -------------------------------------------------------- #
 
@@ -163,9 +238,17 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         except EditorValidationError as exc:
             return error_response(400, str(exc), "invalid_request_error")
+        profiles = await _owner_profiles(
+            documents,
+            tenant_id=principal.tenant_id,
+        )
         return list_envelope(
             [
-                _document_meta_payload(document, access)
+                _document_meta_payload(
+                    document,
+                    access,
+                    owner=_owner_payload(document, access, profiles),
+                )
                 for document, access in documents
             ],
             next_cursor,
@@ -183,7 +266,17 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         except DocumentNotFound:
             return error_response(404, "Dokument nicht gefunden", "not_found")
-        return _document_detail_payload(document, access)
+        profiles = await _owner_profiles(
+            [(document, access)],
+            tenant_id=visible_to.principal.tenant_id
+            if visible_to is not None
+            else "default",
+        )
+        return _document_detail_payload(
+            document,
+            access,
+            owner=_owner_payload(document, access, profiles),
+        )
 
     @router.put("/v1/editor/documents/{document_id}")
     async def save_document(
@@ -471,6 +564,87 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         except DocumentNotFound:
             return error_response(404, "Dokument nicht gefunden", "not_found")
+
+    @router.put(
+        "/v1/editor/documents/{document_id}/comments/{comment_id}/suggestion-draft"
+    )
+    async def save_comment_suggestion_draft(
+        document_id: str,
+        comment_id: str,
+        req: Request,
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        """Create or revise one creator-private unpublished AI proposal."""
+        body = await _json_object(req)
+        if not isinstance(body, dict):
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        draft = body.get("draft")
+        if not isinstance(draft, dict):
+            return error_response(
+                400,
+                "Feld 'draft' muss ein Objekt sein",
+                "invalid_request_error",
+            )
+        try:
+            stored = await service.save_comment_suggestion_draft(
+                document_id,
+                comment_id,
+                expected_revision=body.get("expected_revision"),
+                payload=draft,
+                visible_to=visible_to,
+            )
+        except (DocumentNotFound, SuggestionDraftNotFound):
+            return error_response(404, "Entwurf nicht gefunden", "not_found")
+        except SuggestionDraftRevisionConflict as exc:
+            return error_response(
+                409,
+                "Der private Entwurf wurde zwischenzeitlich geaendert.",
+                "conflict",
+                current_revision=exc.current_revision,
+            )
+        except SuggestionDraftTooLarge as exc:
+            return error_response(413, str(exc), "request_too_large")
+        except EditorValidationError as exc:
+            return error_response(400, str(exc), "invalid_request_error")
+        return {"suggestion_draft": suggestion_draft_payload(stored)}
+
+    @router.delete(
+        "/v1/editor/documents/{document_id}/comments/{comment_id}/suggestion-draft",
+        status_code=204,
+    )
+    async def delete_comment_suggestion_draft(
+        document_id: str,
+        comment_id: str,
+        req: Request,
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        """Discard one private draft with an exact revision/patch guard."""
+        body = await _json_object(req)
+        if not isinstance(body, dict):
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        try:
+            await service.delete_comment_suggestion_draft(
+                document_id,
+                comment_id,
+                expected_revision=body.get("expected_revision"),
+                patch_id=body.get("patch_id"),
+                visible_to=visible_to,
+            )
+        except (DocumentNotFound, SuggestionDraftNotFound):
+            return error_response(404, "Entwurf nicht gefunden", "not_found")
+        except SuggestionDraftRevisionConflict as exc:
+            return error_response(
+                409,
+                "Der private Entwurf wurde zwischenzeitlich geaendert.",
+                "conflict",
+                current_revision=exc.current_revision,
+            )
+        except EditorValidationError as exc:
+            return error_response(400, str(exc), "invalid_request_error")
 
     # -- folders ---------------------------------------------------------- #
 

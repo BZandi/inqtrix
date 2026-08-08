@@ -101,3 +101,18 @@ def test_sanitizer_allowlist_passes_narration_payload_through() -> None:
         "phase": "planning",
         "final": True,
     }
+
+
+def test_sanitizer_bounds_narration_independently_from_evidence_text() -> None:
+    clean = sanitize_event_payload(
+        NARRATION_EVENT,
+        {
+            "narration_id": "n-bounded",
+            "kind": "intent",
+            "text": "Wort " * 200,
+            "phase": "execution",
+        },
+    )
+
+    assert clean["text"].endswith(" ...")
+    assert len(clean["text"]) <= 400

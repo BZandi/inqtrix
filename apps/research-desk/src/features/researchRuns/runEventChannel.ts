@@ -1,5 +1,5 @@
 /**
- * Run-event transport with a polling fallback (plan M1 T1).
+ * Run-event transport with a polling fallback.
  *
  * The app is fetch-first with wake signals (rule R1: events flip stale
  * flags, rows are truth), so the CONTENT never depends on streaming —

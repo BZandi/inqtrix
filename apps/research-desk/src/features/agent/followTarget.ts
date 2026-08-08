@@ -20,24 +20,40 @@ export type FollowTarget = {
   urgency: 'auto-open' | 'open-only' | 'synthesis'
 }
 
+/** The most recent artifact of a kind (one lookup idiom for every
+ * document-shaped target: mission memos and kernel `write_canvas`
+ * deliverables both open as the document view). */
+function latestArtifactOfKind(
+  run: AgentRunRecord,
+  kind: 'memo' | 'deliverable',
+) {
+  for (let index = run.artifactOrder.length - 1; index >= 0; index -= 1) {
+    const artifact = run.artifacts[run.artifactOrder[index]]
+    if (artifact?.kind === kind) return artifact
+  }
+  return undefined
+}
+
 export function routeAgentRunToView(
   run: AgentRunRecord,
 ): FollowTarget | null {
-  const memoId = run.artifactOrder.find(
-    (artifactId) => run.artifacts[artifactId]?.kind === 'memo',
-  )
-  const memo = memoId ? run.artifacts[memoId] : undefined
-
-  // The memo being written (or finished) is the strongest target: the
-  // first `artifact.created` is the ONE allowed auto-open.
-  if (memo && (memo.status === 'writing' || run.status === 'completed')) {
+  // A document-shaped deliverable (mission memo or kernel canvas) being
+  // written (or finished) is the strongest target: the ONE allowed auto-open.
+  // Memo precedence is preserved for mission runs; kernel runs have no memo.
+  const document =
+    latestArtifactOfKind(run, 'memo')
+    ?? latestArtifactOfKind(run, 'deliverable')
+  if (
+    document
+    && (document.status === 'writing' || run.status === 'completed')
+  ) {
     return {
       descriptor: {
         view: 'document',
         runId: run.runId,
-        artifactId: memo.artifactId,
+        artifactId: document.artifactId,
       },
-      urgency: memo.status === 'writing' ? 'synthesis' : 'auto-open',
+      urgency: document.status === 'writing' ? 'synthesis' : 'auto-open',
     }
   }
 

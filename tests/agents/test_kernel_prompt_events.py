@@ -53,8 +53,30 @@ def test_kernel_system_prompt_covers_tools_and_rendering():
         "write_todos",
     ):
         assert tool_name in prompt, f"{tool_name} fehlt im Kernel-Prompt"
-    for rule in ("Ausgabeform", "Rueckfragen", "Werkzeugdisziplin"):
+    for rule in (
+        "Ausgabeform",
+        "Rueckfragen",
+        "Werkzeugdisziplin",
+        "Aktualitaet",
+    ):
         assert rule in prompt
+
+
+def test_kernel_cognition_prompt_rules_are_present():
+    """The prompt pins recency routing, query discipline, and clarification."""
+    prompt = build_agent_kernel_system_prompt()
+    # 2.1 recency awareness — training knowledge is dated, web_instant
+    # covers everything time-critical.
+    assert "Trainingswissen kann veraltet sein" in prompt
+    assert "Zeitkritische" in prompt
+    # 2.4 query discipline: precise SEARCH query, one goal, shown
+    # verbatim at the approval gate.
+    assert "SUCHQUERY, keine Gespraechsfrage" in prompt
+    assert "woertlich zur Freigabe angezeigt und exakt so gesucht" in prompt
+    # 2.3 positive clarification trigger with every guardrail kept.
+    assert "die BESSERE Arbeit" in prompt
+    assert "Hoechstens zwei Rueckfrage-Runden" in prompt
+    assert "Auto-Modus" in prompt
 
 
 def test_kernel_user_message_composes_context_sections():
@@ -80,9 +102,14 @@ def test_kernel_user_message_composes_context_sections():
     assert "Chat-Antwort" in message
     assert "Auto" in message
     assert message.endswith("Auftrag:\nUeberarbeite die Mail.")
+    # The functional run date leads every kernel turn because recency
+    # routing keys its web-versus-memory decision on this line.
+    from inqtrix.urls import today
+
+    assert message.startswith(f"Heute ist {today()}.")
 
     bare = build_kernel_user_message("Nur die Frage.")
-    assert bare == "Auftrag:\nNur die Frage."
+    assert bare == f"Heute ist {today()}.\n\nAuftrag:\nNur die Frage."
 
 
 class ScriptedToolLLM(LLMProvider):
@@ -139,14 +166,19 @@ def _text_turn(text: str) -> ChatTurn:
     )
 
 
-def _web_turn(text: str = "Ich suche kurz im Web.") -> ChatTurn:
+def _web_turn(
+    text: str = "Ich suche kurz im Web.",
+    *,
+    call_id: str = "call_ev1",
+    query: str = "Eventtest",
+) -> ChatTurn:
     return ChatTurn(
         text=text,
         tool_calls=(
             ToolCallRequest(
-                id="call_ev1",
+                id=call_id,
                 name="web_instant",
-                arguments={"query": "Eventtest"},
+                arguments={"query": query},
             ),
         ),
         finish_reason="tool_calls",
@@ -237,7 +269,7 @@ def test_follow_events_cover_tools_narration_and_phases():
         run_id = client.post(
             "/v1/runs",
             json={
-                "question": "Suche etwas.",
+                "question": "Suche bitte die aktuelle Quelle.",
                 "mode": "agent_kernel",
                 "autonomy": "autonomous",
             },
@@ -257,10 +289,221 @@ def test_follow_events_cover_tools_narration_and_phases():
         ] == ["execution", "done"]
         started = by_type["inqtrix.agent.tool.started"]
         assert started[0]["tool"] == "web_instant"
+        assert started[0]["invocation_id"] == started[0]["tool_call_id"]
         assert "Eventtest" in started[0]["args_preview"]
         finished = by_type["inqtrix.agent.tool.finished"]
         assert finished[0]["tool"] == "web_instant"
+        assert finished[0]["invocation_id"] == started[0]["invocation_id"]
         narrations = by_type["inqtrix.agent.narration"]
-        assert narrations[0]["text"] == "Ich suche kurz im Web."
+        # Only tool-accompanying intent belongs in narration. The final
+        # tool-free AI markdown is published through the answer channel.
+        assert len(narrations) == 1
+        assert narrations[0]["text"] == "Ich prüfe jetzt die benötigten Quellen."
         assert narrations[0]["narration_id"].startswith("kernel_")
         assert "inqtrix.node.model_resolution" in by_type
+
+
+def test_approval_resume_does_not_replay_logical_tool_events():
+    llm = ScriptedToolLLM([_web_turn(), _text_turn("Fertig.")])
+    client = make_client(llm)
+    with client:
+        run_id = client.post(
+            "/v1/runs",
+            json={
+                "question": "Suche bitte die aktuelle Quelle.",
+                "mode": "agent_kernel",
+                "autonomy": "strict",
+            },
+        ).json()["run_id"]
+        wait_status(client, run_id, {"waiting_for_approval"})
+        approval = client.get(
+            f"/v1/runs/{run_id}/approvals"
+        ).json()["data"][0]
+        response = client.post(
+            f"/v1/runs/{run_id}/approvals/{approval['approval_id']}",
+            json={"decision": "approve"},
+        )
+        assert response.status_code == 200
+        wait_status(client, run_id, {"completed"})
+
+        events = client.get(
+            f"/v1/runs/{run_id}/events?format=json"
+        ).json()["data"]
+        started = [
+            event["data"]
+            for event in events
+            if event["type"] == "inqtrix.agent.tool.started"
+        ]
+        finished = [
+            event["data"]
+            for event in events
+            if event["type"] == "inqtrix.agent.tool.finished"
+        ]
+        intent_narrations = [
+            event["data"]
+            for event in events
+            if event["type"] == "inqtrix.agent.narration"
+            and event["data"].get("kind") == "intent"
+        ]
+
+        assert len(started) == len(finished) == len(intent_narrations) == 1
+        assert started[0]["invocation_id"] == finished[0]["invocation_id"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_intent",
+    [
+        (
+            "| Region | Preis |\n|---|---:|\n| Global | 5 USD |\n\n"
+            "Damit lautet die fertige Antwort bereits jetzt sehr ausfuehrlich."
+        ),
+        "Ich beginne mit der Recherche. " + ("Antwortentwurf " * 40),
+        "Ich pruefe **jetzt** die [Preisliste](https://example.com).",
+        "Die Antwort lautet 5 USD pro 1M Token. Ich pruefe noch die Quelle.",
+    ],
+)
+def test_tool_accompanying_answer_draft_never_enters_plain_narration(
+    unsafe_intent: str,
+) -> None:
+    llm = ScriptedToolLLM([_web_turn(unsafe_intent), _text_turn("Fertig.")])
+    client = make_client(llm)
+    with client:
+        run_id = client.post(
+            "/v1/runs",
+            json={
+                "question": "Suche bitte die aktuelle Quelle.",
+                "mode": "agent_kernel",
+                "autonomy": "autonomous",
+            },
+        ).json()["run_id"]
+        wait_status(client, run_id, {"completed"})
+
+        events = client.get(
+            f"/v1/runs/{run_id}/events?format=json"
+        ).json()["data"]
+        narrations = [
+            event["data"]
+            for event in events
+            if event["type"] == "inqtrix.agent.narration"
+        ]
+
+        assert [item["text"] for item in narrations] == [
+            "Ich prüfe jetzt die benötigten Quellen."
+        ]
+        assert all("|" not in item["text"] for item in narrations)
+        assert all("**" not in item["text"] for item in narrations)
+
+
+def test_tool_narration_is_localized_and_replay_ids_are_per_invocation() -> None:
+    llm = ScriptedToolLLM(
+        [
+            _web_turn(
+                "The answer is already 5 USD.",
+                call_id="call_source_one",
+                query="first source",
+            ),
+            _web_turn(
+                "The answer is still 5 USD.",
+                call_id="call_source_two",
+                query="second source",
+            ),
+            _text_turn("Done."),
+        ]
+    )
+    client = make_client(llm)
+    with client:
+        run_id = client.post(
+            "/v1/runs",
+            json={
+                "question": "Search the current price and verify it.",
+                "mode": "agent_kernel",
+                "autonomy": "autonomous",
+            },
+        ).json()["run_id"]
+        wait_status(client, run_id, {"completed"})
+
+        events = client.get(
+            f"/v1/runs/{run_id}/events?format=json"
+        ).json()["data"]
+        narrations = [
+            event["data"]
+            for event in events
+            if event["type"] == "inqtrix.agent.narration"
+        ]
+
+        assert [item["text"] for item in narrations] == [
+            "I’m checking the required sources now.",
+            "I’m checking the required sources now.",
+        ]
+        assert len({item["narration_id"] for item in narrations}) == 2
+
+
+def test_schnell_graph_run_makes_one_web_instant_call():
+    """The schnell tier's clamped recursion ceiling affords the tier's ONE
+    published ``web_instant`` call plus the answer turn.
+
+    Regression for the recalibration bug: the ceiling used to be a literal
+    ``8`` super-steps — not even the bare answer turn — so a schnell run
+    that (correctly) used its published ``web_instant_budget=1`` died in
+    ``GraphRecursionError``. The clamp is now derived
+    (``_ANSWER_TURN_SUPERSTEPS + _SCHNELL_TOOL_TURNS * _SUPERSTEPS_PER_
+    TOOL_TURN``); this drives a real schnell GRAPH run (not the quick_web
+    lane) with a todo turn BEFORE the search — the ordinary two-tool-turn
+    trajectory that also died under the first recalibration attempt
+    (one-turn clamp) — and pins that the published call is executable.
+    """
+
+    def _todo_turn() -> ChatTurn:
+        return ChatTurn(
+            text="",
+            tool_calls=(
+                ToolCallRequest(
+                    id="call_suffplan",
+                    name="write_todos",
+                    arguments={
+                        "todos": [
+                            {"content": "Suchen", "status": "in_progress"},
+                        ]
+                    },
+                ),
+            ),
+            finish_reason="tool_calls",
+            model="high-model",
+            prompt_tokens=10,
+            completion_tokens=5,
+            raw=None,
+        )
+
+    llm = ScriptedToolLLM([_todo_turn(), _web_turn(), _text_turn("Fertig.")])
+    client = make_client(llm)
+    with client:
+        run_id = client.post(
+            "/v1/runs",
+            json={
+                "question": "Was gibt es Neues dazu?",
+                "mode": "agent_kernel",
+                "autonomy": "autonomous",
+                "agent_overrides": {"agent_tier": "schnell"},
+            },
+        ).json()["run_id"]
+        summary = wait_status(client, run_id, {"completed", "failed"})
+        assert summary["status"] == "completed", (
+            "schnell graph run failed — the clamped recursion ceiling no "
+            f"longer affords the published web_instant call: {summary}"
+        )
+
+        events = client.get(
+            f"/v1/runs/{run_id}/events?format=json"
+        ).json()["data"]
+        started = [
+            event["data"]
+            for event in events
+            if event["type"] == "inqtrix.agent.tool.started"
+        ]
+        # write_todos rides the same wire event; the ONE published web
+        # call is what the clamp must afford.
+        assert [
+            entry["tool"] for entry in started if entry["tool"] != "write_todos"
+        ] == ["web_instant"]
+        result = client.get(f"/v1/runs/{run_id}/result").json()
+        assert result["answer"] == "Fertig."

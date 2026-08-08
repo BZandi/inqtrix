@@ -12,7 +12,37 @@ Both intentionally keep harmless URLs intact (so logs stay debuggable) and
 only strip credential values *inside* URLs.
 """
 
-from inqtrix.urls import sanitize_error, sanitize_log_message
+import pytest
+
+from inqtrix.urls import (
+    CredentialBearingUrlError,
+    safe_public_url_identity,
+    sanitize_error,
+    sanitize_log_message,
+)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/data?client%5Fsecret=value",
+        "https://example.com/data?ok=1;X-Amz-Signature=value",
+        "https://example.com/data#access_token=value",
+        "https://user:password@example.com/data",
+    ],
+)
+def test_safe_public_url_identity_rejects_encoded_and_fragment_credentials(
+    url: str,
+) -> None:
+    with pytest.raises(CredentialBearingUrlError):
+        safe_public_url_identity(url)
+
+
+def test_safe_public_url_identity_allows_noncredential_pagination_token() -> None:
+    identity = safe_public_url_identity(
+        "https://example.com/data?$skiptoken=public-page-cursor"
+    )
+    assert identity.canonical_url.endswith("$skiptoken=public-page-cursor")
 
 
 class TestSanitizeError:

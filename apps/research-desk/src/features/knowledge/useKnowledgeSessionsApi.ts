@@ -28,6 +28,7 @@ import {
   type SyncLifecycleToken,
 } from '@/features/project/useProjectSyncLifecycle'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
+import { useSessionDeletionApi } from '@/features/project/useSessionDeletionApi'
 import {
   fingerprintKnowledgeSession,
   groupRecordFromServer,
@@ -89,7 +90,12 @@ export function useKnowledgeSessionsApi({
   sessionOrder,
   syncActive,
   workspaceId,
-}: UseKnowledgeSessionsApiOptions): { error: string | null; isSelectedSessionItemsLoading: boolean } {
+}: UseKnowledgeSessionsApiOptions): {
+  deleteSession: (sessionId: string) => Promise<void>
+  error: string | null
+  isSelectedSessionItemsLoading: boolean
+  retrySessionDeletion: (sessionId: string) => Promise<void>
+} {
   const [error, setError] = useState<string | null>(null)
   const [hydrated, setHydrated] = useState(false)
   // Sessions whose item load-on-open has completed (or errored). Drives the
@@ -127,6 +133,28 @@ export function useKnowledgeSessionsApi({
   const mountedRef = useRef(true)
   const flushingRef = useRef(false)
   const flushPendingRef = useRef(false)
+
+  const {
+    deleteSession,
+    error: deletionError,
+    retrySession: retrySessionDeletion,
+  } = useSessionDeletionApi({
+    enabled: syncActive,
+    onComplete: (sessionId, operationId) => {
+      syncedRef.current.delete(sessionId)
+      serverKnownRef.current.delete(sessionId)
+      loadedRef.current.delete(sessionId)
+      dispatch({ operationId, sessionId, type: 'deleteKnowledgeSession' })
+    },
+    onState: (sessionId, deletion) => {
+      dispatch({ deletion, sessionId, type: 'setKnowledgeSessionDeletionState' })
+    },
+    options: { apiKey, workspaceId },
+    scopeKey: `${workspaceId}:${projectEpoch}:${syncActive ? 'on' : 'off'}`,
+    sessions,
+    start: deleteKnowledgeSession,
+    targetKind: 'knowledge_session',
+  })
 
   useEffect(() => {
     mountedRef.current = true
@@ -391,6 +419,7 @@ export function useKnowledgeSessionsApi({
       for (const sessionId of sessionOrderRef.current) {
         const session = currentSessions[sessionId]
         if (!session) continue
+        if (session.deletion) continue
         const itemsForFingerprint = itemsForSession(sessionId)
         const groupId = membershipsRef.current[sessionId] ?? null
         // Keep only the untouched seed placeholder local. Renamed or user-
@@ -409,7 +438,7 @@ export function useKnowledgeSessionsApi({
       for (const sessionId of [...syncedRef.current.keys()]) {
         if (!(sessionId in currentSessions)) {
           await deleteTolerant404(
-            () => deleteKnowledgeSession(sessionId, optionsRef.current),
+            async () => { await deleteKnowledgeSession(sessionId, optionsRef.current) },
           )
           syncedRef.current.delete(sessionId)
           serverKnownRef.current.delete(sessionId)
@@ -479,5 +508,10 @@ export function useKnowledgeSessionsApi({
     && !itemsLoadResolved.has(selectedSessionId),
   )
 
-  return { error, isSelectedSessionItemsLoading }
+  return {
+    deleteSession,
+    error: deletionError ?? error,
+    isSelectedSessionItemsLoading,
+    retrySessionDeletion,
+  }
 }

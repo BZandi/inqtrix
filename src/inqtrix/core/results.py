@@ -114,46 +114,45 @@ class RunRequest(BaseModel):
     autonomy: str = Field(
         default="",
         description=(
-            "Workspace-agent permission mode (strict/balanced/autonomous, "
-            "decision E16); empty for every other mode."
+            "Workspace-agent permission mode (strict/balanced/autonomous); "
+            "empty for every other mode."
         ),
     )
-    """Workspace-agent permission mode (``strict``/``balanced``/``autonomous``, decision E16); empty for every other mode. The route validates the vocabulary, the agent algorithm consumes it — inert everywhere else."""
+    """Workspace-agent permission mode (``strict``/``balanced``/``autonomous``); empty for every other mode. The route validates the vocabulary, the agent algorithm consumes it — inert everywhere else."""
     session_id: str = Field(
         default="",
         description=(
-            "Agent-desk session the run belongs to (decision E15); empty "
-            "when sessionless."
+            "Agent-desk session the run belongs to; empty when sessionless."
         ),
     )
-    """Agent-desk session the run belongs to (decision E15); empty when the run is sessionless. Mirrors the run row's ``session_id`` so the agent algorithm can anchor the session memo without a store read."""
+    """Agent-desk session the run belongs to; empty when the run is sessionless. Mirrors the run row's ``session_id`` so the agent algorithm can anchor the session memo without a store read."""
     document_id: str = Field(
         default="",
         description=(
             "Target editor document for a workspace-agent patch assignment "
-            "(M7); empty when the run has no edit target."
+            "and empty when the run has no edit target."
         ),
     )
     """Target editor document for a workspace-agent patch assignment (M7). When set, the agent proposes an ``editor_patch`` against this document after synthesis and parks for the ALWAYS-gated patch approval (E16 write invariant); the agent never applies the patch itself. Empty (the default) skips the patch phase entirely — inert for every other mode."""
     response_form: str = Field(
         default="",
         description=(
-            "Workspace-agent output-form override (plan M1): ``chat`` "
+            "Workspace-agent output-form override: ``chat`` "
             "forces the inline chat answer, ``canvas`` the session memo; "
             "empty lets the intake profile decide. Inert for every "
             "other mode."
         ),
     )
-    """Workspace-agent output-form override (plan M1). ``chat`` forces the run-local inline answer artifact, ``canvas`` the session memo canvas; empty (the default, wire value ``auto``) delegates the decision to the intake profile's ``response_form``. A patch assignment (``document_id`` set) always uses canvas — the patch pipeline consumes the memo as source material. Inert for every other mode."""
+    """Workspace-agent output-form override. ``chat`` forces the run-local inline answer artifact, ``canvas`` the session memo canvas; empty (the default, wire value ``auto``) delegates the decision to the intake profile's ``response_form``. A patch assignment (``document_id`` set) always uses canvas — the patch pipeline consumes the memo as source material. Inert for every other mode."""
     skill_ids: tuple[str, ...] = Field(
         default=(),
         description=(
-            "Explicitly attached skills (plan M3, composer chips). "
+            "Explicitly attached skill ids from the composer chips. "
             "Admission (visibility, count cap) happens at the runs "
             "router; the agent runtime loads and enforces them."
         ),
     )
-    """Explicitly attached skill ids (plan M3). The runs router admits them (visible-to-caller check — an invisible skill is a loud 404 — and the ``skills_max_attached`` cap); the agent runtime injects their instructions, runs the clarification point check, and applies ``requires_plan``/``allowed_tools``. Inert for every non-agent mode."""
+    """Explicitly attached skill ids. The runs router admits them (visible-to-caller check — an invisible skill is a loud 404 — and the ``skills_max_attached`` cap); the agent runtime injects their instructions, runs the clarification point check, and applies ``requires_plan``/``allowed_tools``. Inert for every non-agent mode."""
     skill_revisions: dict[str, int] = Field(
         default_factory=dict,
         description=(
@@ -166,10 +165,10 @@ class RunRequest(BaseModel):
         default=(),
         description=(
             "Hard planner/kernel tool hints from the composer's "
-            "``/``-menu functions group (plan M3, e.g. web_research)."
+            "``/``-menu functions group, for example web_research."
         ),
     )
-    """Hard tool hints (plan M3 `3.2`): the composer's ``/``-functions (``web_research``, ``rag_query``) telling the planner/kernel the user explicitly asked for this tool family. Whitelisted at the runs router (unknown directive = 400). Inert for every non-agent mode."""
+    """Hard tool hints from the composer's ``/``-functions (``web_research``, ``rag_query``) telling the planner/kernel the user explicitly asked for this tool family. Whitelisted at the runs router (unknown directive = 400). Inert for every non-agent mode."""
     source_policy: SourcePolicy = Field(
         default_factory=SourcePolicy,
         description=(
@@ -257,3 +256,50 @@ class AgentResult(BaseModel):
         """Machine-readable cancellation cause emitted by the algorithm."""
         result_state = self.raw.get("result_state") or {}
         return str(result_state.get("cancel_reason") or "")
+
+    @property
+    def terminal_failure(self) -> "AgentTerminalFailure | None":
+        """Typed projection of the shared returned-failure contract.
+
+        Algorithms sometimes need to return usage and a safe diagnostic after
+        a provider/model call while still declaring the run unsuccessful.  The
+        native run service already consumes ``result_state._terminal_failure``;
+        this projection lets chat and Agent adapters enforce the same contract
+        without re-parsing untyped dictionaries or inventing a second status.
+        Malformed failure markers fail closed as ``server_error``.
+        """
+
+        result_state = self.raw.get("result_state") or {}
+        raw = result_state.get("_terminal_failure")
+        if raw is None:
+            return None
+        try:
+            return AgentTerminalFailure.model_validate(raw)
+        except (TypeError, ValueError):
+            return AgentTerminalFailure(
+                type="server_error",
+                message="The algorithm returned an invalid terminal failure marker.",
+            )
+
+    @property
+    def successful(self) -> bool:
+        """Whether the result is neither cancelled nor terminally failed."""
+
+        return not self.cancelled and self.terminal_failure is None
+
+
+class AgentTerminalFailure(BaseModel):
+    """Stable failure returned with an :class:`AgentResult` and its usage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(
+        ...,
+        min_length=1,
+        description="Stable machine-readable execution failure code.",
+    )
+    message: str = Field(
+        ...,
+        min_length=1,
+        description="Safe user-visible explanation of the failed result.",
+    )

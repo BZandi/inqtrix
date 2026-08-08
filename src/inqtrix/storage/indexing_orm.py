@@ -18,10 +18,11 @@ differences from runs are the reindex domain itself:
   derived from these, so there is no opaque ``snapshot`` column;
 * a ``collection_id`` referencing ``knowledge_collections`` (no hard FK,
   matching the run schema's cross-domain foreign-key-free design);
-* a partial unique index enforcing one active job per collection — the
-  in-memory store serializes this under a lock; the durable store needs
-  a DB constraint so two API/worker processes cannot race two re-embed
-  passes over the same documents (``IndexingJobConflict`` / HTTP 409).
+* partial unique indexes enforcing one active collection-generation job per
+  collection and one active document job per immutable revision — the
+  in-memory store serializes both under a lock; the durable store needs
+  database constraints so concurrent API processes preserve the same
+  publication and retry-idempotency contracts.
 
 ``status`` is text + a CHECK constraint added in the migration; the
 lifecycle ordering authority stays
@@ -58,6 +59,14 @@ indexing_jobs = Table(
     # for a deleted collection is harmless — terminal ones TTL out, an
     # active one re-embeds zero documents and completes.
     Column("collection_id", Text, nullable=False),
+    Column(
+        "operation_kind",
+        Text,
+        nullable=False,
+        server_default=text("'collection_generation'"),
+    ),
+    Column("document_id", Text, nullable=True),
+    Column("revision_id", Text, nullable=True),
     Column("collection_name", Text, nullable=False, server_default=text("''")),
     Column("embedding_model", Text, nullable=False, server_default=text("''")),
     Column("index_id", Text, nullable=True),
@@ -77,6 +86,12 @@ indexing_jobs = Table(
     Column(
         "current_document_title", Text, nullable=False, server_default=text("''")
     ),
+    Column("phase", Text, nullable=False, server_default=text("'queued'")),
+    Column("current_batch", Integer, nullable=False, server_default=text("0")),
+    Column("total_batches", Integer, nullable=False, server_default=text("0")),
+    Column("checkpoint", JSON, nullable=False, server_default=text("'{}'")),
+    Column("generation_id", Text, nullable=True),
+    Column("fence_token", Text, nullable=True),
     Column("error", JSON, nullable=True),
     Column(
         "cancel_requested",
@@ -94,13 +109,32 @@ indexing_jobs = Table(
         "ix_indexing_jobs_collection_created", "collection_id", "created_at"
     ),
     Index("ix_indexing_jobs_tenant_status", "tenant_id", "status"),
-    # One active reindex per collection, enforced at the database so two
-    # processes cannot race two re-embed passes (IndexingJobConflict).
+    # One active generation per collection, enforced at the database so two
+    # processes cannot race the publication pointer.
     Index(
         "uq_indexing_jobs_active_collection",
         "collection_id",
         unique=True,
-        postgresql_where=text("status IN ('queued', 'running', 'cancelling')"),
+        postgresql_where=text(
+            "operation_kind = 'collection_generation' AND "
+            "status IN ('queued', 'running', 'cancelling', "
+            "'paused_dependency', 'paused_validation')"
+        ),
+    ),
+    Index(
+        "ix_indexing_jobs_revision_created",
+        "revision_id",
+        "created_at",
+    ),
+    Index(
+        "uq_indexing_jobs_active_revision",
+        "revision_id",
+        unique=True,
+        postgresql_where=text(
+            "operation_kind = 'document_revision' AND "
+            "status IN ('queued', 'running', 'cancelling', "
+            "'paused_dependency', 'paused_validation')"
+        ),
     ),
 )
 """Durable reindex-job records — the source of truth once
@@ -129,3 +163,41 @@ indexing_job_events = Table(
 primary key and ``sequence`` is allocated from
 ``indexing_jobs.event_seq`` so SSE replay reproduces the in-memory
 stream byte-compatibly."""
+
+
+contextualization_provider_circuits = Table(
+    "contextualization_provider_circuits",
+    indexing_metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("provider_key", Text, primary_key=True),
+    Column("model", Text, primary_key=True),
+    Column(
+        "state",
+        Text,
+        nullable=False,
+        server_default=text("'closed'"),
+    ),
+    Column(
+        "consecutive_failures",
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    ),
+    Column(
+        "cooldown_until",
+        Float,
+        nullable=False,
+        server_default=text("0"),
+    ),
+    Column("probe_token", Text, nullable=True),
+    Column("probe_lease_until", Float, nullable=True),
+    Column("last_error_type", Text, nullable=True),
+    Column("updated_at", Float, nullable=False),
+    Index(
+        "ix_contextualization_circuits_state_cooldown",
+        "tenant_id",
+        "state",
+        "cooldown_until",
+    ),
+)
+"""Tenant/provider/model circuit state shared by every indexing worker."""

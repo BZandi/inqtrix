@@ -585,7 +585,12 @@ class BedrockLLM(
                 api_error = self._build_api_error(
                     model=use_model, details=details, original=exc)
                 if is_model_capacity_error(api_error):
-                    log.warning("ALGO-FAIL model_capacity (%s): %s", use_model, api_error)
+                    log.warning(
+                        "ALGO-FAIL model_capacity "
+                        "(model=%s, error_type=%s)",
+                        use_model,
+                        type(api_error).__name__,
+                    )
                     raise AgentModelCapacityError(
                         use_model,
                         "llm_complete",
@@ -650,12 +655,14 @@ class BedrockLLM(
                         ),
                     })
                     log.warning(
-                        "Bedrock transport error (%s, attempt=%d/%d). Retrying in %.2fs: %s",
+                        "Bedrock transport error "
+                        "(model=%s, error_type=%s, attempt=%d/%d). "
+                        "Retrying in %.2fs.",
                         use_model,
+                        type(exc).__name__,
                         attempt + 1,
                         _MAX_BEDROCK_TRANSPORT_ATTEMPTS,
                         delay,
-                        exc,
                     )
                     _sleep(delay)
                     continue

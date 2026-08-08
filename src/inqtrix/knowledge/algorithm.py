@@ -25,14 +25,17 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from inqtrix.core.results import AgentResult, RunRequest
-from inqtrix.i18n import detect_ui_language_confident
+from inqtrix.execution_failures import RunExecutionFailure
+from inqtrix.i18n import detect_ui_language, detect_ui_language_confident
 from inqtrix.knowledge.contextualize import contextualize_followup_question
+from inqtrix.knowledge.evidence import KnowledgeEvidenceProjector
 from inqtrix.knowledge.gate import GateDecision, evaluate_evidence
 from inqtrix.knowledge.grounding import (
-    GROUNDING_MARKER_FALLBACK,
     check_grounding,
+    grounding_failure_message,
 )
 from inqtrix.knowledge.decompose import decompose_question
+from inqtrix.observability.otel import operation_span
 from inqtrix.knowledge.profiles import (
     EVIDENCE_K_MAX,
     KnowledgeStageCeiling,
@@ -44,9 +47,13 @@ from inqtrix.knowledge.retrieval import (
     merge_candidates,
     retrieve,
 )
+from inqtrix.knowledge.retrieval_warnings import (
+    project_retrieval_exclusion_warnings,
+)
 from inqtrix.knowledge.stores.ports import (
     KnowledgeProviderContext,
     RetrievalCandidate,
+    RetrievalCandidateBatch,
 )
 from inqtrix.model_routing import resolve_effort, resolve_model
 from inqtrix.prompts import build_knowledge_answer_prompt
@@ -132,6 +139,12 @@ def _scoped_document_count(
     "N documents searched" coverage signal. Returns ``None`` if the count can't
     be resolved (logged, never silent) so the UI omits it rather than guess."""
 
+    # An explicitly empty, already-authorized scope is semantically different
+    # from an absent scope.  It must neither touch the store nor expose the
+    # aggregate size of collections that are outside the run's pinned scope.
+    if collection_ids == []:
+        return 0
+
     async def _count() -> int:
         if collection_ids:
             total = 0
@@ -147,22 +160,32 @@ def _scoped_document_count(
         return run_coro_sync(_count())
     except Exception as exc:  # noqa: BLE001 - a count must never fail the answer
         log.warning(
-            "Knowledge: Dokumentanzahl der Sammlung nicht ermittelbar (%s).", exc
+            "Knowledge: Dokumentanzahl der Sammlung nicht ermittelbar "
+            "(error_type=%s).",
+            type(exc).__name__,
         )
         return None
 
 
 def _render_evidence_entry(index: int, candidate: RetrievalCandidate) -> str:
-    """One ``[K#]``-labelled evidence entry (title line + chunk text).
+    """One ``[K#]``-labelled evidence entry (title line + source text).
 
-    The prompt rendering; quote VERIFICATION deliberately runs against
-    the chunks' source text instead — a quote of the synthetic header
-    or contextualization prefix must not verify as source content.
+    Carries the chunk's SOURCE text, never the contextualization prefix
+    that was prepended for indexing. That prefix is model-composed prose
+    written to make the chunk findable; it is not part of the document
+    and can state facts the chunk itself does not contain. Passing it
+    here would let the answering model treat generated text as source
+    content — a paraphrase built on it would read as grounded while
+    citing nothing, and quote verification (which runs against the
+    source text) could not catch it.
     """
+    evidence = KnowledgeEvidenceProjector.project(
+        candidate, reference_id=f"K{index}"
+    )
     return (
         f"[K{index}] {candidate.document_title} "
         f"(Abschnitt {candidate.chunk.chunk_index + 1})\n"
-        f"{candidate.chunk.text}"
+        f"{evidence.excerpt}"
     )
 
 
@@ -209,9 +232,12 @@ class KnowledgeAlgorithm:
             (the always-answer-from-top-k path).
         grounding_enabled: Operator ceiling for quote-then-answer:
             the answer prompt requires a verbatim-quote block which is
-            verified deterministically against the evidence and
-            stripped from the user-facing answer; ``False`` keeps the
-            plain single-section answer prompt in every profile.
+            verified deterministically against the evidence. Only a fully
+            parsed response whose every quote verifies is publishable; a
+            malformed block or one unverifiable quote returns a typed terminal
+            failure with a safe explanation. Verified quote blocks are
+            stripped from the user-facing answer. ``False`` keeps the plain
+            single-section answer prompt in every profile.
         gate_max_rounds: Hard cap on gate rewrite-and-retrieve rounds
             for every profile; the deep profile requests up to this
             many, standard exactly one. Bounds the worst-case cost of
@@ -443,10 +469,53 @@ class KnowledgeAlgorithm:
         emit = context.event_sink or (lambda _event, _payload: None)
         started = time.monotonic()
         llm = context.providers.llm
+        collection_ids = _resolve_collection_ids(request)
+        # Defense in depth: an authenticated ask MUST arrive pre-scoped —
+        # the admission gate pins an omitted filter to the caller-visible set
+        # before the run is stored.  Resolve this boundary before any model
+        # call so an invalid or deliberately empty scope cannot consume model
+        # work, let alone reach retrieval.
+        if (
+            context.principal is not None
+            and context.principal.user_id is not None
+            and collection_ids is None
+        ):
+            log.warning(
+                "_knowledge_unscoped_principal: authenticated ask reached "
+                "retrieval without a pinned collection scope; execution was "
+                "blocked before retrieval."
+            )
+            emit(
+                "inqtrix.knowledge.scope.unscoped_principal",
+                {
+                    "marker": "_knowledge_unscoped_principal",
+                    "scope": "blocked",
+                },
+            )
+            raise RunExecutionFailure(
+                "knowledge_scope_missing",
+                "Die Wissensabfrage konnte nicht sicher auf die freigegebenen "
+                "Sammlungen begrenzt werden und wurde vor der Suche beendet.",
+            )
         contextualize_usage = {"prompt_tokens": 0, "completion_tokens": 0}
-        query_question, contextualization_state = self._run_query_contextualization(
-            llm, context, request, emit, contextualize_usage
-        )
+        if collection_ids == []:
+            query_question = request.question
+            contextualization_state = {
+                "used_history": False,
+                "rewritten": False,
+                "marker": "empty_scope",
+            }
+            emit(
+                "inqtrix.knowledge.scope.empty",
+                {"scope": "empty", "collection_count": 0},
+            )
+        else:
+            with operation_span("knowledge.contextualize"):
+                query_question, contextualization_state = (
+                    self._run_query_contextualization(
+                        llm, context, request, emit, contextualize_usage
+                    )
+                )
 
         raw_profile = request.knowledge_filters.get("profile")
         requested_profile = (
@@ -482,36 +551,6 @@ class KnowledgeAlgorithm:
             },
         )
 
-        collection_ids = _resolve_collection_ids(request)
-        # Defense in depth: an authenticated ask MUST arrive pre-scoped —
-        # the admission gate (KnowledgeService.resolve_ask_scope in the
-        # chat/runs routers) pins an omitted filter to the caller-visible
-        # set BEFORE the run is stored. An unbounded scope reaching this
-        # point with a known principal means a caller bypassed that gate;
-        # retrieval would then range over every tenant collection. Surface
-        # it LOUDLY (No Silent Fallbacks) instead of silently answering
-        # from foreign documents — behaviour is unchanged, the marker just
-        # makes a future re-opening impossible to miss. The none/apikey modes
-        # carry ``user_id=None``: there the unbounded scope IS the deliberate
-        # see-everything contract, not a bypass.
-        if (
-            context.principal is not None
-            and context.principal.user_id is not None
-            and collection_ids is None
-        ):
-            log.warning(
-                "_knowledge_unscoped_principal: authenticated ask reached "
-                "retrieval without a pinned collection scope; the admission "
-                "gate did not run. Retrieval will range over all tenant "
-                "collections."
-            )
-            emit(
-                "inqtrix.knowledge.scope.unscoped_principal",
-                {
-                    "marker": "_knowledge_unscoped_principal",
-                    "scope": "all_collections",
-                },
-            )
         # Make the BM25 tokenizer-language limitation visible (No Silent
         # Fallbacks). Returns None on the same-language default path, so
         # result_state stays field-identical there.
@@ -537,10 +576,15 @@ class KnowledgeAlgorithm:
 
         decompose_usage = {"prompt_tokens": 0, "completion_tokens": 0}
         sub_queries: tuple[str, ...] = ()
-        if plan.decompose:
-            sub_queries = self._run_decomposition(
-                llm, context, query_question, emit, decompose_usage
-            )
+        if plan.decompose and collection_ids != []:
+            with operation_span("knowledge.decompose") as decompose_span:
+                sub_queries = self._run_decomposition(
+                    llm, context, query_question, emit, decompose_usage
+                )
+                if decompose_span is not None:
+                    decompose_span.set_attribute(
+                        "inqtrix.subquery_count", len(sub_queries)
+                    )
 
         def _on_rerank_retry(notice: dict[str, Any]) -> None:
             # Rerank retries stay visible on the run's event surface (no
@@ -563,22 +607,75 @@ class KnowledgeAlgorithm:
                 },
             )
 
-        def _retrieve(query: str, k: int = top_k) -> list[RetrievalCandidate]:
+        retrieval_degradations: list[dict[str, Any]] = []
+        seen_retrieval_degradations: set[
+            tuple[
+                str,
+                str,
+                str,
+                int | None,
+                int | None,
+                int | None,
+                int,
+                int | None,
+            ]
+        ] = set()
+
+        def _retrieve(
+            query: str, k: int = top_k
+        ) -> RetrievalCandidateBatch:
             # The research graph is synchronous (a node on a run-worker
             # thread); the knowledge store is async. Bridge per call.
-            return run_coro_sync(
-                retrieve(
-                    knowledge,
-                    query=query,
-                    collection_ids=collection_ids,
-                    top_k=k,
-                    use_reranker=plan.rerank,
-                    rerank_candidate_depth=plan.rerank_candidate_depth,
-                    on_provider_retry=_on_rerank_retry,
+            with operation_span(
+                "knowledge.retrieve",
+                {
+                    "inqtrix.top_k": int(k),
+                    "inqtrix.collection_count": len(collection_ids or []),
+                    "inqtrix.rerank": bool(plan.rerank),
+                },
+            ) as retrieve_span:
+                batch = run_coro_sync(
+                    retrieve(
+                        knowledge,
+                        query=query,
+                        collection_ids=collection_ids,
+                        top_k=k,
+                        use_reranker=plan.rerank,
+                        rerank_candidate_depth=plan.rerank_candidate_depth,
+                        on_provider_retry=_on_rerank_retry,
+                    )
                 )
-            )
+                if retrieve_span is not None:
+                    retrieve_span.set_attribute(
+                        "inqtrix.candidate_count",
+                        len(getattr(batch, "candidates", []) or []),
+                    )
+                    retrieve_span.set_attribute(
+                        "inqtrix.degradation_count",
+                        len(getattr(batch, "degradations", []) or []),
+                    )
+            for degradation in batch.degradations:
+                key = (
+                    degradation.reason,
+                    degradation.retrieval_mode,
+                    degradation.stage,
+                    degradation.requested_candidate_pool,
+                    degradation.returned_candidate_pool,
+                    degradation.final_top_k,
+                    degradation.returned_hits,
+                    degradation.candidate_cap,
+                )
+                if key in seen_retrieval_degradations:
+                    continue
+                seen_retrieval_degradations.add(key)
+                payload = degradation.as_dict()
+                retrieval_degradations.append(payload)
+                emit("inqtrix.knowledge.retrieval.degraded", payload)
+            return batch
 
-        if sub_queries:
+        if collection_ids == []:
+            candidates = RetrievalCandidateBatch()
+        elif sub_queries:
             # Round-robin across the original question and every sub-query so
             # each aspect contributes; each list is per-query `top_k`, the union
             # is capped at the profile's wider `final_k`.
@@ -590,6 +687,12 @@ class KnowledgeAlgorithm:
             # No decomposition: a single query must fill the evidence budget
             # itself, so retrieve `final_k` directly.
             candidates = _retrieve(query_question, final_k)
+        initial_retrieval_warnings = [
+            warning.as_dict(include_message=False)
+            for warning in project_retrieval_exclusion_warnings(
+                candidates.exclusions
+            )
+        ]
         emit(
             "inqtrix.knowledge.retrieval.completed",
             {
@@ -604,6 +707,8 @@ class KnowledgeAlgorithm:
                     knowledge, collection_ids
                 ),
                 "embedding_model": knowledge.embeddings.default_model,
+                "degradations": retrieval_degradations,
+                "warnings": initial_retrieval_warnings,
             },
         )
         context_window = getattr(llm, "context_window_tokens", None)
@@ -633,12 +738,22 @@ class KnowledgeAlgorithm:
         gate_state: dict[str, Any] = {"enabled": plan.gate_enabled}
         gate_usage = {"prompt_tokens": 0, "completion_tokens": 0}
         if plan.gate_enabled and used_candidates:
-            decision = self._run_gate(
-                llm, context, query_question, evidence_block, emit,
-                gate_usage,
-                round_index=0,
-                vocabulary_bridge=plan.vocabulary_bridge,
-            )
+            with operation_span(
+                "knowledge.gate", {"inqtrix.gate.round": 0}
+            ) as gate_span:
+                decision = self._run_gate(
+                    llm, context, query_question, evidence_block, emit,
+                    gate_usage,
+                    round_index=0,
+                    vocabulary_bridge=plan.vocabulary_bridge,
+                )
+                if gate_span is not None:
+                    gate_span.set_attribute(
+                        "inqtrix.gate.sufficient", bool(decision.sufficient)
+                    )
+                    gate_span.set_attribute(
+                        "inqtrix.gate.marker", str(decision.marker or "")
+                    )
             gate_state.update(
                 marker=decision.marker,
                 sufficient=decision.sufficient,
@@ -678,12 +793,25 @@ class KnowledgeAlgorithm:
                 evidence_block, used_candidates = _render_evidence_block(
                     candidates, max_chars=budget_chars
                 )
-                decision = self._run_gate(
-                    llm, context, query_question, evidence_block, emit,
-                    gate_usage,
-                    round_index=rounds_used,
-                    vocabulary_bridge=plan.vocabulary_bridge,
-                )
+                with operation_span(
+                    "knowledge.gate",
+                    {"inqtrix.gate.round": rounds_used},
+                ) as rewrite_gate_span:
+                    decision = self._run_gate(
+                        llm, context, query_question, evidence_block, emit,
+                        gate_usage,
+                        round_index=rounds_used,
+                        vocabulary_bridge=plan.vocabulary_bridge,
+                    )
+                    if rewrite_gate_span is not None:
+                        rewrite_gate_span.set_attribute(
+                            "inqtrix.gate.sufficient",
+                            bool(decision.sufficient),
+                        )
+                        rewrite_gate_span.set_attribute(
+                            "inqtrix.gate.marker",
+                            str(decision.marker or ""),
+                        )
                 gate_state.update(
                     marker=decision.marker,
                     sufficient=decision.sufficient,
@@ -707,21 +835,38 @@ class KnowledgeAlgorithm:
                 # finding: the binary verdict refused 10/18 answerable
                 # DORA questions that had partial evidence).
                 log.warning(
-                    "Knowledge-Gate: Evidenz irrelevant (%s) — "
+                    "Knowledge-Gate: Evidenz irrelevant — "
                     "ehrliche Keine-Evidenz-Antwort.",
-                    decision.reason,
                 )
                 used_candidates = []
             elif not decision.sufficient:
                 log.info(
                     "Knowledge-Gate: Evidenz nur teilweise ausreichend "
-                    "(%s) — Antwort benennt die Luecken.",
-                    decision.reason,
+                    "— Antwort benennt die Luecken.",
                 )
+
+        # ``candidates`` is a RetrievalCandidateBatch throughout single-query,
+        # decomposition/interleave and gate-rewrite/merge paths.  Project its
+        # complete typed exclusion ledger only after the final retrieval so a
+        # late rewrite cannot disappear from the durable result.  The event is
+        # an idempotent cumulative snapshot; the client merges it with the
+        # earlier retrieval.completed snapshot and the final run receipt. Counts
+        # denote observations across retrieval calls, not unique chunks: this
+        # text-free aggregate intentionally carries no ids that could support
+        # cross-query identity deduplication.
+        retrieval_warnings = [
+            warning.as_dict(include_message=False)
+            for warning in project_retrieval_exclusion_warnings(
+                candidates.exclusions
+            )
+        ]
+        for warning in retrieval_warnings:
+            emit("inqtrix.knowledge.retrieval.warning", warning)
 
         grounding_state: dict[str, Any] = {
             "enabled": plan.grounding_enabled
         }
+        terminal_failure: dict[str, str] | None = None
         if not used_candidates:
             answer = (
                 "In den durchsuchten Dokumenten wurden keine relevanten "
@@ -778,19 +923,54 @@ class KnowledgeAlgorithm:
                 # a "verbatim, verified" quote must exist in the cited
                 # document, not in the contextualization prefix or the
                 # rendering scaffolding the prompt carries.
-                report = check_grounding(
-                    answer,
-                    [
-                        candidate.chunk.source_text or candidate.chunk.text
-                        for candidate in used_candidates
-                    ],
-                )
+                with operation_span("knowledge.grounding") as ground_span:
+                    report = check_grounding(
+                        answer,
+                        [
+                            KnowledgeEvidenceProjector.project(
+                                candidate, reference_id=f"K{index}"
+                            ).excerpt
+                            for index, candidate in enumerate(
+                                used_candidates, start=1
+                            )
+                        ],
+                    )
+                    if ground_span is not None:
+                        verified = sum(
+                            1 for quote in report.quotes if quote.verified
+                        )
+                        ground_span.set_attribute(
+                            "inqtrix.grounding.status", report.status.value
+                        )
+                        ground_span.set_attribute(
+                            "inqtrix.grounding.quotes_total",
+                            len(report.quotes),
+                        )
+                        ground_span.set_attribute(
+                            "inqtrix.grounding.quotes_verified", verified
+                        )
+                        ground_span.set_attribute(
+                            "inqtrix.grounding.format_repaired",
+                            bool(report.format_repaired),
+                        )
+                        if report.failure_code is not None:
+                            ground_span.set_attribute(
+                                "inqtrix.grounding.failure_code",
+                                report.failure_code.value,
+                            )
                 answer = report.answer
                 unverified = [
                     quote for quote in report.quotes if not quote.verified
                 ]
                 grounding_state.update(
                     marker=report.marker,
+                    status=report.status.value,
+                    failure_code=(
+                        report.failure_code.value
+                        if report.failure_code is not None
+                        else None
+                    ),
+                    format_repaired=report.format_repaired,
                     quotes_total=len(report.quotes),
                     quotes_verified=len(report.quotes) - len(unverified),
                     quotes=[
@@ -802,24 +982,44 @@ class KnowledgeAlgorithm:
                         for quote in report.quotes
                     ],
                 )
-                if report.marker == GROUNDING_MARKER_FALLBACK:
-                    log.warning(
-                        "Knowledge-Grounding: Antwort ohne parsebaren "
-                        "ZITATE-Block — ungeprueft durchgereicht (%s).",
-                        GROUNDING_MARKER_FALLBACK,
+                if not report.publishable:
+                    failure_code = report.failure_code
+                    if failure_code is None:  # defensive: rejected => code
+                        raise RuntimeError(
+                            "Knowledge grounding rejected without a failure code"
+                        )
+                    message = grounding_failure_message(
+                        failure_code,
+                        language=detect_ui_language(request.question),
                     )
-                elif unverified:
+                    # Never expose the rejected model completion.  Returning a
+                    # safe diagnostic together with the established terminal
+                    # failure marker preserves usage/audit data while every
+                    # native/chat/Agent adapter can reject the result through
+                    # the ONE AgentResult terminal-failure contract.
+                    answer = message
+                    terminal_failure = {
+                        "type": failure_code.value,
+                        "message": message,
+                    }
                     log.warning(
-                        "Knowledge-Grounding: %d von %d Zitaten nicht "
-                        "woertlich in der Evidenz belegbar (%s).",
-                        len(unverified),
+                        "Knowledge-Grounding abgelehnt (failure_code=%s, "
+                        "quotes_total=%d, quotes_unverified=%d).",
+                        failure_code.value,
                         len(report.quotes),
-                        ", ".join(quote.label for quote in unverified),
+                        len(unverified),
                     )
                 emit(
                     "inqtrix.knowledge.grounding.checked",
                     {
                         "marker": report.marker,
+                        "status": report.status.value,
+                        "failure_code": (
+                            report.failure_code.value
+                            if report.failure_code is not None
+                            else None
+                        ),
+                        "format_repaired": report.format_repaired,
                         "quotes_total": len(report.quotes),
                         "quotes_verified": len(report.quotes)
                         - len(unverified),
@@ -837,26 +1037,36 @@ class KnowledgeAlgorithm:
             + decompose_usage["completion_tokens"]
         )
 
-        references = [
-            {
-                "label": f"K{index}",
-                "url": self._reference_url(candidate),
-                "tier": "primary",
-                "title": candidate.document_title,
+        references = []
+        for index, candidate in enumerate(used_candidates, start=1):
+            evidence = KnowledgeEvidenceProjector.project(
+                candidate, reference_id=f"K{index}"
+            )
+            references.append(
+                {
+                    "label": f"K{index}",
+                    "url": self._reference_url(candidate),
+                    "tier": "primary",
+                    "title": evidence.title,
                 # The exact retrieved passage travels WITH the citation so the
                 # client can show "where this came from" (the cited chunk, with
                 # the quoted span highlighted) without a second fetch, and open
-                # the source reliably via the explicit document id.
-                "document_id": candidate.chunk.document_id,
-                "chunk_index": candidate.chunk.chunk_index,
-                "excerpt": candidate.chunk.text,
-                "source_text": candidate.chunk.source_text or candidate.chunk.text,
+                # the source reliably via the explicit document id. Both fields
+                # carry the DOCUMENT's own text: a reader checking a citation
+                # must see what the source says, not the indexing prefix a
+                # model wrote about it.
+                    "document_id": evidence.document_id,
+                    "chunk_index": evidence.chunk_index,
+                    "excerpt": evidence.excerpt,
+                    "source_text": evidence.excerpt,
+                    "source_span": evidence.as_dict()["source_span"],
+                    "revision_id": evidence.revision_id,
+                    "generation_id": evidence.generation_id,
                 # Best-effort source page (PDFs only) for a page-level "open at
                 # page N" jump; None when unmapped.
-                "page_number": candidate.chunk.page_number,
-            }
-            for index, candidate in enumerate(used_candidates, start=1)
-        ]
+                    "page_number": evidence.page_number,
+                }
+            )
         raw: dict[str, Any] = {
             "answer": answer,
             "usage": usage,
@@ -882,6 +1092,14 @@ class KnowledgeAlgorithm:
                     "auto_reason": plan.auto_reason,
                     "degraded_stages": list(plan.degraded_stages),
                 },
+                "knowledge_retrieval": {
+                    "degradations": retrieval_degradations,
+                    **(
+                        {"warnings": retrieval_warnings}
+                        if retrieval_warnings
+                        else {}
+                    ),
+                },
                 "elapsed_seconds": round(time.monotonic() - started, 2),
             },
         }
@@ -894,6 +1112,8 @@ class KnowledgeAlgorithm:
             raw["result_state"]["knowledge_contextualization"] = {
                 **contextualization_state,
             }
+        if terminal_failure is not None:
+            raw["result_state"]["_terminal_failure"] = terminal_failure
         return AgentResult(
             answer=answer,
             result_type="knowledge_result",

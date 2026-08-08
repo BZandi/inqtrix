@@ -5,15 +5,12 @@ Online migrations accept only a live connection injected by the managed
 and table locks, temporary owner maintenance, Alembic, and postconditions in
 one PostgreSQL transaction.
 
-Offline SQL rendering resolves ``sqlalchemy.url`` set programmatically on the
-config, then the ``INQTRIX_DATABASE_URL`` environment variable — the one
-documented exception to the constructor-first rule, because the ``alembic``
-CLI has no settings bridge.
+Offline SQL rendering is deliberately unsupported. Several revisions perform
+data-dependent validation and reconciliation that cannot be represented as a
+truthful connection-free SQL artifact.
 """
 
 from __future__ import annotations
-
-import os
 
 from alembic import context
 from sqlalchemy.engine import Connection
@@ -30,6 +27,8 @@ from inqtrix.storage.asset_records_orm import asset_metadata
 from inqtrix.storage.vector_index_orm import vector_index_metadata
 from inqtrix.storage.account_orm import account_metadata
 from inqtrix.storage.agent_memory_orm import agent_memory_metadata
+from inqtrix.storage.editor_collaboration_orm import editor_collaboration_metadata
+from inqtrix.storage.source_lifecycle_orm import source_lifecycle_metadata
 
 config = context.config
 
@@ -46,42 +45,36 @@ target_metadata = [
     vector_index_metadata,
     account_metadata,
     agent_memory_metadata,
+    editor_collaboration_metadata,
+    source_lifecycle_metadata,
 ]
 
 
-def _resolve_url() -> str:
-    configured = config.get_main_option("sqlalchemy.url")
-    if configured:
-        return configured
-    env_url = os.environ.get("INQTRIX_DATABASE_URL", "")
-    if env_url:
-        return env_url
-    raise RuntimeError(
-        "No database URL: set sqlalchemy.url or export "
-        "INQTRIX_DATABASE_URL."
-    )
-
-
 def run_migrations_offline() -> None:
-    """Emit migration SQL without a live connection (--sql mode)."""
-    context.configure(
-        url=_resolve_url(),
-        target_metadata=target_metadata,
-        literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
+    """Reject incomplete connection-free migration rendering."""
+    raise RuntimeError(
+        "Alembic offline SQL is unsupported: Inqtrix migrations include "
+        "data-dependent validation and reconciliation. Run inqtrix-migrate "
+        "against the target database so locks, data changes, and "
+        "postconditions share one transaction."
     )
-    with context.begin_transaction():
-        context.run_migrations()
 
 
 def do_run_migrations(connection: Connection) -> None:
     """Run every requested revision inside the caller's transaction."""
+    version_table_schema = config.attributes.get("version_table_schema")
+    version_options = (
+        {"version_table_schema": version_table_schema}
+        if isinstance(version_table_schema, str) and version_table_schema
+        else {}
+    )
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
         transactional_ddl=True,
         transaction_per_migration=False,
         on_version_apply=config.attributes.get("on_version_apply"),
+        **version_options,
     )
     with context.begin_transaction():
         context.run_migrations()

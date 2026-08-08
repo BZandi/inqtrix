@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from inqtrix.agents.control_ports import PlanNotFound
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable
 
     from inqtrix.agents.control_ports import AgentControlStore
     from inqtrix.runs.ports import RunStorePort

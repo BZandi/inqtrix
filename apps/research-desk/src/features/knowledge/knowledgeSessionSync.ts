@@ -4,6 +4,11 @@ import type {
   KnowledgeSessionRecord,
   KnowledgeThreadItemRecord,
 } from '@/features/project/types'
+import { sessionDeletionFromWire } from '@/features/project/sessionDeletion'
+import {
+  knowledgeRetrievalDegradations,
+  knowledgeRetrievalWarnings,
+} from './retrievalDegradation'
 
 type ServerKnowledgeThreadItemPayload =
   Omit<KnowledgeThreadItemRecord, 'sessionId'>
@@ -21,6 +26,7 @@ export function isoToEpoch(iso: string): number {
 export function sessionRecordFromServer(
   session: ServerKnowledgeSession,
 ): { groupId: string | null; record: KnowledgeSessionRecord } {
+  const deletion = sessionDeletionFromWire(session)
   return {
     groupId: session.group_id ?? null,
     record: {
@@ -28,6 +34,7 @@ export function sessionRecordFromServer(
       id: session.id,
       title: session.title,
       updatedAt: epochToIso(session.updated_at),
+      ...(deletion ? { deletion } : {}),
     },
   }
 }
@@ -51,7 +58,25 @@ export function itemsFromServerSession(
     const parsed = JSON.parse(session.items_json)
     if (!Array.isArray(parsed)) return []
     return parsed.flatMap((item) => (
-      isKnowledgeThreadItem(item) ? [{ ...item, sessionId: session.id }] : []
+      isKnowledgeThreadItem(item)
+        ? [{
+          ...item,
+          ...(item.answer
+            ? {
+              answer: {
+                ...item.answer,
+                retrievalDegradations: knowledgeRetrievalDegradations(
+                  item.answer.retrievalDegradations,
+                ),
+                retrievalWarnings: knowledgeRetrievalWarnings(
+                  item.answer.retrievalWarnings,
+                ),
+              },
+            }
+            : {}),
+          sessionId: session.id,
+        }]
+        : []
     ))
   } catch {
     return []

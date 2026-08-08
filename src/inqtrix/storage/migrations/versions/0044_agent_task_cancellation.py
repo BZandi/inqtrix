@@ -2,7 +2,6 @@
 
 Revision ID: 0044_agent_task_cancellation
 Revises: 0043_agent_task_contract
-Create Date: 2026-07-11
 
 The existing plan-task row remains the sole cancellation authority. A running
 synchronous operation first enters ``cancel_requested`` and becomes

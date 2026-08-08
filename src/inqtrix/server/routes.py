@@ -164,6 +164,12 @@ def register_routes(
         _router.include_router(build_collaboration_gateway_router(container))
         _router.include_router(build_editor_collaboration_router(container))
         _router.include_router(build_internal_collaboration_router(container))
+    if container.editor_guest_link_service is not None:
+        from inqtrix.server.routers.editor_guest_links import (
+            build_router as build_editor_guest_links_router,
+        )
+
+        _router.include_router(build_editor_guest_links_router(container))
     if container.asset_records_service is not None:
         from inqtrix.server.routers.asset_records import (
             build_router as build_asset_records_router,
@@ -222,6 +228,7 @@ def register_routes(
             build_auth_router(
                 container.auth_provider,
                 container.principal_dependency,
+                audit=container.permission_service.audit_sink,
             )
         )
         if getattr(container.auth_provider, "users", None) is not None:
@@ -238,6 +245,16 @@ def register_routes(
             )
 
             _router.include_router(build_admin_system_router(container))
+            from inqtrix.server.routers.audit_admin import (
+                build_router as build_audit_admin_router,
+            )
+
+            _router.include_router(build_audit_admin_router(container))
+            from inqtrix.server.routers.admin_trace import (
+                build_router as build_admin_trace_router,
+            )
+
+            _router.include_router(build_admin_trace_router(container))
             if container.knowledge_service is not None:
                 from inqtrix.server.routers.admin_knowledge import (
                     build_router as build_admin_knowledge_router,
@@ -283,4 +300,14 @@ def register_routes(
             )
 
             _router.include_router(build_quota_router(container))
+        # Bound to the ledger, NOT to quotas: usage is recorded whether or
+        # not the deployment meters anyone.
+        from inqtrix.usage.recorder import active_usage_recorder
+
+        if active_usage_recorder() is not None:
+            from inqtrix.server.routers.usage import (
+                build_router as build_usage_router,
+            )
+
+            _router.include_router(build_usage_router(container))
     return container

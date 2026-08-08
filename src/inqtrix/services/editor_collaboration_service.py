@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -11,7 +12,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, TypeVar, cast
 
 from inqtrix.auth.permissions import AccessMode, SharePermission
 from inqtrix.auth.principal import Principal, UserContext
@@ -19,6 +20,7 @@ from inqtrix.pagination import encode_cursor
 from inqtrix.project.editor_collaboration_ports import (
     CollaborationConflict,
     CollaborationChangeKind,
+    CollaborationCommentThread,
     CollaborationDocumentState,
     CollaborationInstanceLease,
     CollaborationLease,
@@ -44,6 +46,11 @@ from inqtrix.services.collaboration_client import (
 
 if TYPE_CHECKING:
     from inqtrix.auth.directory import MirroredUser, UserDirectory
+    from inqtrix.project.editor_guest_links import (
+        EditorGuestAccess,
+        EditorGuestActorProfile,
+        EditorGuestLinkStore,
+    )
     from inqtrix.services.editor_persistence_service import EditorPersistenceService
     from inqtrix.settings import CollaborationSettings
 
@@ -55,6 +62,8 @@ _ROOM_PATTERN = re.compile(
 _TOKEN_VERSION = "cl1"
 _MAX_DECISION_PATCHES = 5_000
 _MAX_PROJECTION_CONVERGENCE_ATTEMPTS = 3
+_COMMENT_DEADLOCK_RETRY_DELAYS = (0.01, 0.025, 0.05, 0.1)
+_CommentResult = TypeVar("_CommentResult")
 _COLORS = (
     "#2563EB",
     "#059669",
@@ -98,12 +107,14 @@ class EditorCollaborationService:
         node: CollaborationNodeClient,
         settings: "CollaborationSettings",
         users: "UserDirectory",
+        guest_links: "EditorGuestLinkStore | None" = None,
     ) -> None:
         self._store = store
         self._documents = documents
         self._node = node
         self._settings = settings
         self._users = users
+        self._guest_links = guest_links
         self._secret = settings.secret.encode("utf-8")
 
     async def service_available(self) -> bool:
@@ -313,6 +324,123 @@ class EditorCollaborationService:
             "schema_version": self._settings.schema_version,
         }
 
+    async def create_guest_session(
+        self,
+        *,
+        access: "EditorGuestAccess",
+        protocol_version: int,
+        schema_version: int,
+        current_lease_token: str | None = None,
+        rotation_command_id: uuid.UUID | None = None,
+    ) -> dict[str, Any]:
+        """Issue a link- and identity-bound lease without a platform account."""
+        self._require_versions(protocol_version, schema_version)
+        if self._guest_links is None:
+            raise CollaborationAuthenticationRequired("guest links unavailable")
+        if not await self._node.available():
+            raise CollaborationServiceUnavailable(
+                "collaboration service is not ready"
+            )
+        lease_permission = self._guest_lease_permission(access.link.permission)
+        now = time.time()
+        if current_lease_token is None and rotation_command_id is not None:
+            raise ValueError("rotation_command_id requires lease_token")
+        previous_lease_id: uuid.UUID | None = None
+        if current_lease_token is not None:
+            previous = self._decode_token(current_lease_token)
+            if previous["tenant_id"] != access.link.tenant_id:
+                raise CollaborationLeaseInvalid("lease_invalid")
+            previous_lease_id = previous["lease_id"]
+            if rotation_command_id is None:
+                rotation_command_id = uuid.uuid4()
+        lease_id = uuid.uuid4()
+        expires_at = min(
+            now + self._settings.lease_ttl_seconds,
+            access.identity.expires_at,
+            access.link.expires_at,
+        )
+        token = self._encode_token(
+            lease_id=lease_id,
+            tenant_id=access.link.tenant_id,
+            expires_at=expires_at,
+        )
+        lease = CollaborationLease(
+            lease_id=lease_id,
+            token_hash=hashlib.sha256(token.encode("ascii")).hexdigest(),
+            tenant_id=access.link.tenant_id,
+            document_id=access.link.document_id,
+            generation=access.link.generation,
+            user_id=None,
+            actor_kind="guest",
+            guest_identity_id=access.identity.id,
+            guest_link_id=access.link.id,
+            permission=lease_permission,
+            session_id=None,
+            issued_at=now,
+            expires_at=expires_at,
+            last_validated_at=now,
+            rotation_command_id=rotation_command_id,
+            rotated_from_lease_id=previous_lease_id,
+        )
+        if current_lease_token is None:
+            stored_lease = await self._store.issue_lease(
+                lease,
+                max_active=self._settings.max_sessions_per_user_document,
+                max_issued_per_window=self._settings.session_rate_per_minute,
+                issued_since=now - 60,
+            )
+        else:
+            stored_lease = await self._store.rotate_lease(
+                previous_lease_id=cast(uuid.UUID, previous_lease_id),
+                previous_token_hash=hashlib.sha256(
+                    current_lease_token.encode("ascii")
+                ).hexdigest(),
+                replacement=lease,
+                max_issued_per_window=self._settings.session_rate_per_minute,
+                issued_since=now - 60,
+            )
+        token = self._encode_token(
+            lease_id=stored_lease.lease_id,
+            tenant_id=stored_lease.tenant_id,
+            expires_at=stored_lease.expires_at,
+        )
+        if not hmac.compare_digest(
+            hashlib.sha256(token.encode("ascii")).hexdigest(),
+            stored_lease.token_hash,
+        ):
+            raise CollaborationConflict("lease_reconstruction_conflict")
+        if stored_lease.expires_at - now <= 1:
+            raise CollaborationLeaseInvalid("lease_expired")
+        refresh_after = min(
+            now + self._settings.token_refresh_seconds,
+            stored_lease.expires_at - 0.5,
+        )
+        display_name = access.identity.display_name or (
+            f"Guest {access.link.label}"
+        )
+        return {
+            "websocket_path": "/collaboration",
+            "room": self.room_name(
+                access.link.document_id,
+                access.link.generation,
+            ),
+            "lease_token": token,
+            "expires_at": stored_lease.expires_at,
+            "refresh_after": refresh_after,
+            "provider_flush_ms": self._settings.provider_flush_ms,
+            "access": access.link.permission,
+            "initial_write_mode": access.link.permission,
+            "user": {
+                "id": str(access.identity.id),
+                "name": display_name,
+                "color": self.user_color(access.identity.id),
+                "kind": "guest",
+                "link_label": access.link.label,
+            },
+            "protocol_version": self._settings.protocol_version,
+            "schema_version": self._settings.schema_version,
+        }
+
     async def introspect_lease(
         self,
         *,
@@ -325,6 +453,9 @@ class EditorCollaborationService:
         token_payload = self._decode_token(token)
         tenant_id = token_payload["tenant_id"]
         self._require_tenant(tenant_id)
+        policy_cursor = await self._store.current_policy_cursor(
+            tenant_id=tenant_id,
+        )
         now = time.time()
         await self._store.validate_instance(
             tenant_id=tenant_id,
@@ -350,11 +481,45 @@ class EditorCollaborationService:
             document_id=document_id,
             generation=generation,
         )
-        profile = await self._users.find_by_user_id(
-            tenant_id=tenant_id,
-            user_id=lease.user_id,
-        )
-        if profile is None or profile.disabled_at is not None:
+        if lease.actor_kind == "guest":
+            if self._guest_links is None or lease.guest_identity_id is None:
+                raise CollaborationAuthenticationRequired("guest is inactive")
+            guest = await self._guest_links.guest_identity_by_id(
+                tenant_id=tenant_id,
+                guest_identity_id=lease.guest_identity_id,
+                now=now,
+            )
+            if guest is None:
+                raise CollaborationAuthenticationRequired("guest is inactive")
+            identity, link = guest
+            if (
+                lease.guest_link_id != link.id
+                or lease.permission != self._guest_lease_permission(link.permission)
+            ):
+                raise CollaborationAuthenticationRequired("guest permission changed")
+            user_payload = {
+                "id": str(identity.id),
+                "name": identity.display_name or f"Guest {link.label}",
+                "color": self.user_color(identity.id),
+                "kind": "guest",
+                "link_label": link.label,
+            }
+        else:
+            if lease.user_id is None:
+                raise CollaborationAuthenticationRequired("user is inactive")
+            profile = await self._users.find_by_user_id(
+                tenant_id=tenant_id,
+                user_id=lease.user_id,
+            )
+            if profile is None or profile.disabled_at is not None:
+                raise CollaborationAuthenticationRequired("user is inactive")
+            user_payload = self._profile_payload(profile)
+        session_id = lease.session_id
+        if lease.actor_kind == "guest":
+            if lease.guest_identity_id is None:
+                raise CollaborationAuthenticationRequired("guest is inactive")
+            session_id = str(lease.guest_identity_id)
+        elif session_id is None:
             raise CollaborationAuthenticationRequired("user is inactive")
         return {
             "valid": True,
@@ -363,13 +528,21 @@ class EditorCollaborationService:
             "document_id": document_id,
             "generation": generation,
             "permission": lease.permission,
-            "session_id": lease.session_id,
+            "policy_cursor": policy_cursor,
+            "session_id": session_id,
             "expires_at": lease.expires_at,
             "protocol_version": self._settings.protocol_version,
             "schema_version": state.document.schema_version,
             "schema_hash": state.document.schema_hash,
-            "user": self._profile_payload(profile),
+            "user": user_payload,
         }
+
+    @staticmethod
+    def _guest_lease_permission(permission: str) -> CollaborationPermission:
+        return cast(
+            CollaborationPermission,
+            "view" if permission in {"view", "comment"} else permission,
+        )
 
     async def acquire_instance(
         self,
@@ -729,9 +902,15 @@ class EditorCollaborationService:
         because their exact current text is resolved from the live document.
         """
         allowed_types = (
-            {"insertion", "deletion", "modification"}
+            {
+                "insertion",
+                "deletion",
+                "replacement",
+                "format",
+                "structure",
+            }
             if view == "open"
-            else {"direct", "suggestion", "decision", "system"}
+            else {"direct", "suggestion", "decision", "system", "comment"}
         )
         if type_filter is not None and type_filter not in allowed_types:
             raise ValueError("invalid activity type")
@@ -789,6 +968,64 @@ class EditorCollaborationService:
                     else None
                 ),
             )
+        if type_filter == "comment":
+            comment_rows = await self._store.list_comment_activity(
+                tenant_id=principal.tenant_id,
+                document_id=document_id,
+                before_id=before_sequence,
+                author_user_id=author_user_id,
+                limit=page_limit + 1,
+            )
+            has_more = len(comment_rows) > page_limit
+            page_rows = comment_rows[:page_limit]
+            profiles = await self._users.profiles_for_user_ids(
+                tenant_id=principal.tenant_id,
+                user_ids=tuple(
+                    sorted(
+                        {
+                            row.actor_user_id
+                            for row in page_rows
+                            if row.actor_user_id is not None
+                        },
+                        key=str,
+                    )
+                ),
+            )
+            return CollaborationActivityPage(
+                items=tuple(
+                    {
+                        "from_sequence": row.id,
+                        "to_sequence": row.id,
+                        "type": "comment",
+                        "actor_kind": "human",
+                        "actor": self._activity_actor(
+                            row.actor_user_id,
+                            "human",
+                            (
+                                profiles.get(row.actor_user_id)
+                                if row.actor_user_id is not None
+                                else None
+                            ),
+                        ),
+                        "comment_action": row.action.rsplit(".", 1)[-1],
+                        "suggestion_ids": [],
+                        "command_id": None,
+                        "created_at": row.created_at,
+                        "summary": {
+                            "edits": [],
+                            "omitted_edit_count": 0,
+                        },
+                        "update_count": 1,
+                        "outcome": None,
+                    }
+                    for row in page_rows
+                ),
+                next_cursor=(
+                    page_rows[-1].id
+                    if has_more and page_rows
+                    else None
+                ),
+            )
         rows = await self._store.list_activity(
             tenant_id=principal.tenant_id,
             document_id=document_id,
@@ -834,6 +1071,15 @@ class EditorCollaborationService:
                 and float(items[-1]["created_at"]) - row.created_at <= 60
             ):
                 items[-1]["from_sequence"] = row.sequence
+                items[-1]["update_count"] += 1
+                prior_summary = items[-1]["summary"]
+                next_edits = list(row.change_summary.get("edits", []))
+                available = max(0, 3 - len(prior_summary["edits"]))
+                prior_summary["edits"].extend(next_edits[:available])
+                prior_summary["omitted_edit_count"] += (
+                    int(row.change_summary.get("omitted_edit_count", 0))
+                    + max(0, len(next_edits) - available)
+                )
                 continue
             items.append(
                 {
@@ -847,12 +1093,926 @@ class EditorCollaborationService:
                         str(row.command_id) if row.command_id is not None else None
                     ),
                     "created_at": row.created_at,
+                    "summary": {
+                        "edits": [
+                            dict(edit)
+                            for edit in row.change_summary.get("edits", [])
+                            if isinstance(edit, dict)
+                        ][:3],
+                        "omitted_edit_count": int(
+                            row.change_summary.get(
+                                "omitted_edit_count", 0
+                            )
+                        ),
+                    },
+                    "update_count": 1,
+                    "outcome": row.decision_outcome,
                 }
             )
         return CollaborationActivityPage(
             items=tuple(items),
             next_cursor=next_cursor,
         )
+
+    async def list_comments(
+        self,
+        *,
+        document_id: str,
+        since_revision: int,
+        status: Literal["all", "open", "resolved"],
+        limit: int,
+        principal: Principal,
+        visible_to: UserContext | None,
+    ) -> dict[str, Any]:
+        """Return an incremental, author-enriched shared-comment snapshot."""
+        self._require_cookie_principal(principal)
+        document, access = await self._documents.get_document_with_access(
+            document_id,
+            visible_to=visible_to,
+            minimum=SharePermission.VIEW,
+        )
+        if document.content_mode != "collaboration":
+            raise CollaborationConflict("mode_conflict")
+        actor_user_id = cast(uuid.UUID, principal.user_id)
+        page = await self._store.list_comment_threads(
+            tenant_id=principal.tenant_id,
+            document_id=document_id,
+            generation=document.collaboration_generation,
+            actor_user_id=actor_user_id,
+            since_revision=since_revision,
+            status=status,
+            limit=limit,
+        )
+        profiles = await self._comment_profiles(
+            principal.tenant_id,
+            page.threads,
+            extra_user_ids=page.participant_user_ids,
+        )
+        guest_profiles = await self._comment_guest_profiles(
+            principal.tenant_id,
+            page.threads,
+            extra_guest_ids=page.participant_guest_identity_ids,
+        )
+        can_moderate = (
+            access.mode is not AccessMode.SHARED
+            or access.permission is SharePermission.EDIT
+        )
+        return {
+            "object": "list",
+            "data": [
+                self._comment_thread_payload(
+                    thread,
+                    profiles=profiles,
+                    guest_profiles=guest_profiles,
+                    actor_user_id=actor_user_id,
+                    actor_guest_identity_id=None,
+                    can_moderate=can_moderate,
+                )
+                for thread in page.threads
+            ],
+            "revision": page.revision,
+            "current_revision": (
+                page.current_revision
+                if page.current_revision is not None
+                else page.revision
+            ),
+            "has_more": page.has_more,
+            "last_read_revision": page.last_read_revision,
+            "participants": [
+                self._comment_actor(
+                    user_id,
+                    None,
+                    profiles,
+                    guest_profiles,
+                )
+                for user_id in page.participant_user_ids
+            ]
+            + [
+                self._comment_actor(
+                    None,
+                    guest_id,
+                    profiles,
+                    guest_profiles,
+                )
+                for guest_id in page.participant_guest_identity_ids
+            ],
+        }
+
+    async def create_comment(
+        self,
+        *,
+        document_id: str,
+        generation: int,
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        anchor: dict[str, Any],
+        quote_text: str,
+        body_markdown: str,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        expected_revision: int,
+        command_id: uuid.UUID,
+        principal: Principal,
+        visible_to: UserContext | None,
+    ) -> dict[str, Any]:
+        self._require_cookie_principal(principal)
+        document, access = await self._comment_document(
+            document_id=document_id,
+            generation=generation,
+            minimum=SharePermission.SUGGEST,
+            visible_to=visible_to,
+        )
+        actor_user_id = cast(uuid.UUID, principal.user_id)
+        command_hash = self._comment_command_hash(
+            "create",
+            document_id,
+            generation,
+            thread_id,
+            message_id,
+            anchor,
+            quote_text,
+            body_markdown,
+            mention_user_ids,
+            expected_revision,
+        )
+        thread = await self._retry_comment_transaction(
+            lambda: self._store.create_comment_thread(
+                tenant_id=principal.tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=actor_user_id,
+                thread_id=thread_id,
+                message_id=message_id,
+                anchor=anchor,
+                quote_text=quote_text,
+                body_markdown=body_markdown,
+                mention_user_ids=mention_user_ids,
+                expected_revision=expected_revision,
+                command_id=command_id,
+                command_payload_hash=command_hash,
+                now=time.time(),
+            )
+        )
+        return await self._comment_mutation_payload(
+            principal=principal,
+            thread=thread,
+            access=access,
+        )
+
+    async def reply_to_comment(
+        self,
+        *,
+        document_id: str,
+        generation: int,
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        body_markdown: str,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        expected_revision: int,
+        command_id: uuid.UUID,
+        principal: Principal,
+        visible_to: UserContext | None,
+    ) -> dict[str, Any]:
+        self._require_cookie_principal(principal)
+        _document, access = await self._comment_document(
+            document_id=document_id,
+            generation=generation,
+            minimum=SharePermission.SUGGEST,
+            visible_to=visible_to,
+        )
+        actor_user_id = cast(uuid.UUID, principal.user_id)
+        command_hash = self._comment_command_hash(
+            "reply",
+            document_id,
+            generation,
+            thread_id,
+            message_id,
+            body_markdown,
+            mention_user_ids,
+            expected_revision,
+        )
+        thread = await self._retry_comment_transaction(
+            lambda: self._store.add_comment_reply(
+                tenant_id=principal.tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=actor_user_id,
+                thread_id=thread_id,
+                message_id=message_id,
+                body_markdown=body_markdown,
+                mention_user_ids=mention_user_ids,
+                expected_revision=expected_revision,
+                command_id=command_id,
+                command_payload_hash=command_hash,
+                now=time.time(),
+            )
+        )
+        return await self._comment_mutation_payload(
+            principal=principal,
+            thread=thread,
+            access=access,
+        )
+
+    async def update_comment_message(
+        self,
+        *,
+        document_id: str,
+        generation: int,
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        body_markdown: str | None,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        delete_message: bool,
+        expected_revision: int,
+        command_id: uuid.UUID,
+        principal: Principal,
+        visible_to: UserContext | None,
+    ) -> dict[str, Any]:
+        self._require_cookie_principal(principal)
+        _document, access = await self._comment_document(
+            document_id=document_id,
+            generation=generation,
+            minimum=SharePermission.SUGGEST,
+            visible_to=visible_to,
+        )
+        actor_user_id = cast(uuid.UUID, principal.user_id)
+        command_hash = self._comment_command_hash(
+            "delete" if delete_message else "edit",
+            document_id,
+            generation,
+            thread_id,
+            message_id,
+            body_markdown,
+            mention_user_ids,
+            expected_revision,
+        )
+        thread = await self._retry_comment_transaction(
+            lambda: self._store.update_comment_message(
+                tenant_id=principal.tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=actor_user_id,
+                thread_id=thread_id,
+                message_id=message_id,
+                body_markdown=body_markdown,
+                mention_user_ids=mention_user_ids,
+                delete_message=delete_message,
+                expected_revision=expected_revision,
+                command_id=command_id,
+                command_payload_hash=command_hash,
+                now=time.time(),
+            )
+        )
+        return await self._comment_mutation_payload(
+            principal=principal,
+            thread=thread,
+            access=access,
+        )
+
+    async def set_comment_status(
+        self,
+        *,
+        document_id: str,
+        generation: int,
+        thread_id: uuid.UUID,
+        status: Literal["open", "resolved"],
+        expected_revision: int,
+        command_id: uuid.UUID,
+        principal: Principal,
+        visible_to: UserContext | None,
+    ) -> dict[str, Any]:
+        self._require_cookie_principal(principal)
+        _document, access = await self._comment_document(
+            document_id=document_id,
+            generation=generation,
+            minimum=SharePermission.SUGGEST,
+            visible_to=visible_to,
+        )
+        actor_user_id = cast(uuid.UUID, principal.user_id)
+        can_moderate = (
+            access.mode is not AccessMode.SHARED
+            or access.permission is SharePermission.EDIT
+        )
+        command_hash = self._comment_command_hash(
+            "resolve" if status == "resolved" else "reopen",
+            document_id,
+            generation,
+            thread_id,
+            expected_revision,
+        )
+        thread = await self._retry_comment_transaction(
+            lambda: self._store.set_comment_thread_status(
+                tenant_id=principal.tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=actor_user_id,
+                thread_id=thread_id,
+                status=status,
+                can_moderate=can_moderate,
+                expected_revision=expected_revision,
+                command_id=command_id,
+                command_payload_hash=command_hash,
+                now=time.time(),
+            )
+        )
+        return await self._comment_mutation_payload(
+            principal=principal,
+            thread=thread,
+            access=access,
+        )
+
+    async def mark_comments_read(
+        self,
+        *,
+        document_id: str,
+        generation: int,
+        revision: int,
+        principal: Principal,
+        visible_to: UserContext | None,
+    ) -> int:
+        self._require_cookie_principal(principal)
+        await self._comment_document(
+            document_id=document_id,
+            generation=generation,
+            minimum=SharePermission.VIEW,
+            visible_to=visible_to,
+        )
+        return await self._retry_comment_transaction(
+            lambda: self._store.mark_comments_read(
+                tenant_id=principal.tenant_id,
+                document_id=document_id,
+                generation=generation,
+                actor_user_id=cast(uuid.UUID, principal.user_id),
+                revision=revision,
+                now=time.time(),
+            )
+        )
+
+    async def list_guest_comments(
+        self,
+        *,
+        access: "EditorGuestAccess",
+        since_revision: int,
+        status: Literal["all", "open", "resolved"],
+        limit: int,
+    ) -> dict[str, Any]:
+        """Read the shared discussion through one scoped guest identity."""
+        page = await self._store.list_comment_threads(
+            tenant_id=access.link.tenant_id,
+            document_id=access.link.document_id,
+            generation=access.link.generation,
+            actor_user_id=None,
+            actor_guest_identity_id=access.identity.id,
+            guest_link_id=access.link.id,
+            since_revision=since_revision,
+            status=status,
+            limit=limit,
+        )
+        profiles = await self._comment_profiles(
+            access.link.tenant_id,
+            page.threads,
+            extra_user_ids=page.participant_user_ids,
+        )
+        guest_profiles = await self._comment_guest_profiles(
+            access.link.tenant_id,
+            page.threads,
+            extra_guest_ids=page.participant_guest_identity_ids,
+        )
+        can_moderate = access.link.permission == "edit"
+        return {
+            "object": "list",
+            "data": [
+                self._comment_thread_payload(
+                    thread,
+                    profiles=profiles,
+                    guest_profiles=guest_profiles,
+                    actor_user_id=None,
+                    actor_guest_identity_id=access.identity.id,
+                    can_moderate=can_moderate,
+                )
+                for thread in page.threads
+            ],
+            "revision": page.revision,
+            "current_revision": (
+                page.current_revision
+                if page.current_revision is not None
+                else page.revision
+            ),
+            "has_more": page.has_more,
+            "last_read_revision": page.last_read_revision,
+            "participants": [
+                self._comment_actor(
+                    user_id,
+                    None,
+                    profiles,
+                    guest_profiles,
+                )
+                for user_id in page.participant_user_ids
+            ]
+            + [
+                self._comment_actor(
+                    None,
+                    guest_id,
+                    profiles,
+                    guest_profiles,
+                )
+                for guest_id in page.participant_guest_identity_ids
+            ],
+        }
+
+    async def create_guest_comment(
+        self,
+        *,
+        access: "EditorGuestAccess",
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        anchor: dict[str, Any],
+        quote_text: str,
+        body_markdown: str,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        expected_revision: int,
+        command_id: uuid.UUID,
+    ) -> dict[str, Any]:
+        self._require_guest_comment_access(access)
+        command_hash = self._comment_command_hash(
+            "create",
+            access.link.document_id,
+            access.link.generation,
+            thread_id,
+            message_id,
+            anchor,
+            quote_text,
+            body_markdown,
+            mention_user_ids,
+            expected_revision,
+        )
+        thread = await self._retry_comment_transaction(
+            lambda: self._store.create_comment_thread(
+                tenant_id=access.link.tenant_id,
+                document_id=access.link.document_id,
+                generation=access.link.generation,
+                actor_user_id=None,
+                actor_guest_identity_id=access.identity.id,
+                guest_link_id=access.link.id,
+                thread_id=thread_id,
+                message_id=message_id,
+                anchor=anchor,
+                quote_text=quote_text,
+                body_markdown=body_markdown,
+                mention_user_ids=mention_user_ids,
+                expected_revision=expected_revision,
+                command_id=command_id,
+                command_payload_hash=command_hash,
+                now=time.time(),
+            )
+        )
+        return await self._guest_comment_mutation_payload(
+            access=access,
+            thread=thread,
+        )
+
+    async def reply_to_guest_comment(
+        self,
+        *,
+        access: "EditorGuestAccess",
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        body_markdown: str,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        expected_revision: int,
+        command_id: uuid.UUID,
+    ) -> dict[str, Any]:
+        self._require_guest_comment_access(access)
+        command_hash = self._comment_command_hash(
+            "reply",
+            access.link.document_id,
+            access.link.generation,
+            thread_id,
+            message_id,
+            body_markdown,
+            mention_user_ids,
+            expected_revision,
+        )
+        thread = await self._retry_comment_transaction(
+            lambda: self._store.add_comment_reply(
+                tenant_id=access.link.tenant_id,
+                document_id=access.link.document_id,
+                generation=access.link.generation,
+                actor_user_id=None,
+                actor_guest_identity_id=access.identity.id,
+                guest_link_id=access.link.id,
+                thread_id=thread_id,
+                message_id=message_id,
+                body_markdown=body_markdown,
+                mention_user_ids=mention_user_ids,
+                expected_revision=expected_revision,
+                command_id=command_id,
+                command_payload_hash=command_hash,
+                now=time.time(),
+            )
+        )
+        return await self._guest_comment_mutation_payload(
+            access=access,
+            thread=thread,
+        )
+
+    async def update_guest_comment_message(
+        self,
+        *,
+        access: "EditorGuestAccess",
+        thread_id: uuid.UUID,
+        message_id: uuid.UUID,
+        body_markdown: str | None,
+        mention_user_ids: tuple[uuid.UUID, ...],
+        delete_message: bool,
+        expected_revision: int,
+        command_id: uuid.UUID,
+    ) -> dict[str, Any]:
+        self._require_guest_comment_access(access)
+        command_hash = self._comment_command_hash(
+            "delete" if delete_message else "edit",
+            access.link.document_id,
+            access.link.generation,
+            thread_id,
+            message_id,
+            body_markdown,
+            mention_user_ids,
+            expected_revision,
+        )
+        thread = await self._retry_comment_transaction(
+            lambda: self._store.update_comment_message(
+                tenant_id=access.link.tenant_id,
+                document_id=access.link.document_id,
+                generation=access.link.generation,
+                actor_user_id=None,
+                actor_guest_identity_id=access.identity.id,
+                guest_link_id=access.link.id,
+                thread_id=thread_id,
+                message_id=message_id,
+                body_markdown=body_markdown,
+                mention_user_ids=mention_user_ids,
+                delete_message=delete_message,
+                expected_revision=expected_revision,
+                command_id=command_id,
+                command_payload_hash=command_hash,
+                now=time.time(),
+            )
+        )
+        return await self._guest_comment_mutation_payload(
+            access=access,
+            thread=thread,
+        )
+
+    async def set_guest_comment_status(
+        self,
+        *,
+        access: "EditorGuestAccess",
+        thread_id: uuid.UUID,
+        status: Literal["open", "resolved"],
+        expected_revision: int,
+        command_id: uuid.UUID,
+    ) -> dict[str, Any]:
+        self._require_guest_comment_access(access)
+        command_hash = self._comment_command_hash(
+            "resolve" if status == "resolved" else "reopen",
+            access.link.document_id,
+            access.link.generation,
+            thread_id,
+            expected_revision,
+        )
+        thread = await self._retry_comment_transaction(
+            lambda: self._store.set_comment_thread_status(
+                tenant_id=access.link.tenant_id,
+                document_id=access.link.document_id,
+                generation=access.link.generation,
+                actor_user_id=None,
+                actor_guest_identity_id=access.identity.id,
+                guest_link_id=access.link.id,
+                thread_id=thread_id,
+                status=status,
+                can_moderate=access.link.permission == "edit",
+                expected_revision=expected_revision,
+                command_id=command_id,
+                command_payload_hash=command_hash,
+                now=time.time(),
+            )
+        )
+        return await self._guest_comment_mutation_payload(
+            access=access,
+            thread=thread,
+        )
+
+    async def mark_guest_comments_read(
+        self,
+        *,
+        access: "EditorGuestAccess",
+        revision: int,
+    ) -> int:
+        return await self._retry_comment_transaction(
+            lambda: self._store.mark_comments_read(
+                tenant_id=access.link.tenant_id,
+                document_id=access.link.document_id,
+                generation=access.link.generation,
+                actor_user_id=None,
+                actor_guest_identity_id=access.identity.id,
+                guest_link_id=access.link.id,
+                revision=revision,
+                now=time.time(),
+            )
+        )
+
+    async def _retry_comment_transaction(
+        self,
+        operation: Callable[[], Awaitable[_CommentResult]],
+    ) -> _CommentResult:
+        """Retry PostgreSQL deadlock victims at the idempotent command seam.
+
+        Shared-comment writes lock the document, permission rows, authors and
+        the transactional invalidation outbox. Concurrent read-state updates
+        can make PostgreSQL choose either transaction as a deadlock victim.
+        Every mutation already carries a stable command id and PostgreSQL
+        rolls a deadlock victim back completely, so replaying the whole store
+        operation is safe and preserves exactly-once persistence.
+        """
+        for attempt in range(len(_COMMENT_DEADLOCK_RETRY_DELAYS) + 1):
+            try:
+                return await operation()
+            except Exception as error:
+                if (
+                    not _is_postgres_deadlock(error)
+                    or attempt >= len(_COMMENT_DEADLOCK_RETRY_DELAYS)
+                ):
+                    raise
+                delay = _COMMENT_DEADLOCK_RETRY_DELAYS[attempt]
+                log.warning(
+                    "Shared-comment transaction deadlocked; retrying "
+                    "(attempt %s/%s, delay %.3fs).",
+                    attempt + 1,
+                    len(_COMMENT_DEADLOCK_RETRY_DELAYS),
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable shared-comment retry state")
+
+    @staticmethod
+    def _require_guest_comment_access(access: "EditorGuestAccess") -> None:
+        if access.link.permission not in {"comment", "suggest", "edit"}:
+            raise CollaborationAuthenticationRequired(
+                "guest comment permission required"
+            )
+        if access.identity.display_name is None:
+            raise CollaborationAuthenticationRequired(
+                "guest display name required"
+            )
+
+    async def _guest_comment_mutation_payload(
+        self,
+        *,
+        access: "EditorGuestAccess",
+        thread: CollaborationCommentThread,
+    ) -> dict[str, Any]:
+        profiles = await self._comment_profiles(
+            access.link.tenant_id,
+            (thread,),
+        )
+        guest_profiles = await self._comment_guest_profiles(
+            access.link.tenant_id,
+            (thread,),
+        )
+        return {
+            "revision": thread.revision,
+            "thread": self._comment_thread_payload(
+                thread,
+                profiles=profiles,
+                guest_profiles=guest_profiles,
+                actor_user_id=None,
+                actor_guest_identity_id=access.identity.id,
+                can_moderate=access.link.permission == "edit",
+            ),
+        }
+
+    async def _comment_document(
+        self,
+        *,
+        document_id: str,
+        generation: int,
+        minimum: SharePermission,
+        visible_to: UserContext | None,
+    ):
+        document, access = await self._documents.get_document_with_access(
+            document_id,
+            visible_to=visible_to,
+            minimum=minimum,
+        )
+        if document.content_mode != "collaboration":
+            raise CollaborationConflict("mode_conflict")
+        if document.collaboration_generation != generation:
+            raise CollaborationConflict("generation_conflict")
+        return document, access
+
+    async def _comment_mutation_payload(
+        self,
+        *,
+        principal: Principal,
+        thread: CollaborationCommentThread,
+        access,
+    ) -> dict[str, Any]:
+        profiles = await self._comment_profiles(
+            principal.tenant_id,
+            (thread,),
+        )
+        guest_profiles = await self._comment_guest_profiles(
+            principal.tenant_id,
+            (thread,),
+        )
+        actor_user_id = cast(uuid.UUID, principal.user_id)
+        return {
+            "revision": thread.revision,
+            "thread": self._comment_thread_payload(
+                thread,
+                profiles=profiles,
+                guest_profiles=guest_profiles,
+                actor_user_id=actor_user_id,
+                actor_guest_identity_id=None,
+                can_moderate=(
+                    access.mode is not AccessMode.SHARED
+                    or access.permission is SharePermission.EDIT
+                ),
+            ),
+        }
+
+    async def _comment_profiles(
+        self,
+        tenant_id: str,
+        threads: tuple[CollaborationCommentThread, ...],
+        *,
+        extra_user_ids: tuple[uuid.UUID, ...] = (),
+    ) -> dict[uuid.UUID, "MirroredUser"]:
+        user_ids: set[uuid.UUID] = set(extra_user_ids)
+        for thread in threads:
+            if thread.created_by_user_id is not None:
+                user_ids.add(thread.created_by_user_id)
+            if thread.resolved_by_user_id is not None:
+                user_ids.add(thread.resolved_by_user_id)
+            for message in thread.messages:
+                if message.author_user_id is not None:
+                    user_ids.add(message.author_user_id)
+                user_ids.update(message.mention_user_ids)
+        return await self._users.profiles_for_user_ids(
+            tenant_id=tenant_id,
+            user_ids=tuple(sorted(user_ids, key=str)),
+        )
+
+    async def _comment_guest_profiles(
+        self,
+        tenant_id: str,
+        threads: tuple[CollaborationCommentThread, ...],
+        *,
+        extra_guest_ids: tuple[uuid.UUID, ...] = (),
+    ) -> dict[uuid.UUID, "EditorGuestActorProfile"]:
+        if self._guest_links is None:
+            return {}
+        guest_ids: set[uuid.UUID] = set(extra_guest_ids)
+        for thread in threads:
+            if thread.created_by_guest_identity_id is not None:
+                guest_ids.add(thread.created_by_guest_identity_id)
+            if thread.resolved_by_guest_identity_id is not None:
+                guest_ids.add(thread.resolved_by_guest_identity_id)
+            for message in thread.messages:
+                if message.author_guest_identity_id is not None:
+                    guest_ids.add(message.author_guest_identity_id)
+        return await self._guest_links.guest_actor_profiles(
+            tenant_id=tenant_id,
+            guest_identity_ids=tuple(sorted(guest_ids, key=str)),
+        )
+
+    def _comment_thread_payload(
+        self,
+        thread: CollaborationCommentThread,
+        *,
+        profiles: dict[uuid.UUID, "MirroredUser"],
+        guest_profiles: dict[uuid.UUID, "EditorGuestActorProfile"],
+        actor_user_id: uuid.UUID | None,
+        actor_guest_identity_id: uuid.UUID | None,
+        can_moderate: bool,
+    ) -> dict[str, Any]:
+        return {
+            "id": str(thread.thread_id),
+            "document_id": thread.document_id,
+            "generation": thread.generation,
+            "revision": thread.revision,
+            "status": thread.status,
+            "author": self._comment_actor(
+                thread.created_by_user_id,
+                thread.created_by_guest_identity_id,
+                profiles,
+                guest_profiles,
+            ),
+            "resolved_by": (
+                self._comment_actor(
+                    thread.resolved_by_user_id,
+                    thread.resolved_by_guest_identity_id,
+                    profiles,
+                    guest_profiles,
+                )
+                if (
+                    thread.resolved_by_user_id is not None
+                    or thread.resolved_by_guest_identity_id is not None
+                )
+                else None
+            ),
+            "resolved_at": thread.resolved_at,
+            "anchor": dict(thread.anchor),
+            "quote": thread.quote_text,
+            "created_at": thread.created_at,
+            "updated_at": thread.updated_at,
+            "can_resolve": (
+                can_moderate
+                or (
+                    thread.created_by_user_id == actor_user_id
+                    and thread.created_by_guest_identity_id
+                    == actor_guest_identity_id
+                )
+            ),
+            "messages": [
+                {
+                    "id": str(message.message_id),
+                    "revision": message.revision,
+                    "author": self._comment_actor(
+                        message.author_user_id,
+                        message.author_guest_identity_id,
+                        profiles,
+                        guest_profiles,
+                    ),
+                    "body_markdown": (
+                        None
+                        if message.deleted_at is not None
+                        else message.body_markdown
+                    ),
+                    "mentions": [
+                        self._activity_actor(
+                            mentioned_user_id,
+                            "human",
+                            profiles.get(mentioned_user_id),
+                        )
+                        for mentioned_user_id in message.mention_user_ids
+                    ],
+                    "created_at": message.created_at,
+                    "edited_at": message.edited_at,
+                    "deleted_at": message.deleted_at,
+                    "can_edit": (
+                        message.deleted_at is None
+                        and message.author_user_id == actor_user_id
+                        and message.author_guest_identity_id
+                        == actor_guest_identity_id
+                    ),
+                    "can_delete": (
+                        message.deleted_at is None
+                        and message.author_user_id == actor_user_id
+                        and message.author_guest_identity_id
+                        == actor_guest_identity_id
+                    ),
+                }
+                for message in thread.messages
+            ],
+        }
+
+    def _comment_actor(
+        self,
+        user_id: uuid.UUID | None,
+        guest_identity_id: uuid.UUID | None,
+        profiles: dict[uuid.UUID, "MirroredUser"],
+        guest_profiles: dict[uuid.UUID, "EditorGuestActorProfile"],
+    ) -> dict[str, str | None]:
+        if guest_identity_id is not None:
+            guest = guest_profiles.get(guest_identity_id)
+            label = guest.link_label if guest is not None else "—"
+            name = (
+                guest.display_name
+                if guest is not None and guest.display_name
+                else f"Guest {label}"
+            )
+            return {
+                "id": str(guest_identity_id),
+                "name": name,
+                "kind": "guest",
+                "link_label": label,
+            }
+        return self._activity_actor(
+            user_id,
+            "human",
+            profiles.get(user_id) if user_id is not None else None,
+        )
+
+    @staticmethod
+    def _comment_command_hash(*values: Any) -> str:
+        encoded = json.dumps(
+            values,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     def _activity_actor(
@@ -1035,6 +2195,30 @@ class EditorCollaborationService:
             "tenant_id": tenant_id,
             "expires_at": float(expires_at),
         }
+
+
+def _is_postgres_deadlock(error: BaseException) -> bool:
+    """Recognize SQLSTATE 40P01 through SQLAlchemy/asyncpg wrappers."""
+    pending: list[BaseException] = [error]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if (
+            getattr(current, "sqlstate", None) == "40P01"
+            or getattr(current, "pgcode", None) == "40P01"
+        ):
+            return True
+        for candidate in (
+            getattr(current, "orig", None),
+            current.__cause__,
+            current.__context__,
+        ):
+            if isinstance(candidate, BaseException):
+                pending.append(candidate)
+    return False
 
 
 def _base64url(value: bytes) -> str:

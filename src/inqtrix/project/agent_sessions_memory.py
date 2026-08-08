@@ -36,6 +36,8 @@ class MemoryAgentSessionStore:
         with self._lock:
             existing = self._sessions.get(id)
             if existing is not None:
+                if existing.lifecycle_status != "active":
+                    raise AgentSessionNotFound(id)
                 return existing
             session = AgentSession(
                 id=id,
@@ -74,6 +76,8 @@ class MemoryAgentSessionStore:
                     resource_id=id,
                     not_found=AgentSessionNotFound,
                 )
+                if existing.lifecycle_status != "active":
+                    raise AgentSessionNotFound(id)
                 session = replace(
                     existing, title=title, items_json=items_json, group_id=group_id,
                     updated_at=updated_at,
@@ -115,6 +119,51 @@ class MemoryAgentSessionStore:
                 not_found=AgentSessionNotFound,
             )
             self._sessions.pop(session_id, None)
+
+    async def set_session_deletion_state(
+        self,
+        session_id: str,
+        *,
+        scope: ResourceScope,
+        lifecycle_status: str,
+        deletion_operation_id: str,
+        deletion_stage: str,
+        deletion_error: str | None,
+    ) -> None:
+        with self._lock:
+            session = require_memory_scope(
+                self._sessions.get(session_id),
+                created_by_user_id=scope.created_by_user_id,
+                workspace_id=scope.workspace_id,
+                resource_id=session_id,
+                not_found=AgentSessionNotFound,
+            )
+            self._sessions[session_id] = replace(
+                session,
+                lifecycle_status=lifecycle_status,
+                deletion_operation_id=deletion_operation_id,
+                deletion_stage=deletion_stage,
+                deletion_error=deletion_error,
+            )
+
+    async def count_session_residuals(
+        self, session_id: str, *, scope: ResourceScope
+    ) -> int:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return 0
+            try:
+                require_memory_scope(
+                    session,
+                    created_by_user_id=scope.created_by_user_id,
+                    workspace_id=scope.workspace_id,
+                    resource_id=session_id,
+                    not_found=AgentSessionNotFound,
+                )
+            except AgentSessionNotFound:
+                return 0
+            return 1
 
     async def upsert_group(
         self, *, id: str, title: str, created_at: float, updated_at: float,

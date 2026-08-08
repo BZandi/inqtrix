@@ -13,6 +13,8 @@ from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import (
     KnowledgeProviderContext,
     RetrievalCandidate,
+    RetrievalCandidateBatch,
+    RetrievalDegradation,
 )
 from inqtrix.providers.base import _RetryNoticeMixin
 from inqtrix.providers.rerankers import CohereRerank, RerankerError, RerankResult
@@ -344,6 +346,40 @@ class FakeHybridStore(MemoryKnowledgeStore):
         )
 
 
+class CandidatePoolDegradedStore(MemoryKnowledgeStore):
+    """Reports a shallow pool while retaining enough final evidence."""
+
+    async def search(
+        self,
+        *,
+        query_embedding,
+        collection_ids,
+        top_k,
+        embedding_model=None,
+    ) -> RetrievalCandidateBatch:
+        candidates = await super().search(
+            query_embedding=query_embedding,
+            collection_ids=collection_ids,
+            top_k=top_k,
+            embedding_model=embedding_model,
+        )
+        return RetrievalCandidateBatch(
+            candidates,
+            degradations=(
+                RetrievalDegradation(
+                    reason="vector_overfetch_cap",
+                    retrieval_mode="dense",
+                    requested_top_k=top_k,
+                    returned_hits=len(candidates),
+                    candidate_cap=64,
+                    requested_candidate_pool=top_k,
+                    returned_candidate_pool=len(candidates),
+                    final_top_k=top_k,
+                ),
+            ),
+        )
+
+
 @pytest.mark.asyncio
 async def test_service_dispatches_to_hybrid_capable_stores():
     store = FakeHybridStore()
@@ -354,6 +390,41 @@ async def test_service_dispatches_to_hybrid_capable_stores():
 
     assert store.hybrid_calls == 1
     assert hits
+
+
+@pytest.mark.asyncio
+async def test_candidate_pool_underfill_does_not_claim_final_hit_underfill():
+    reranker = FakeReranker()
+    store = CandidatePoolDegradedStore()
+    context = KnowledgeProviderContext(
+        embeddings=StubEmbeddings(),
+        store=store,
+        default_top_k=4,
+        reranker=reranker,
+        rerank_candidate_depth=10,
+    )
+    service = KnowledgeService(
+        knowledge=context,
+        chunk_max_chars=2_000,
+        max_document_chars=100_000,
+    )
+    collection_id = await seed_documents(service)
+
+    outcome = await service.search_reported(
+        query="Haftung",
+        collection_ids=[collection_id],
+        top_k=2,
+    )
+
+    assert len(outcome.candidates) == 2
+    degradation = outcome.retrieval_degradations[0]
+    assert degradation.stage == "vector_candidate_pool"
+    assert degradation.requested_candidate_pool == 10
+    assert degradation.returned_candidate_pool == 3
+    assert degradation.final_top_k == 2
+    assert degradation.requested_top_k == 2
+    assert degradation.returned_hits == 2
+    assert degradation.final_evidence_complete is True
 
 
 # ------------------------------------------------------------------ #

@@ -10,7 +10,6 @@ graph seam ``inqtrix.research.web_research.run_web_graph``.
 
 from __future__ import annotations
 
-import asyncio
 import threading
 from typing import TYPE_CHECKING
 
@@ -108,7 +107,9 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
 
         try:
-            workspace_id = workspace_id_from_request(req, body)
+            # Called for the 400 it raises on a malformed namespace. Chat has
+            # no run listing to filter, so the value itself has no consumer.
+            workspace_id_from_request(req, body)
             question, messages = question_and_messages(body, settings.server)
             resolved = resolver.resolve(body)
         except HTTPException as exc:
@@ -217,6 +218,10 @@ def build_router(container: "AppContainer") -> APIRouter:
                     cancel_event=cancel_event,
                     quota_service=quota_service,
                     principal=principal,
+                    audit_sink=container.permission_service.audit_sink,
+                    audit_service_starts=(
+                        settings.observability.audit_service_starts
+                    ),
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -235,15 +240,36 @@ def build_router(container: "AppContainer") -> APIRouter:
             semaphore=sem,
             principal=principal,
         )
-        # Book the real token spend on success; an error envelope
-        # (JSONResponse) carries no usage and is not metered.
-        if isinstance(response, dict):
+        # Book real token spend on success and on a typed returned terminal
+        # failure.  Ordinary pre-execution error envelopes carry no usage;
+        # ChatService attaches a private usage projection only when an
+        # algorithm actually consumed tokens before failing closed.
+        usage_payload = (
+            response
+            if isinstance(response, dict)
+            else getattr(response, "inqtrix_usage", None)
+        )
+        if isinstance(usage_payload, dict):
             await quota_record(
                 quota_service,
                 principal,
                 QuotaDimension.LLM_TOKENS,
-                consumed_tokens(response.get("usage")),
+                consumed_tokens(usage_payload.get("usage", usage_payload)),
             )
+        from inqtrix.services.audit_service import audit_chat_completed
+
+        await audit_chat_completed(
+            container.permission_service.audit_sink,
+            principal,
+            usage=(
+                usage_payload.get("usage", usage_payload)
+                if isinstance(usage_payload, dict)
+                else None
+            ),
+            streamed=False,
+            failed=not isinstance(response, dict),
+            enabled=settings.observability.audit_service_starts,
+        )
         return response
 
     return router

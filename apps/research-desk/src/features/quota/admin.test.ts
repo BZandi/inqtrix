@@ -17,7 +17,7 @@ import {
 } from './admin'
 
 describe('quotaAdminAvailable (instance-admin axis)', () => {
-  // Pins the P1 decoupling: availability follows the instance-admin role and
+  // Availability follows the instance-admin role and
   // the quota capability, NEVER workspace ownership (ownership is not even an
   // input). A regression re-coupling availability to ownership would need to
   // add a parameter here, which this suite would surface.

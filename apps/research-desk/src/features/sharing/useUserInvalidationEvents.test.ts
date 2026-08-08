@@ -31,6 +31,23 @@ describe('userEventAction', () => {
     }, 'user-a')).toBe('refetch')
   })
 
+  it('consumes comment outbox duplicates without waking every resource store', () => {
+    for (const scope of [
+      'collaboration_comment_changed',
+      'collaboration_comment_mention',
+    ]) {
+      expect(userEventAction({
+        data: {
+          resource_id: 'ed_1',
+          resource_type: 'editor_document',
+          scope,
+        },
+        id: '13',
+        type: 'invalidate',
+      }, 'user-a')).toBe('consume')
+    }
+  })
+
   it('ignores unknown named events and bounds reconnect backoff', () => {
     expect(userEventAction({
       data: {},

@@ -1,9 +1,8 @@
 """Generic OIDC backend-for-frontend: client, provider, CSRF.
 
 Implements the browser-apps BCP (draft-ietf-oauth-browser-based-apps
--26, IESG-approved) the standards-first way (ADR-AUTH-1: no IdP is
-hardwired — Dex, Keycloak, Entra ID, Okta, authentik are
-configuration, not code):
+-26, IESG-approved) in a standards-first form. No IdP is hardwired:
+Dex, Keycloak, Entra ID, Okta, and authentik are configuration, not code.
 
 * Confidential client, authorization code + PKCE S256, ``state`` AND
   ``nonce`` on every request (RFC 9700: PKCE alone counters CSRF only
@@ -45,6 +44,7 @@ from fastapi import HTTPException, Request
 from joserfc import jwt as jose_jwt
 from joserfc.jwk import KeySet
 
+from inqtrix.auth.log_redaction import pseudonymous_log_reference
 from inqtrix.auth.mapping import (
     ClaimMappingConfig,
     OidcExchangeError,
@@ -56,9 +56,12 @@ from inqtrix.auth.mapping import (
 )
 from inqtrix.auth.principal import AuthProvider, Principal
 from inqtrix.auth.sessions import AuthSession, FlowStore, SessionStore
+from inqtrix.observability.context import bind_principal_context
 from inqtrix.services.request_parsing import workspace_id_from_request
 
 if TYPE_CHECKING:
+    from inqtrix.auth.permissions import AuditSink
+    from inqtrix.auth.lifecycle import UserLifecycleService
     from inqtrix.auth.directory import UserDirectory
     from inqtrix.auth.invitations import (
         InvitationRepository,
@@ -472,6 +475,13 @@ class OidcAuthProvider(AuthProvider):
                 "Produktion verwenden."
             )
 
+    def bind_pat_audit(self, audit: "AuditSink") -> None:
+        """Bind PAT lifecycle and rejection events to the platform sink."""
+        if self.pats is not None:
+            self.pats.bind_audit(audit)
+        if self.pat_service is not None:
+            self.pat_service.bind_audit(audit)
+
     @property
     def mode(self) -> "AuthMode":
         """``"oidc"``."""
@@ -555,7 +565,9 @@ class OidcAuthProvider(AuthProvider):
                         detail=_UNAUTHENTICATED,
                         headers={"WWW-Authenticate": "Bearer"},
                     )
-                return await self.pats.verify(header[len("Bearer "):])
+                principal = await self.pats.verify(header[len("Bearer "):])
+                bind_principal_context(principal)
+                return principal
             session = await self._session_for(request)
             if request.method not in _SAFE_METHODS:
                 token = request.headers.get(CSRF_HEADER, "")
@@ -563,14 +575,13 @@ class OidcAuthProvider(AuthProvider):
                     self.session_secret, session.id, token
                 ):
                     log.warning(
-                        "CSRF-Pruefung fehlgeschlagen fuer Session %s "
-                        "(%s %s).",
-                        session.id[:8],
+                        "CSRF-Pruefung fehlgeschlagen "
+                        "(session_ref=%s method=%s).",
+                        pseudonymous_log_reference("ses", session.id),
                         request.method,
-                        request.url.path,
                     )
                     raise HTTPException(status_code=403, detail=_CSRF_INVALID)
-            return Principal(
+            principal = Principal(
                 user_id=session.user_id,
                 kind="oidc_session",
                 tenant_id="default",
@@ -578,6 +589,10 @@ class OidcAuthProvider(AuthProvider):
                 email=session.email,
                 session_id=session.id,
             )
+            # Stamp the subject onto the log context (stable pseudonym,
+            # never the raw id); the request task owns the binding.
+            bind_principal_context(principal)
+            return principal
 
         return resolve_session_principal
 

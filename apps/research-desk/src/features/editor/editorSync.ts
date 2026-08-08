@@ -20,6 +20,7 @@ import {
   saveEditorComments,
   saveEditorDocument,
   saveEditorFolder,
+  type EditorPrivateSuggestionDraftWire,
   type ServerEditorComment,
   type ServerEditorDocument,
   type ServerEditorFolder,
@@ -33,6 +34,7 @@ import type {
   EditorDocumentSource,
   EditorEvidencePreset,
   EditorFolderRecord,
+  EditorPrivateSuggestionDraftRecord,
 } from '@/features/project/types'
 import { isoFromUnixSeconds, unixSecondsFromIso } from '@/lib/time'
 
@@ -65,12 +67,14 @@ export function documentRecordFromServer(
     id: document.id,
     metadataRevision: document.metadata_revision ?? 1,
     revision: document.revision,
+    serverSynced: true,
     source: normalizeSource(document.source),
     title: document.title,
     updatedAt: isoFromUnixSeconds(document.updated_at),
     ...(document.collaboration
       ? {
           collaboration: {
+            commentRevision: document.collaboration.comment_revision ?? 0,
             generation: document.collaboration.generation,
             persistedSequence: document.collaboration.persisted_sequence,
             projectionSequence: document.collaboration.projection_sequence,
@@ -121,8 +125,49 @@ export function commentRecordFromServer(
     kind: comment.kind as EditorCommentKind,
     status: comment.status as EditorCommentStatus,
     updatedAt: isoFromUnixSeconds(comment.updated_at),
+    ...(comment.suggestion_draft
+      ? {
+          suggestionDraft: privateSuggestionDraftRecordFromServer(
+            comment.suggestion_draft,
+          ),
+        }
+      : {}),
     ...(comment.evidence_preset
       ? { evidencePreset: comment.evidence_preset as EditorEvidencePreset }
+      : {}),
+  }
+}
+
+export function privateSuggestionDraftRecordFromServer(
+  draft: EditorPrivateSuggestionDraftWire,
+): EditorPrivateSuggestionDraftRecord {
+  return {
+    anchorVersion: draft.anchor_version,
+    changeSummary: [...draft.change_summary],
+    createdAt: isoFromUnixSeconds(draft.created_at),
+    groupId: draft.group_id,
+    patchId: draft.patch_id,
+    proposedText: draft.proposed_text,
+    publicationCommandId: draft.publication_command_id,
+    revision: draft.revision,
+    revisionHistory: draft.revision_history.map((revision) => ({
+      changeSummary: [...revision.change_summary],
+      createdAt: isoFromUnixSeconds(revision.created_at),
+      ...(revision.instruction ? { instruction: revision.instruction } : {}),
+      proposedText: revision.proposed_text,
+      source: revision.source,
+      warnings: [...revision.warnings],
+    })),
+    suggestionId: draft.suggestion_id,
+    updatedAt: isoFromUnixSeconds(draft.updated_at),
+    warnings: [...draft.warnings],
+    ...(draft.evidence
+      ? {
+          evidence: {
+            mode: draft.evidence.mode,
+            sources: draft.evidence.sources.map((source) => ({ ...source })),
+          },
+        }
       : {}),
   }
 }
@@ -208,6 +253,29 @@ export function stringChanged(previous: string | undefined, current: string): bo
   return previous !== current
 }
 
+export function editorEntitiesForServerImport(args: {
+  comments: Record<string, EditorCommentThreadRecord>
+  documents: Record<string, EditorDocumentRecord>
+}): {
+  comments: Record<string, EditorCommentThreadRecord>
+  documents: Record<string, EditorDocumentRecord>
+} {
+  const documents = Object.fromEntries(
+    Object.entries(args.documents).filter(([, document]) => (
+      document.access?.mode !== 'shared'
+      && document.recovery === undefined
+    )),
+  )
+  return {
+    comments: Object.fromEntries(
+      Object.entries(args.comments).filter(([, comment]) => (
+        documents[comment.documentId] !== undefined
+      )),
+    ),
+    documents,
+  }
+}
+
 // -- whole-project push (the explicit import) ------------------------------ #
 
 /** Push ALL of a local project's editor entities to the server (the
@@ -222,10 +290,11 @@ export async function pushAllEditorEntities(
   },
   options: ClientOptions,
 ): Promise<void> {
+  const importable = editorEntitiesForServerImport(args)
   for (const folder of Object.values(args.folders)) {
     await saveEditorFolder(folder.id, serverFolderPayload(folder), options)
   }
-  for (const document of Object.values(args.documents)) {
+  for (const document of Object.values(importable.documents)) {
     await saveEditorDocument(
       document.id,
       serverDocumentPayload(document),
@@ -233,7 +302,7 @@ export async function pushAllEditorEntities(
     )
   }
   const byDocument = new Map<string, EditorCommentThreadRecord[]>()
-  for (const comment of Object.values(args.comments)) {
+  for (const comment of Object.values(importable.comments)) {
     const bucket = byDocument.get(comment.documentId) ?? []
     bucket.push(comment)
     byDocument.set(comment.documentId, bucket)

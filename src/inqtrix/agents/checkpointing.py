@@ -23,8 +23,43 @@ from __future__ import annotations
 import logging
 import threading
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 log = logging.getLogger("inqtrix")
+
+_ASYNCPG_ONLY_QUERY_PARAMS = frozenset(
+    {
+        "prepared_statement_cache_size",
+        "statement_cache_size",
+    }
+)
+"""URL query parameters only the asyncpg dialect understands. libpq
+rejects unknown URI parameters outright ("invalid URI query parameter"),
+so they must not survive the scheme swap. The bundled pgbouncer URL
+appends ``prepared_statement_cache_size=0`` — asyncpg's transaction-
+pooling mitigation; the psycopg pool gets the equivalent through its
+``prepare_threshold=0`` connect kwarg instead."""
+
+
+def _psycopg_conninfo(database_url: str) -> str:
+    """Translate the app's SQLAlchemy/asyncpg URL into libpq conninfo.
+
+    Swaps the dialect scheme and drops asyncpg-only query parameters;
+    everything else (host, credentials, libpq parameters such as
+    ``sslmode``) passes through unchanged. Without the drop, the first
+    agent run on a pgbouncer-fronted deployment fails at pool open while
+    the Agent Desk stays visible — the gate never connects.
+    """
+    conninfo = database_url.replace("postgresql+asyncpg://", "postgresql://")
+    parts = urlsplit(conninfo)
+    if not parts.query:
+        return conninfo
+    kept = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key not in _ASYNCPG_ONLY_QUERY_PARAMS
+    ]
+    return urlunsplit(parts._replace(query=urlencode(kept)))
 
 
 class CheckpointerHandle:
@@ -60,11 +95,10 @@ class CheckpointerHandle:
             from psycopg_pool import ConnectionPool
 
             # langgraph's saver speaks psycopg (sync); the app's asyncpg
-            # URL prefix must be stripped. Own pool: the saver runs on
-            # worker threads, never on the HTTP loop.
-            conninfo = self._database_url.replace(
-                "postgresql+asyncpg://", "postgresql://"
-            )
+            # URL must be translated (scheme + asyncpg-only parameters).
+            # Own pool: the saver runs on worker threads, never on the
+            # HTTP loop.
+            conninfo = _psycopg_conninfo(self._database_url)
             self._pool = ConnectionPool(
                 conninfo,
                 min_size=0,
@@ -89,6 +123,17 @@ class CheckpointerHandle:
                 exc_info=True,
             )
 
+    def delete_thread_strict(self, thread_id: str) -> None:
+        """Delete one checkpoint lineage or raise so a durable saga can retry."""
+
+        saver = self.saver()
+        saver.delete_thread(thread_id)
+        remaining = saver.get_tuple(
+            {"configurable": {"thread_id": thread_id}}
+        )
+        if remaining is not None:
+            raise RuntimeError("checkpoint lineage remains after deletion")
+
     def close(self) -> None:
         """Dispose the pool; idempotent."""
         with self._lock:
@@ -109,6 +154,10 @@ def build_checkpointer_handle(settings: Any) -> CheckpointerHandle | None:
     ``features.workspace_agent: false``.
     """
     if not settings.agent_platform.enabled:
+        log.info(
+            "Workspace-Agent deaktiviert: INQTRIX_AGENT_ENABLED=false — "
+            "features.workspace_agent bleibt false."
+        )
         return None
     if settings.storage.backend == "postgres" and settings.storage.database_url.strip():
         try:
@@ -132,4 +181,12 @@ def build_checkpointer_handle(settings: Any) -> CheckpointerHandle | None:
             )
             return None
         return CheckpointerHandle(database_url=None)
+    log.warning(
+        "Workspace-Agent deaktiviert: kein durabler Checkpointer — "
+        "INQTRIX_STORAGE_BACKEND ist nicht 'postgres' (oder "
+        "INQTRIX_DATABASE_URL ist leer) und INQTRIX_AGENT_ALLOW_VOLATILE "
+        "ist false. Fuer den Agent Desk INQTRIX_STORAGE_BACKEND=postgres "
+        "setzen oder das volatile Opt-in aktivieren — "
+        "features.workspace_agent bleibt false."
+    )
     return None

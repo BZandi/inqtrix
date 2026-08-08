@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
+    CheckConstraint,
     Column,
     Float,
     Index,
@@ -33,9 +35,7 @@ quota_metadata = MetaData()
 quota_usage_counters = Table(
     "quota_usage_counters",
     quota_metadata,
-    Column(
-        "tenant_id", Text, nullable=False, server_default=text("'default'")
-    ),
+    Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
     Column("subject_user_id", UUID(as_uuid=True), nullable=False),
     Column("dimension", Text, nullable=False),
     Column("period_start", Float, nullable=False),
@@ -51,6 +51,64 @@ quota_usage_counters = Table(
     Index("ix_quota_usage_subject", "tenant_id", "subject_user_id"),
 )
 
+quota_usage_adjustments = Table(
+    "quota_usage_adjustments",
+    quota_metadata,
+    Column("adjustment_id", Text, primary_key=True),
+    Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
+    Column("subject_user_id", UUID(as_uuid=True), nullable=False),
+    Column("dimension", Text, nullable=False),
+    Column("period_start", Float, nullable=False),
+    Column("amount", BigInteger, nullable=False),
+    Column("created_at", Float, nullable=False),
+    CheckConstraint(
+        "adjustment_id NOT LIKE 'asset-upload:%:stored-bytes' AND "
+        "adjustment_id NOT LIKE 'asset-delete:%:stored-bytes'",
+        name="ck_quota_adjustments_no_file_stock",
+    ),
+    Index(
+        "ix_quota_usage_adjustments_subject",
+        "tenant_id",
+        "subject_user_id",
+        "created_at",
+    ),
+)
+"""Idempotency receipts for retryable usage adjustments.
+
+The counter mutation and receipt are committed together, so a worker crash can
+repeat an adjustment without double-booking or permanently missing it.
+"""
+
+quota_stock_lifecycles = Table(
+    "quota_stock_lifecycles",
+    quota_metadata,
+    Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
+    Column("stock_key", Text, nullable=False),
+    Column("subject_user_id", UUID(as_uuid=True), nullable=False),
+    Column("dimension", Text, nullable=False),
+    Column("amount", BigInteger, nullable=False, server_default=text("0")),
+    Column("tombstoned", Boolean, nullable=False, server_default=text("false")),
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+    PrimaryKeyConstraint(
+        "tenant_id",
+        "stock_key",
+        name="pk_quota_stock_lifecycles",
+    ),
+    CheckConstraint("amount >= 0", name="ck_quota_stock_lifecycles_amount"),
+    CheckConstraint(
+        "NOT tombstoned OR amount = 0",
+        name="ck_quota_stock_lifecycles_tombstone_zero",
+    ),
+    Index(
+        "ix_quota_stock_lifecycles_subject",
+        "tenant_id",
+        "subject_user_id",
+        "dimension",
+    ),
+)
+"""Resource-level truth behind order-independent stock counters."""
+
 quota_limits = Table(
     "quota_limits",
     quota_metadata,
@@ -60,9 +118,7 @@ quota_limits = Table(
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     ),
-    Column(
-        "tenant_id", Text, nullable=False, server_default=text("'default'")
-    ),
+    Column("tenant_id", Text, nullable=False, server_default=text("'default'")),
     Column("subject_user_id", UUID(as_uuid=True), nullable=True),
     Column("dimension", Text, nullable=False),
     Column("limit_value", BigInteger, nullable=False),

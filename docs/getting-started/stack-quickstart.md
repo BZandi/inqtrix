@@ -8,29 +8,48 @@ The fastest path to a running Research Desk with one command: `docker compose up
 
 ## Prerequisites
 
-- Docker (or Podman with the docker-compose v2 provider).
+- Docker with Compose v2.24 or newer (or Podman delegating to an equally
+  recent docker-compose). The stack file uses the `env_file` long form and
+  `depends_on` with `required: false`; older versions fail with a schema
+  error that does not name the real cause.
 - One LLM API key and one search API key (e.g. an OpenAI-compatible gateway + Perplexity). See [Provider recipes](provider-recipes.md) for every supported combination.
 
 ## 1. Configure
 
 ```bash
 cp deploy/.env.stack.example deploy/.env.stack
-# edit deploy/.env.stack
+cp deploy/.env.stack.secrets.example deploy/.env.stack.secrets
+chmod 0600 deploy/.env.stack.secrets
+# edit the visible configuration and the credential file
 ```
 
-Set the four secrets (`INQTRIX_PG_PASSWORD` — and the matching password in `INQTRIX_DATABASE_URL` — plus `INQTRIX_SESSION_SECRET` and `INQTRIX_PAT_PEPPER`), then fill **one** LLM block and **one** search block. The default is LiteLLM + Perplexity:
+Keep topology and provider selection in `deploy/.env.stack`. Its complete DSN
+remains directly editable and references the password instead of repeating it:
 
 ```dotenv
+INQTRIX_ENV_FILE=deploy/.env.stack
+INQTRIX_SECRETS_FILE=deploy/.env.stack.secrets
+INQTRIX_DATABASE_URL=postgresql+asyncpg://inqtrix:${INQTRIX_PG_PASSWORD}@postgres:5432/inqtrix
 INQTRIX_LLM_PROVIDER=litellm
 LITELLM_BASE_URL=http://litellm-proxy:4000/v1
-LITELLM_API_KEY=sk-...
 INQTRIX_SEARCH_PROVIDER=perplexity
-PERPLEXITY_API_KEY=pplx-...
 REASONING_MODEL=gpt-4o
 SEARCH_MODEL=perplexity-sonar-pro-agent
 ```
 
-To run Azure / Anthropic / Bedrock instead, copy the matching block from [Provider recipes](provider-recipes.md) — it is purely an `.env` change.
+Put only credentials in `deploy/.env.stack.secrets`:
+
+```dotenv
+INQTRIX_PG_PASSWORD=replace-with-url-safe-random-value
+INQTRIX_SESSION_SECRET=replace-with-independent-random-value
+INQTRIX_PAT_PEPPER=replace-with-another-independent-random-value
+LITELLM_API_KEY=sk-...
+PERPLEXITY_API_KEY=pplx-...
+```
+
+To run Azure, Anthropic, or Bedrock instead, change the same pair using
+[Provider recipes](provider-recipes.md). No script derives a URL or creates a
+third runtime file.
 
 The committed stack example also exposes the shared long-operation policy used
 by API and worker containers. Keep these values aligned unless you intentionally
@@ -51,30 +70,39 @@ The first four values budget one logical operation including every retry;
 retries do not receive another full timeout. The optional 900,000-token run
 quota stops at the next safe graph boundary and never shortens a stored answer.
 
-That minimum (secrets + one LLM + one search) gets you research + chat. The same `deploy/.env.stack` file has **commented blocks** for the optional pieces — uncomment the ones you want and run the matching profile in step 2:
+That minimum gets you research + chat. The config example has one canonical
+assignment location per key; corresponding credentials stay in the one secrets
+file. Edit an existing selector instead of appending it, uncomment optional
+fields only once, and run the matching profile in step 2:
 
-| Want | Uncomment in `deploy/.env.stack` | Run with |
+| Want | Change once in `deploy/.env.stack` | Run with |
 |---|---|---|
-| Cited answers over your documents (RAG) | `INQTRIX_KNOWLEDGE_ENABLED`, `INQTRIX_VECTOR_BACKEND=qdrant`, `INQTRIX_QDRANT_*` | `--profile knowledge` |
+| Cited answers over your documents (RAG) | `INQTRIX_KNOWLEDGE_ENABLED`, `INQTRIX_VECTOR_BACKEND=qdrant`, `INQTRIX_QDRANT_URL`; required `INQTRIX_QDRANT_API_KEY` in the paired secrets file | `--profile knowledge` |
 | Durable / scaled runs | `INQTRIX_QUEUE_BACKEND=valkey`, `INQTRIX_VALKEY_*` | `--profile workers` |
-| Bundled S3 object store (instead of the local volume) | the SeaweedFS static/path/create-if-missing block | `--profile s3` |
+| Optional transaction pooling for the bundled PostgreSQL service | Point the visible `INQTRIX_DATABASE_URL` at `pgbouncer:6432` with `?prepared_statement_cache_size=0`; migrations remain on direct PostgreSQL | `--profile pgbouncer` |
+| Bundled S3 object store (instead of the local volume) | replace the canonical object-store backend value with `s3`, then enable the one SeaweedFS static/path/create-if-missing field block | `--profile s3` |
 | Managed/native S3 | the default-chain or external S3-compatible block; do not start bundled SeaweedFS | no S3 profile |
-| SSO login | the OIDC block + `INQTRIX_AUTH_MODE=oidc` | `--profile oidc` |
+| Enterprise SSO with your IdP | the OIDC block + `INQTRIX_AUTH_MODE=oidc` | no profile |
+| Local OIDC validation with bundled Dex | the exact Dex block from [Auth modes](../deployment/auth-modes.md) | `--profile oidc` |
 | Live shared editor documents | `INQTRIX_COLLABORATION_ENABLED=true` + an independent 32+ character `INQTRIX_COLLABORATION_SECRET` | `--profile collaboration` |
+| Trace waterfalls in a self-hosted Langfuse (prompts, provider responses, step timings) | `INQTRIX_TRACING=otlp` + the `LANGFUSE_*` block and `OTEL_EXPORTER_OTLP_*` headers from [Settings and env](../configuration/settings-and-env.md); requires an S3 object store | `--profile observability` |
 
 Which feature needs which component (and which is on by default) is the matrix in [Platform components](platform-components.md); the full variable list is [Settings and env](../configuration/settings-and-env.md).
 
 ## 2. Start
 
-Always pass `--env-file deploy/.env.stack` — it supplies the values Compose needs while reading the file (Postgres password, ports). Compose does not auto-load a file named `.env.stack`.
+Always pass both files in this order: secrets first, visible configuration
+second. Compose does not auto-load either filename.
 
 ```bash
 docker compose -f deploy/compose/compose.stack.yaml \
-  --env-file deploy/.env.stack up -d --build
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack \
+  up -d --build
 ```
 
 This builds the API and web images, starts Postgres, runs the schema migration
-once through the automatic `migrate` dependency, then starts the API and nginx
+once through the automatic `migrate` dependency, then starts the API and Python
 web container. A normal install/update never requires a separate manual
 `inqtrix-migrate` command. Managed PostgreSQL can place its dedicated direct DSN
 in the optional migration-only env file; see [Database migrations](../deployment/database-migrations.md).
@@ -82,12 +110,16 @@ First build pulls images and installs dependencies, so it takes a few minutes;
 subsequent starts are fast.
 
 ```bash
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack ps   # wait for healthy
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack ps
 ```
 
 ## 3. Open
 
-Open <http://localhost:8080>. The browser talks to a single origin; nginx proxies `/api`, `/v1`, `/health`, and the optional `/collaboration` WebSocket to the API container. Type a question into the composer - the research run streams live.
+Open <http://localhost:8080>. The browser talks to a single origin; the Python
+web gateway proxies `/api`, `/v1`, `/health`, and the optional
+`/collaboration` WebSocket to the API container. Type a question into the
+composer—the research run streams live.
 
 The web port binds to `127.0.0.1` by default. For a temporary multi-user test
 on a trusted local network, expose only the web ingress and open it through the
@@ -96,15 +128,19 @@ host's LAN address:
 ```bash
 INQTRIX_WEB_BIND_ADDRESS=0.0.0.0 \
 podman compose -f deploy/compose/compose.stack.yaml \
-  --env-file deploy/.env.azure.stack \
-  --profile knowledge --profile s3 --profile workers up -d --build
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack \
+  --profile knowledge --profile s3 --profile workers \
+  --profile collaboration \
+  up -d --build
 
 # On another device: http://<HOST-LAN-IP>:8080
 ```
 
 You can instead put `INQTRIX_WEB_BIND_ADDRESS=0.0.0.0` in the selected stack
 env file so the original command stays unchanged. Keep `api`, Postgres,
-Qdrant, Valkey, and the object store private; Compose publishes only nginx.
+Qdrant, Valkey, and the object store private; Compose publishes only the
+Python web service.
 Use `local`, `ldap`, or `oidc` auth for distinct users. Plain HTTP requires
 `INQTRIX_OIDC_INSECURE_DEV_COOKIES=true` for the cookie-session modes and is
 appropriate only on a trusted test LAN. For any broader or persistent rollout,
@@ -130,22 +166,32 @@ The Stack-mode compose ships with **native accounts** as the default (`INQTRIX_A
 Three other modes cover different environments — all in [Auth modes](../deployment/auth-modes.md):
 
 - **`ldap`** — bind against your existing LDAP/Active Directory directory; see [Connect to an existing LDAP](../how-to/connect-to-existing-ldap.md).
-- **`oidc`** — enterprise SSO via your own IdP (`--profile oidc`; needs the `INQTRIX_OIDC_*` block and `INQTRIX_PUBLIC_BASE_URL` so the callback URL is derived correctly).
+- **`oidc`** — enterprise SSO via your own IdP; configure the
+  `INQTRIX_OIDC_*` block and `INQTRIX_PUBLIC_BASE_URL` without a Compose
+  profile. Use `--profile oidc` only for the bundled Dex development
+  reference.
 - **`apikey`** / **`none`** — a shared Bearer token, or an open single-operator server with no login.
 
 For remote exposure, terminate TLS in front (see [Security hardening](../deployment/security-hardening.md)).
 
 ## Turn on more
 
-The default stack is Postgres + API + web. Add capabilities with compose profiles + the matching env (uncomment the blocks in `deploy/.env.stack`):
+The default stack is Postgres + API + web. Add bundled capability components
+with Compose profiles plus matching configuration. In `deploy/.env.stack`,
+replace canonical selector values and uncomment each optional field at most
+once; never append a second assignment for an existing key. Managed/external
+backends use configuration only and do not start the corresponding bundled
+profile:
 
 ```bash
 # Knowledge/RAG (Qdrant) and/or durable run workers (Valkey):
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack \
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack \
   --profile knowledge --profile workers up -d
 
 # Live editor collaboration (private single Node replica):
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.stack \
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets --env-file deploy/.env.stack \
   --profile collaboration up -d --build
 ```
 
@@ -159,33 +205,75 @@ follow the "External PostgreSQL" block in `deploy/.env.stack.example`:
 ```bash
 docker compose -f deploy/compose/compose.stack.yaml \
   -f deploy/compose/compose.external-db.yaml \
-  --env-file deploy/.env.stack up -d --build
+  --env-file deploy/.env.stack.secrets \
+  --env-file deploy/.env.stack \
+  up -d --build
 ```
 
 The migration contract (dedicated migration DSN, RLS mode) is described in
 [Database migrations](../deployment/database-migrations.md).
 
-Profiles and env switches must move together: the profile starts the backing
-container, while the env block tells the API to use it. If an env block such as
-`INQTRIX_VECTOR_BACKEND=qdrant`, `INQTRIX_QUEUE_BACKEND=valkey`, or
-`INQTRIX_OBJECT_STORE_BACKEND=s3` is enabled without the matching profile or an
-external reachable service, `/v1/capabilities` degrades the affected feature and
-the admin System page marks the backend as not reachable.
+Profiles and their bundled-service configuration must move together: the
+profile starts the backing container, while the env block tells the API to use
+that exact in-stack endpoint. The optional `inqtrix-deploy` preflight rejects
+either half of a mismatched bundled topology before Compose runs. Raw Compose
+remains transparent and does not add that guard; an unreachable configured
+backend then appears as degraded in `/v1/capabilities` and the admin System
+page.
 
-Collaboration is stricter: enabling its API flag without Postgres, cookie auth,
-private service URLs, or a valid independent secret fails FastAPI startup. The
-profile without the flag merely starts an unused private service. See
+Collaboration additionally requires Postgres, cookie auth, private service
+URLs, and an independent secret. The deployment CLI rejects
+`INQTRIX_COLLABORATION_ENABLED=true` without `--profile collaboration` and
+also rejects the profile without the flag. See
 [Deploy editor collaboration](../deployment/editor-collaboration.md).
 
-Enterprise SSO is the `oidc` profile (`--profile oidc`, `INQTRIX_AUTH_MODE=oidc`); it needs the `INQTRIX_OIDC_*` block in `deploy/.env.stack` and `INQTRIX_PUBLIC_BASE_URL=http://localhost:8080` so the callback URL is derived correctly. See [Auth modes](../deployment/auth-modes.md).
+Enterprise OIDC and LDAP providers are external endpoints and need no Compose
+profile. The `oidc` and `ldap` profiles are only bundled Dex/LLDAP development
+references with exact local topology contracts. See
+[Auth modes](../deployment/auth-modes.md).
 
-## Different setups, one command
+## Different setups, the same explicit contract
 
-Keep a separate env file per setup (e.g. `deploy/.env.azure.stack`). Two things read it: `--env-file` (for `${...}` interpolation) and the services' own `env_file:` (the app's runtime variables, whose path follows `INQTRIX_ENV_FILE`, default `deploy/.env.stack`). Point both at your file by adding one line inside it, then passing `--env-file`:
+Keep one visible config and one runtime-secret file per setup:
+
+```text
+deploy/.env.stack.azure
+deploy/.env.stack.secrets.azure
+deploy/.env.stack.aws
+deploy/.env.stack.secrets.aws
+deploy/.env.stack.anthropic
+deploy/.env.stack.secrets.anthropic
+```
+
+Each named config declares its own root-relative pointers:
+
+```dotenv
+INQTRIX_ENV_FILE=deploy/.env.stack.azure
+INQTRIX_SECRETS_FILE=deploy/.env.stack.secrets.azure
+```
+
+Edit or replace existing assignments in the copied templates; never append a
+second assignment for the same key. This applies to provider, authentication,
+secret, and file-pointer keys alike. The deployment preflight rejects duplicate
+keys instead of guessing which value should win.
+
+Then pass that exact pair explicitly:
 
 ```bash
-# inside deploy/.env.azure.stack, add this line:  INQTRIX_ENV_FILE=deploy/.env.azure.stack
-docker compose -f deploy/compose/compose.stack.yaml --env-file deploy/.env.azure.stack up -d
+docker compose -f deploy/compose/compose.stack.yaml \
+  --env-file deploy/.env.stack.secrets.azure \
+  --env-file deploy/.env.stack.azure \
+  up -d
+```
+
+The optional CLI produces the same Compose argv without maintaining another
+configuration:
+
+```bash
+inqtrix-deploy \
+  --secrets-file deploy/.env.stack.secrets.azure \
+  --env-file deploy/.env.stack.azure \
+  up --detach
 ```
 
 ## Next steps

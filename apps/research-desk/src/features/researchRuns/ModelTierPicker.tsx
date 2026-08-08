@@ -28,6 +28,7 @@ import type {
   NodeModelResolution,
 } from './types'
 import {
+  catalogSelectionKind,
   modelDetailLabel,
   modelEffortLabel,
   modelNameLabel,
@@ -98,6 +99,11 @@ export function ModelTierPicker({
         pickerTitle={title}
         selectedEffort={selectedEffort}
         selectedModel={selectedModel}
+        // Without this the catalog branch cannot tell "no preference" from
+        // "a tier the account preference selected": both have a null model,
+        // and the picker would claim the server default while the request
+        // actually carries the tier.
+        selectedTier={selectedTier}
         serverDefaultDescription={defaultDescription}
         serverDefaultLabel={defaultLabel}
         triggerPrefix={triggerPrefix}
@@ -201,6 +207,7 @@ function CatalogPicker({
   onModelChange,
   selectedEffort,
   selectedModel,
+  selectedTier,
   pickerTitle,
   serverDefaultDescription,
   serverDefaultLabel,
@@ -213,6 +220,7 @@ function CatalogPicker({
   onModelChange: (model: string | null) => void
   selectedEffort: string | null
   selectedModel: string | null
+  selectedTier: ChatModelTier | null
   pickerTitle: string
   serverDefaultDescription: string
   serverDefaultLabel: string
@@ -222,8 +230,15 @@ function CatalogPicker({
   const { t } = useLocale()
   const selectedEntry = catalog.find((entry) => entry.model_id === selectedModel) ?? null
   const selectedCard = selectedEntry?.card ?? null
+  // A tier without an explicit model is the account preference at work. It
+  // must be named, not shown as the server default: the request carries the
+  // tier, so claiming otherwise would make a live setting invisible.
+  const preferenceTier
+    = catalogSelectionKind(selectedModel, selectedTier) === 'tier' ? selectedTier : null
   const baseTriggerLabel = selectedModel == null
-    ? serverDefaultLabel
+    ? preferenceTier
+      ? modelTierLabel(preferenceTier, t.chat)
+      : serverDefaultLabel
     : selectedCard?.display_name ?? selectedModel
   // Surface the picked reasoning level at the composer so it can be verified
   // without re-opening the picker (only when an explicit effort is set).
@@ -258,10 +273,18 @@ function CatalogPicker({
         <div className="max-h-80 overflow-x-hidden overflow-y-auto py-1">
           <ModelMenuRow
             active={selectedModel == null}
-            description={serverDefaultDescription}
-            detail={serverDefaultDescription}
+            description={
+              preferenceTier ? t.chat.modelTierFromPreference : serverDefaultDescription
+            }
+            detail={
+              preferenceTier ? t.chat.modelTierFromPreference : serverDefaultDescription
+            }
             icon="server"
-            label={serverDefaultLabel}
+            label={
+              preferenceTier
+                ? `${serverDefaultLabel} · ${modelTierLabel(preferenceTier, t.chat)}`
+                : serverDefaultLabel
+            }
             onSelect={() => onModelChange(null)}
           />
           <DropdownMenuSeparator className="mx-0 my-1" />

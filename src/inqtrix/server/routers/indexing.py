@@ -1,8 +1,8 @@
-"""Background reindex-job endpoints (``/v1/knowledge/...reindex`` + jobs).
+"""Background knowledge-indexing endpoints and event streams.
 
 Registered alongside the knowledge surface (only when the knowledge
-engine is enabled). Submission resolves and edit-checks the target
-collection, gates the embedding-token quota, and queues a job on the
+engine is enabled). Collection-generation submission resolves and edit-checks
+the target collection, gates embedding-token quota, and queues work on the
 :class:`~inqtrix.server.indexing.IndexingJobStore`. Job authorization follows
 the parent collection: viewers may inspect its jobs and editors may cancel
 them, independent of which authorized user originally submitted the job.
@@ -23,13 +23,14 @@ from inqtrix.auth.principal import (
     UserContext,
     resolve_live_principal,
 )
-from inqtrix.knowledge.stores.ports import CollectionNotFound
+from inqtrix.knowledge.stores.ports import CollectionNotFound, KnowledgeError
 from inqtrix.quota.models import QuotaDimension
 from inqtrix.server.indexing import (
     TERMINAL_INDEXING_EVENTS,
     IndexingJobConflict,
     IndexingJobNotFound,
     IndexingQueueFull,
+    IndexingResumeUnavailable,
     format_sse_event,
 )
 from inqtrix.server.routers import quota_admission
@@ -44,7 +45,7 @@ if TYPE_CHECKING:
 
 
 def build_router(container: "AppContainer") -> APIRouter:
-    """Bind the reindex-job routes against the container.
+    """Bind the indexing-operation routes against the container.
 
     Raises:
         RuntimeError: When called without a wired indexing service —
@@ -128,7 +129,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 visible_to,
                 minimum=SharePermission.EDIT,
             )
-            summary = indexing_service.submit(
+            summary = await asyncio.to_thread(
+                indexing_service.submit,
                 collection=collection,
                 index_id=index_id,
                 workspace_id=workspace_id,
@@ -158,7 +160,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        """List visible reindex jobs (active and recent), newest first.
+        """List visible indexing operations, newest first.
 
         Optional ``?collection_id=`` narrows to one collection's history
         (the inline "last N" view); the resume path lists all active
@@ -169,6 +171,16 @@ def build_router(container: "AppContainer") -> APIRouter:
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         collection_id = req.query_params.get("collection_id") or None
+        operation_kind = (
+            req.query_params.get("operation_kind") or "collection_generation"
+        )
+        if operation_kind not in {
+            "collection_generation",
+            "document_revision",
+        }:
+            return error_response(
+                400, "Unbekannte Indexoperation", "invalid_request_error"
+            )
         visible_collections = await knowledge_service.list_collections(
             visible_to=visible_to,
         )
@@ -185,6 +197,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 job
                 for job in jobs
                 if job.get("collection_id") in visible_collection_ids
+                and job.get("operation_kind") == operation_kind
             ],
         }
 
@@ -195,7 +208,7 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        """Return the current public summary for one reindex job."""
+        """Return the current public summary for one indexing operation."""
         try:
             workspace_id_from_request(req)
             return await _authorized_job(
@@ -214,7 +227,43 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        """Request cancellation for a queued or running reindex job."""
+        """Request cancellation for a queued or running indexing operation."""
+        try:
+            workspace_id_from_request(req)
+            await _authorized_job(
+                job_id,
+                visible_to=visible_to,
+                require_edit=True,
+            )
+            summary = await asyncio.to_thread(
+                job_store.cancel,
+                job_id,
+                actor_user_id=principal.user_id,
+            )
+            if (
+                summary.get("status") == "cancelled"
+                and summary.get("operation_kind") == "collection_generation"
+                and summary.get("generation_id")
+            ):
+                await knowledge_service.discard_generation(
+                    collection_id=str(summary["collection_id"]),
+                    generation_id=str(summary["generation_id"]),
+                    actor_user_id=principal.user_id,
+                )
+            return summary
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        except IndexingJobNotFound:
+            return error_response(404, "Indizierung nicht gefunden", "not_found")
+
+    @router.post("/v1/knowledge/indexing-jobs/{job_id}/resume")
+    async def resume_job(
+        job_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        """Resume a dependency/validation-paused indexing job."""
         try:
             workspace_id_from_request(req)
             await _authorized_job(
@@ -223,14 +272,58 @@ def build_router(container: "AppContainer") -> APIRouter:
                 require_edit=True,
             )
             return await asyncio.to_thread(
-                job_store.cancel,
+                indexing_service.resume,
                 job_id,
-                actor_user_id=principal.user_id,
+                principal=principal,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         except IndexingJobNotFound:
             return error_response(404, "Indizierung nicht gefunden", "not_found")
+        except IndexingResumeUnavailable as exc:
+            return error_response(409, str(exc), "resume_unavailable")
+        except IndexingJobConflict as exc:
+            return error_response(409, str(exc), "reindex_in_progress")
+
+    @router.post("/v1/knowledge/indexing-jobs/{job_id}/resume-raw")
+    async def resume_job_without_context(
+        job_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        """Explicitly rebuild a paused shadow generation without context."""
+        try:
+            workspace_id_from_request(req)
+            summary = await _authorized_job(
+                job_id,
+                visible_to=visible_to,
+                require_edit=True,
+            )
+            if summary.get("status") not in {
+                "paused_dependency",
+                "paused_validation",
+            }:
+                return error_response(
+                    409,
+                    "Nur eine pausierte Indizierung kann ohne "
+                    "Kontextanreicherung neu aufgebaut werden.",
+                    "raw_rebuild_unavailable",
+                )
+            return await asyncio.to_thread(
+                indexing_service.resume,
+                job_id,
+                principal=principal,
+                raw_by_user_choice=True,
+            )
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        except IndexingJobNotFound:
+            return error_response(404, "Indizierung nicht gefunden", "not_found")
+        except IndexingResumeUnavailable as exc:
+            return error_response(409, str(exc), "resume_unavailable")
+        except (IndexingJobConflict, KnowledgeError) as exc:
+            return error_response(409, str(exc), "raw_rebuild_unavailable")
 
     @router.get("/v1/knowledge/indexing-jobs/{job_id}/events")
     async def job_events(
@@ -239,16 +332,47 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        """Stream buffered and live reindex-job events as SSE."""
+        """Resume after ``Last-Event-ID`` and stream live job events."""
+        raw_cursor = (req.headers.get("last-event-id") or "0").strip()
+        try:
+            after_sequence = int(raw_cursor)
+        except ValueError:
+            return error_response(
+                400,
+                "Ungueltiger Ereignis-Cursor",
+                "invalid_request_error",
+            )
+        if after_sequence < 0:
+            return error_response(
+                400,
+                "Ungueltiger Ereignis-Cursor",
+                "invalid_request_error",
+            )
         try:
             workspace_id_from_request(req)
-            await _authorized_job(
+            authorized_summary = await _authorized_job(
                 job_id,
                 visible_to=visible_to,
+            )
+            terminal_already_seen = (
+                str(authorized_summary.get("status"))
+                in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "paused_dependency",
+                    "paused_validation",
+                    "superseded",
+                    "ready_raw_by_user_choice",
+                    "expired",
+                }
+                and after_sequence
+                >= int(authorized_summary.get("last_event_sequence") or 0)
             )
             subscription = await asyncio.to_thread(
                 job_store.subscribe,
                 job_id,
+                after_sequence=after_sequence,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
@@ -282,6 +406,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 return True
 
             try:
+                if terminal_already_seen:
+                    return
                 terminal_replayed = False
                 for event in subscription.replay:
                     if not await _authorized_frame():

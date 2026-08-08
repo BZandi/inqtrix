@@ -44,7 +44,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSON, UUID
+from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID
 
 editor_metadata = MetaData()
 
@@ -124,6 +124,12 @@ editor_documents = Table(
         server_default=text("0"),
     ),
     Column("projection_updated_at", Float, nullable=True),
+    Column(
+        "collaboration_comment_revision",
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    ),
     Column("deleted_at", Float, nullable=True),
     Column("diff_anchor_markdown", Text, nullable=True),
     Column("diff_anchor_updated_at", Float, nullable=True),
@@ -136,6 +142,10 @@ editor_documents = Table(
     CheckConstraint(
         "projection_sequence <= persisted_sequence",
         name="ck_editor_documents_projection_sequence",
+    ),
+    CheckConstraint(
+        "collaboration_comment_revision >= 0",
+        name="ck_editor_documents_comment_revision",
     ),
     CheckConstraint(
         "(content_mode = 'markdown' AND collaboration_generation = 0 "
@@ -185,9 +195,24 @@ editor_comments = Table(
     Column("kind", Text, nullable=False),
     Column("status", Text, nullable=False, server_default=text("'open'")),
     Column("evidence_preset", Text, nullable=True),
+    # Creator-private, unpublished AI work. Ordinary comment autosave never
+    # writes this column; the revision-guarded nested resource owns it.
+    Column("suggestion_draft", JSONB, nullable=True),
     Column("created_at", Float, nullable=False),
     Column("updated_at", Float, nullable=False),
+    CheckConstraint(
+        "suggestion_draft IS NULL OR "
+        "jsonb_typeof(suggestion_draft) = 'object'",
+        name="ck_editor_comments_suggestion_draft_object",
+    ),
     Index("ix_editor_comments_document_created", "document_id", "created_at", "id"),
+    Index(
+        "ux_editor_comments_private_draft_patch",
+        "tenant_id",
+        text("(suggestion_draft ->> 'patch_id')"),
+        unique=True,
+        postgresql_where=text("suggestion_draft IS NOT NULL"),
+    ),
 )
 """One anchored comment on a document. Unlike chat messages, comments are
 independently mutated (resolve / edit / re-tag), so ``updated_at`` is the

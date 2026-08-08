@@ -3,6 +3,7 @@ import { EditorState } from '@tiptap/pm/state'
 import { initProseMirrorDoc, updateYFragment } from '@tiptap/y-tiptap'
 import {
   EDITOR_YJS_FRAGMENT,
+  INQTRIX_STRUCTURE_COMMAND_META,
   createEditorSchemaExtensions,
   editorCollaborationRoom,
   editorJsonToYDoc,
@@ -17,7 +18,13 @@ import * as Y from 'yjs'
 
 import type { ConnectionContext } from '../src/contracts'
 import { DocumentCoordinator } from '../src/documentCoordinator'
-import { hashBytes, reconstructDocument } from '../src/documentState'
+import { ApiRequestError, CloseCodes } from '../src/errors'
+import * as documentStateModule from '../src/documentState'
+import {
+  hashBytes,
+  reconstructDocument,
+  validateDocument,
+} from '../src/documentState'
 import { InstanceLeaseManager } from '../src/instanceLease'
 import { SidecarMetrics } from '../src/metrics'
 import {
@@ -36,6 +43,83 @@ const SUGGESTION_ID = '33333333-3333-4333-8333-333333333333'
 const EXISTING_PATCH_ID = '55555555-5555-4555-8555-555555555555'
 const EXISTING_SUGGESTION_ID = '66666666-6666-4666-8666-666666666666'
 const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
+
+describe('document coordinator latency instrumentation', () => {
+  it('records how long an update waited for the room gate', async () => {
+    // The serial room gate is what turns five near-simultaneous writers
+    // into a queue, so it is the number that explains the p95. Only the
+    // queue DEPTH gauge existed, which says how many are waiting but
+    // never how long any of them waited.
+    const fixture = await coordinatorFixture()
+    const document = editorJsonToYDoc(parseEditorMarkdown('Hello'))
+    const update = updateFor(document, 'Hello!')
+
+    await fixture.coordinator.prepareClientUpdate({
+      allowNoop: false,
+      connectionId: 'connection-1',
+      context: fixture.context,
+      document,
+      room: ROOM,
+      update,
+    })
+    Y.applyUpdate(document, update)
+    fixture.coordinator.finishClientUpdate('connection-1', document)
+
+    const rendered = fixture.metrics.render()
+    expect(rendered).toContain('inqtrix_collaboration_gate_wait_seconds_count 1')
+    document.destroy()
+    await fixture.close()
+  })
+
+  it('measures the acknowledged latency from gate entry, not from after persistence', async () => {
+    // `durable_ack_seconds` starts its clock once persistence already
+    // returned, so it reports only apply+verify. A user waits for the
+    // whole chain; a metric that hides the expensive part of it cannot
+    // show an improvement or a regression in that part.
+    const fixture = await coordinatorFixture()
+    const document = editorJsonToYDoc(parseEditorMarkdown('Hello'))
+    const update = updateFor(document, 'Hello!')
+    const persistence = deferred<{ duplicate: boolean; persistedSequence: number; sequence: number }>()
+    fixture.api.persistImplementation = () => persistence.promise
+
+    const preparing = fixture.coordinator.prepareClientUpdate({
+      allowNoop: false,
+      connectionId: 'connection-1',
+      context: fixture.context,
+      document,
+      room: ROOM,
+      update,
+    })
+    await vi.waitFor(() => expect(fixture.api.persisted).toHaveLength(1))
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    persistence.resolve({ duplicate: false, persistedSequence: 1, sequence: 1 })
+    await preparing
+    Y.applyUpdate(document, update)
+    fixture.coordinator.finishClientUpdate('connection-1', document)
+
+    const rendered = fixture.metrics.render()
+    const totalSum = Number(
+      rendered
+        .split('\n')
+        .find((line) => line.startsWith('inqtrix_collaboration_update_total_seconds_sum'))
+        ?.split(' ')
+        .at(-1),
+    )
+    const ackSum = Number(
+      rendered
+        .split('\n')
+        .find((line) => line.startsWith('inqtrix_collaboration_durable_ack_seconds_sum'))
+        ?.split(' ')
+        .at(-1),
+    )
+    // The deliberate 30ms persistence stall must land inside the
+    // end-to-end measurement and outside the old one.
+    expect(totalSum).toBeGreaterThan(0.02)
+    expect(totalSum).toBeGreaterThan(ackSum)
+    document.destroy()
+    await fixture.close()
+  })
+})
 
 describe('document coordinator', () => {
   it('persists an update before the authoritative document is applied and acknowledged', async () => {
@@ -129,6 +213,113 @@ describe('document coordinator', () => {
     await fixture.close()
   })
 
+  it('fully validates only the candidate after authoritative state is established', async () => {
+    const validation = vi.spyOn(documentStateModule, 'validateDocument')
+    const fixture = await coordinatorFixture()
+    const document = editorJsonToYDoc(parseEditorMarkdown('A'))
+    try {
+      const first = updateFor(document, 'AB')
+      await expect(fixture.coordinator.prepareClientUpdate({
+        allowNoop: false,
+        connectionId: 'cache-first',
+        context: fixture.context,
+        document,
+        room: ROOM,
+        update: first,
+      })).resolves.toBe('pending')
+      Y.applyUpdate(document, first)
+      expect(fixture.coordinator.finishClientUpdate('cache-first', document)).toMatchObject({
+        sequence: 1,
+        type: 'durable_ack',
+      })
+
+      validation.mockClear()
+      const second = updateFor(document, 'ABC')
+      await expect(fixture.coordinator.prepareClientUpdate({
+        allowNoop: false,
+        connectionId: 'cache-second',
+        context: fixture.context,
+        document,
+        room: ROOM,
+        update: second,
+      })).resolves.toBe('pending')
+      Y.applyUpdate(document, second)
+      expect(fixture.coordinator.finishClientUpdate('cache-second', document)).toMatchObject({
+        sequence: 2,
+        type: 'durable_ack',
+      })
+      expect(validation).toHaveBeenCalledTimes(1)
+    } finally {
+      validation.mockRestore()
+      fixture.coordinator.abortClientUpdate('cache-first')
+      fixture.coordinator.abortClientUpdate('cache-second')
+      document.destroy()
+      await fixture.close()
+    }
+  })
+
+  it('requires reconstruction when authoritative content changes without its sequence', async () => {
+    const fixture = await coordinatorFixture()
+    const document = editorJsonToYDoc(parseEditorMarkdown('A'))
+    try {
+      const first = updateFor(document, 'AB')
+      await expect(fixture.coordinator.prepareClientUpdate({
+        allowNoop: false,
+        connectionId: 'authoritative-first',
+        context: fixture.context,
+        document,
+        room: ROOM,
+        update: first,
+      })).resolves.toBe('pending')
+      Y.applyUpdate(document, first)
+      fixture.coordinator.finishClientUpdate('authoritative-first', document)
+
+      Y.applyUpdate(document, updateFor(document, 'Out of band'))
+      await expect(fixture.coordinator.prepareClientUpdate({
+        allowNoop: false,
+        connectionId: 'authoritative-stale',
+        context: fixture.context,
+        document,
+        room: ROOM,
+        update: updateFor(document, 'Out of band!'),
+      })).rejects.toThrowError('internal_consistency')
+      expect(fixture.api.persisted).toHaveLength(1)
+      expect(fixture.coordinator.requiresReconstruction(ROOM)).toBe(true)
+    } finally {
+      fixture.coordinator.abortClientUpdate('authoritative-first')
+      fixture.coordinator.abortClientUpdate('authoritative-stale')
+      document.destroy()
+      await fixture.close()
+    }
+  })
+
+  it('rejects an initialized validation that does not match the authoritative document', async () => {
+    const expected = editorJsonToYDoc(parseEditorMarkdown('Expected'))
+    const document = editorJsonToYDoc(parseEditorMarkdown('Different'))
+    const fixture = await coordinatorFixture(
+      0,
+      {},
+      validateDocument(expected, settings().documentLimitBytes),
+    )
+    try {
+      await expect(fixture.coordinator.prepareClientUpdate({
+        allowNoop: false,
+        connectionId: 'initialized-mismatch',
+        context: fixture.context,
+        document,
+        room: ROOM,
+        update: updateFor(document, 'Different!'),
+      })).rejects.toThrowError('internal_consistency')
+      expect(fixture.api.persisted).toHaveLength(0)
+      expect(fixture.coordinator.requiresReconstruction(ROOM)).toBe(true)
+    } finally {
+      fixture.coordinator.abortClientUpdate('initialized-mismatch')
+      document.destroy()
+      expected.destroy()
+      await fixture.close()
+    }
+  })
+
   it('releases a persisted pending update when disconnect forces an authoritative reload', async () => {
     const fixture = await coordinatorFixture()
     const document = editorJsonToYDoc(parseEditorMarkdown('Hello'))
@@ -191,6 +382,73 @@ describe('document coordinator', () => {
     await fixture.close()
   })
 
+  it('classifies updates waiting behind a disconnected commit as restarting', async () => {
+    const fixture = await coordinatorFixture()
+    const document = editorJsonToYDoc(parseEditorMarkdown('Hello'))
+    const persistence = deferred<{
+      duplicate: boolean
+      persistedSequence: number
+      sequence: number
+    }>()
+    fixture.api.persistImplementation = () => persistence.promise
+
+    try {
+      const initiating = fixture.coordinator.prepareClientUpdate({
+        allowNoop: false,
+        connectionId: 'disconnecting-writer',
+        context: fixture.context,
+        document,
+        room: ROOM,
+        update: updateFor(document, 'Hello from writer 1'),
+      })
+      await vi.waitFor(() => expect(fixture.api.persisted).toHaveLength(1))
+
+      const waiting = [2, 3, 4, 5].map((writer) => (
+        fixture.coordinator.prepareClientUpdate({
+          allowNoop: false,
+          connectionId: `waiting-writer-${writer}`,
+          context: fixture.context,
+          document,
+          room: ROOM,
+          update: updateFor(document, `Hello from writer ${writer}`),
+        })
+      ))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(fixture.api.persisted).toHaveLength(1)
+
+      expect(fixture.coordinator.abortClientUpdate('disconnecting-writer')).toBe(ROOM)
+      expect(fixture.coordinator.abortClientUpdate('disconnecting-writer')).toBeNull()
+      persistence.resolve({ duplicate: false, persistedSequence: 1, sequence: 1 })
+
+      const [initiatingOutcome, ...waitingOutcomes] = await Promise.allSettled([
+        initiating,
+        ...waiting,
+      ])
+      expect(initiatingOutcome).toMatchObject({
+        reason: {
+          code: CloseCodes.leaseInvalid,
+          reason: 'invalid_lease',
+        },
+        status: 'rejected',
+      })
+      for (const outcome of waitingOutcomes) {
+        expect(outcome).toMatchObject({
+          reason: {
+            code: CloseCodes.restarting,
+            reason: 'restarting',
+          },
+          status: 'rejected',
+        })
+      }
+      expect(fixture.api.persisted).toHaveLength(1)
+      expect(fixture.coordinator.requiresReconstruction(ROOM)).toBe(true)
+      expect(() => fixture.coordinator.assertJoinAllowed(ROOM)).toThrowError('restarting')
+    } finally {
+      document.destroy()
+      await fixture.close()
+    }
+  })
+
   it('prohibits snapshots and fast joins until a disconnected commit is reconstructed', async () => {
     const fixture = await coordinatorFixture(0, { snapshotMaxUpdates: 1 })
     const document = editorJsonToYDoc(parseEditorMarkdown('Hello'))
@@ -238,6 +496,104 @@ describe('document coordinator', () => {
     expect(fixture.coordinator.shouldSnapshot(ROOM)).toBe(true)
 
     reconstructed.destroy()
+    document.destroy()
+    await fixture.close()
+  })
+
+  it('keeps the room usable when the API rejects an update deterministically', async () => {
+    const fixture = await coordinatorFixture()
+    const document = editorJsonToYDoc(parseEditorMarkdown('Hello'))
+    const update = updateFor(document, 'Hello!')
+    fixture.api.persistImplementation = async () => {
+      throw new ApiRequestError(401, 'invalid_lease')
+    }
+
+    await expect(fixture.coordinator.prepareClientUpdate({
+      allowNoop: false,
+      connectionId: 'rejected',
+      context: fixture.context,
+      document,
+      room: ROOM,
+      update,
+    })).rejects.toThrowError('invalid_lease')
+
+    // A 4xx is a decision, not an outage: the transaction rolled back, so the
+    // room still matches the store. Tearing it down here would discard state
+    // that every other participant in the room is already showing.
+    expect(fixture.coordinator.requiresReconstruction(ROOM)).toBe(false)
+    expect(() => fixture.coordinator.assertJoinAllowed(ROOM)).not.toThrow()
+
+    document.destroy()
+    await fixture.close()
+  })
+
+  it('still requires reload when persistence fails with an unknown outcome', async () => {
+    const fixture = await coordinatorFixture()
+    const document = editorJsonToYDoc(parseEditorMarkdown('Hello'))
+    const update = updateFor(document, 'Hello!')
+    fixture.api.persistImplementation = async () => {
+      throw new ApiRequestError(503, 'service_unavailable')
+    }
+
+    await expect(fixture.coordinator.prepareClientUpdate({
+      allowNoop: false,
+      connectionId: 'unknown-outcome',
+      context: fixture.context,
+      document,
+      room: ROOM,
+      update,
+    })).rejects.toThrowError()
+
+    expect(fixture.coordinator.requiresReconstruction(ROOM)).toBe(true)
+
+    document.destroy()
+    await fixture.close()
+  })
+
+  it('accepts a sync response whose payload is partly already known', async () => {
+    const fixture = await coordinatorFixture()
+    const document = editorJsonToYDoc(parseEditorMarkdown('Hello'))
+    // The room already holds the first edit; the browser answering the initial
+    // sync sends BOTH its edits, so part of the payload is redundant and the
+    // applied delta is smaller than the bytes sent.
+    const first = updateFor(document, 'Hello!')
+    Y.applyUpdate(document, first)
+    const second = updateFor(document, 'Hello!!')
+    const syncResponse = Y.mergeUpdates([first, second])
+
+    await expect(fixture.coordinator.prepareClientUpdate({
+      allowNoop: true,
+      connectionId: 'sync-response',
+      context: fixture.context,
+      document,
+      room: ROOM,
+      update: syncResponse,
+    })).resolves.toBe('pending')
+
+    document.destroy()
+    await fixture.close()
+  })
+
+  it('admits a partly-known ordinary frame, the honest concurrent shape', async () => {
+    // The counterpart to the sync-response case above. Two editors working at
+    // once routinely produce a frame carrying a struct the room already holds.
+    // CRDT integration makes that harmless, and refusing it cost one of the
+    // two their whole session.
+    const fixture = await coordinatorFixture()
+    const document = editorJsonToYDoc(parseEditorMarkdown('Hello'))
+    const first = updateFor(document, 'Hello!')
+    Y.applyUpdate(document, first)
+    const second = updateFor(document, 'Hello!!')
+
+    await expect(fixture.coordinator.prepareClientUpdate({
+      allowNoop: false,
+      connectionId: 'ordinary-frame',
+      context: fixture.context,
+      document,
+      room: ROOM,
+      update: Y.mergeUpdates([first, second]),
+    })).resolves.toBe('pending')
+
     document.destroy()
     await fixture.close()
   })
@@ -391,15 +747,17 @@ describe('document coordinator', () => {
     await fixture.close()
   })
 
+  // The canonicality boundary, stated deliberately. Encoding faults are
+  // refused for everyone; a merged frame is refused where per-change policy
+  // needs it (suggest) and admitted where the caller may change the document
+  // directly anyway (edit) — sending the same two edits as two frames a
+  // millisecond apart has the identical effect, so refusing the merged form
+  // bought nothing and cost honest concurrent editors their session.
   it.each([
     ['suffix bytes', 'suffix', 'edit'],
     ['suffix bytes', 'suffix', 'suggest'],
     ['V2-as-V1 payload', 'v2', 'edit'],
     ['V2-as-V1 payload', 'v2', 'suggest'],
-    ['redundant old plus novel merge', 'merged', 'edit'],
-    ['redundant old plus novel merge', 'merged', 'suggest'],
-    ['redundant delete-set plus novel merge', 'merged-delete', 'edit'],
-    ['redundant delete-set plus novel merge', 'merged-delete', 'suggest'],
   ] as const)('rejects %s (%s) for %s access before role policy', async (
     _label,
     attack,
@@ -418,6 +776,58 @@ describe('document coordinator', () => {
     })).rejects.toMatchObject({ code: 4409, reason: 'invalid_schema' })
     expect(fixture.api.lookups).toHaveLength(0)
     expect(fixture.api.persisted).toHaveLength(0)
+
+    document.destroy()
+    await fixture.close()
+  })
+
+  it.each([
+    ['redundant old plus novel merge', 'merged'],
+    ['redundant delete-set plus novel merge', 'merged-delete'],
+  ] as const)('refuses %s under suggest access via the per-change policy', async (
+    _label,
+    attack,
+  ) => {
+    // Suggest access is where merging would matter: the policy reasons about
+    // ONE proposed change. It refuses the merged frame itself, without any
+    // store round trip — so the encoding never had to carry that weight.
+    const fixture = await coordinatorFixture()
+    const { document, update } = genericCanonicalityAttack(attack)
+
+    await expect(fixture.coordinator.prepareClientUpdate({
+      allowNoop: false,
+      connectionId: `policy-${attack}`,
+      context: { ...fixture.context, access: 'suggest' },
+      document,
+      room: ROOM,
+      update,
+    })).rejects.toMatchObject({ code: 4403, reason: 'suggestion_policy_violation' })
+    expect(fixture.api.lookups).toHaveLength(0)
+    expect(fixture.api.persisted).toHaveLength(0)
+
+    document.destroy()
+    await fixture.close()
+  })
+
+  it.each([
+    ['redundant old plus novel merge', 'merged'],
+    ['redundant delete-set plus novel merge', 'merged-delete'],
+  ] as const)('admits %s under edit access', async (_label, attack) => {
+    // Deliberate: an edit-access caller may change the document directly, so a
+    // merged frame is not an escalation. Refusing it locked out honest
+    // editors, because two people typing at once produce exactly this shape.
+    const fixture = await coordinatorFixture()
+    const { document, update } = genericCanonicalityAttack(attack)
+
+    await expect(fixture.coordinator.prepareClientUpdate({
+      allowNoop: false,
+      connectionId: `admitted-${attack}`,
+      context: fixture.context,
+      document,
+      room: ROOM,
+      update,
+    })).resolves.toBe('pending')
+    expect(fixture.api.lookups).toHaveLength(0)
 
     document.destroy()
     await fixture.close()
@@ -452,7 +862,7 @@ describe('document coordinator', () => {
   )
 
   it.each(['edit', 'suggest'] as const)(
-    'rejects an unknown byte-identical redundant suggestion update for %s access',
+    'treats an unknown redundant update as a benign duplicate for %s access',
     async (access) => {
       const fixture = await coordinatorFixture()
       const document = editorJsonToYDoc(parseEditorMarkdown('Duplicate'))
@@ -466,7 +876,7 @@ describe('document coordinator', () => {
         document,
         room: ROOM,
         update,
-      })).rejects.toMatchObject({ code: 4409, reason: 'invalid_schema' })
+      })).resolves.toBe('noop')
       expect(fixture.api.lookups).toHaveLength(1)
       expect(fixture.api.persisted).toHaveLength(0)
 
@@ -476,7 +886,7 @@ describe('document coordinator', () => {
   )
 
   it.each(['edit', 'suggest'] as const)(
-    'rejects an unknown canonical empty Type-2 update for %s access',
+    'treats an unknown canonical empty Type-2 update as a benign duplicate for %s access',
     async (access) => {
       const fixture = await coordinatorFixture()
       const document = editorJsonToYDoc(parseEditorMarkdown('Unknown no-op'))
@@ -488,7 +898,7 @@ describe('document coordinator', () => {
         document,
         room: ROOM,
         update: new Uint8Array([0, 0]),
-      })).rejects.toMatchObject({ code: 4409, reason: 'invalid_schema' })
+      })).resolves.toBe('noop')
       expect(fixture.api.lookups).toHaveLength(1)
       expect(fixture.api.persisted).toHaveLength(0)
 
@@ -497,9 +907,10 @@ describe('document coordinator', () => {
     },
   )
 
-  it('allows only the canonical empty V1 update as a protocol sync no-op', async () => {
+  it('allows canonical V1 updates with no novel state as protocol sync no-ops', async () => {
     const fixture = await coordinatorFixture()
     const document = editorJsonToYDoc(parseEditorMarkdown('Sync'))
+    const redundantState = Y.encodeStateAsUpdate(document)
 
     await expect(fixture.coordinator.prepareClientUpdate({
       allowNoop: true,
@@ -508,6 +919,14 @@ describe('document coordinator', () => {
       document,
       room: ROOM,
       update: new Uint8Array([0, 0]),
+    })).resolves.toBe('noop')
+    await expect(fixture.coordinator.prepareClientUpdate({
+      allowNoop: true,
+      connectionId: 'redundant-state-sync',
+      context: fixture.context,
+      document,
+      room: ROOM,
+      update: redundantState,
     })).resolves.toBe('noop')
     expect(fixture.api.lookups).toHaveLength(0)
     expect(fixture.api.persisted).toHaveLength(0)
@@ -794,7 +1213,7 @@ describe('document coordinator', () => {
     await fixture.close()
   })
 
-  it.each(['deletion', 'modification'] as const)(
+  it.each(['deletion', 'modification', 'structure'] as const)(
     'persists a normal %s suggestion without rejecting its causal history',
     async (operation) => {
       const fixture = await coordinatorFixture()
@@ -817,7 +1236,9 @@ describe('document coordinator', () => {
       expect(fixture.api.persisted).toHaveLength(1)
       expect(fixture.api.persisted[0]).toMatchObject({
         changeKind: 'suggestion',
-        suggestions: [{ kind: operation }],
+        suggestions: [{
+          kind: operation === 'modification' ? 'replacement' : operation,
+        }],
         update,
       })
 
@@ -876,16 +1297,123 @@ describe('document coordinator', () => {
     document.destroy()
     await fixture.close()
   })
+
+  it('persists the first slash structure suggestion without replacing its shared text anchor', async () => {
+    const fixture = await coordinatorFixture()
+    const document = editorJsonToYDoc(parseEditorMarkdown('## Suggest target'))
+    const sourceText = firstXmlText(xmlElementAt(
+      document.getXmlFragment(EDITOR_YJS_FRAGMENT),
+      [0],
+    ))
+    if (!sourceText) throw new Error('Structure suggestion fixture has no text anchor')
+    const anchor = Y.createRelativePositionFromTypeIndex(sourceText, 1)
+
+    const slashReplica = clone(document)
+    const slashVector = Y.encodeStateVector(slashReplica)
+    const slashFragment = slashReplica.getXmlFragment(EDITOR_YJS_FRAGMENT)
+    const slashInitialized = initProseMirrorDoc(slashFragment, schema)
+    const initialState = EditorState.create({ schema, doc: slashInitialized.doc })
+    const trackedSlash = transformToInqtrixSuggestionTransaction(
+      initialState.tr.insertText('/', 1),
+      initialState,
+      { authorId: USER_ID, createdAt: 1_784_112_000, patchId: PATCH_ID },
+      () => SUGGESTION_ID,
+    )
+    updateYFragment(
+      slashReplica,
+      slashFragment,
+      trackedSlash.doc,
+      slashInitialized.meta,
+    )
+    const slashUpdate = Y.encodeStateAsUpdate(slashReplica, slashVector)
+
+    await expect(fixture.coordinator.prepareClientUpdate({
+      allowNoop: false,
+      connectionId: 'first-structure-slash',
+      context: { ...fixture.context, access: 'suggest' },
+      document,
+      room: ROOM,
+      update: slashUpdate,
+    })).resolves.toBe('pending')
+    Y.applyUpdate(document, slashUpdate)
+    expect(fixture.coordinator.finishClientUpdate(
+      'first-structure-slash',
+      document,
+    )).toMatchObject({ sequence: 1, type: 'durable_ack' })
+
+    const structureReplica = clone(document)
+    const structureVector = Y.encodeStateVector(structureReplica)
+    const structureFragment = structureReplica.getXmlFragment(EDITOR_YJS_FRAGMENT)
+    const structureInitialized = initProseMirrorDoc(structureFragment, schema)
+    const slashState = EditorState.create({ schema, doc: structureInitialized.doc })
+    const paragraph = schema.nodes.paragraph
+    if (!paragraph) throw new Error('Structure suggestion fixture has no paragraph type')
+    const proposed = slashState.tr
+      .delete(1, 2)
+      .setNodeMarkup(0, paragraph, { textAlign: null })
+      .setMeta(INQTRIX_STRUCTURE_COMMAND_META, {
+        action: 'paragraph',
+        commandRange: { from: 1, to: 2 },
+      })
+    const trackedStructure = transformToInqtrixSuggestionTransaction(
+      proposed,
+      slashState,
+      {
+        authorId: USER_ID,
+        createdAt: 1_784_112_001,
+        patchId: EXISTING_PATCH_ID,
+      },
+      () => EXISTING_SUGGESTION_ID,
+    )
+    updateYFragment(
+      structureReplica,
+      structureFragment,
+      trackedStructure.doc,
+      structureInitialized.meta,
+    )
+    const structureUpdate = Y.encodeStateAsUpdate(structureReplica, structureVector)
+    const updated = clone(document)
+    Y.applyUpdate(updated, structureUpdate)
+
+    expect(Y.createAbsolutePositionFromRelativePosition(anchor, updated)).not.toBeNull()
+    await expect(fixture.coordinator.prepareClientUpdate({
+      allowNoop: false,
+      connectionId: 'first-structure-suggestion',
+      context: { ...fixture.context, access: 'suggest' },
+      document,
+      room: ROOM,
+      update: structureUpdate,
+    })).resolves.toBe('pending')
+    Y.applyUpdate(document, structureUpdate)
+    expect(fixture.coordinator.finishClientUpdate(
+      'first-structure-suggestion',
+      document,
+    )).toMatchObject({ sequence: 2, type: 'durable_ack' })
+    expect(fixture.api.persisted).toHaveLength(2)
+    expect(fixture.api.persisted[1]).toMatchObject({
+      changeKind: 'suggestion',
+      suggestionIds: [SUGGESTION_ID, EXISTING_SUGGESTION_ID],
+      update: structureUpdate,
+    })
+
+    updated.destroy()
+    structureReplica.destroy()
+    slashReplica.destroy()
+    document.destroy()
+    await fixture.close()
+  })
 })
 
 async function coordinatorFixture(
   sequence = 0,
   overrides: Parameters<typeof settings>[0] = {},
+  validatedDocument: ReturnType<typeof validateDocument> | null = null,
 ): Promise<{
   api: FakeCollaborationApi
   close: () => Promise<void>
   context: ConnectionContext
   coordinator: DocumentCoordinator
+  metrics: SidecarMetrics
 }> {
   const api = new FakeCollaborationApi()
   const configured = settings(overrides)
@@ -893,16 +1421,18 @@ async function coordinatorFixture(
   const lease = new InstanceLeaseManager(api, configured, silentLogger, metrics, () => undefined)
   await lease.start()
   const coordinator = new DocumentCoordinator(api, lease, configured, silentLogger, metrics)
-  coordinator.initialize(ROOM, sequence)
+  coordinator.initialize(ROOM, sequence, { bytes: 0, updates: 0 }, validatedDocument)
   return {
     api,
     close: () => lease.stop(),
+    metrics,
     context: {
       access: 'edit',
       documentId: DOCUMENT_ID,
       expiresAt: Date.now() / 1_000 + 60,
       generation: 1,
       leaseId: 'lease-1',
+      policyCursor: 0,
       protocolVersion: configured.protocolVersion,
       schemaHash: await getEditorSchemaFingerprint(),
       schemaVersion: configured.schemaVersion,
@@ -998,7 +1528,7 @@ function suggestionWithTopologyReplacementUpdate(
   return { anchor, update }
 }
 
-type SuggestionOperation = 'deletion' | 'insertion' | 'modification'
+type SuggestionOperation = 'deletion' | 'insertion' | 'modification' | 'structure'
 
 function suggestionUpdate(
   document: Y.Doc,
@@ -1109,7 +1639,14 @@ function applySuggestion(
     ? state.tr.insertText(insertedText, textPosition + 1)
     : operation === 'deletion'
       ? state.tr.delete(textPosition + 1, textPosition + 2)
-      : state.tr.insertText('X', textPosition + 1, textPosition + 2)
+      : operation === 'structure'
+        ? state.tr
+            .setNodeMarkup(0, schema.nodes.heading, {
+              level: 2,
+              textAlign: null,
+            })
+            .setMeta(INQTRIX_STRUCTURE_COMMAND_META, { action: 'heading2' })
+        : state.tr.insertText('X', textPosition + 1, textPosition + 2)
   const tracked = transformToInqtrixSuggestionTransaction(
     transaction,
     state,

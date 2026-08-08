@@ -1,4 +1,8 @@
 import type { Editor, Range } from '@tiptap/core'
+import {
+  INQTRIX_STRUCTURE_COMMAND_META,
+  type StructureSuggestionCommand,
+} from '@inqtrix/editor-schema'
 
 /**
  * Block transformations shared by the `/` slash menu and (later) the block "…"
@@ -22,7 +26,17 @@ export type BlockActionId =
  * `/query`), it is deleted first so only the block conversion remains. Returns
  * whether a command was applied. */
 export function runBlockAction(editor: Editor, id: BlockActionId, range?: Range): boolean {
-  const chain = editor.chain().focus()
+  const command: StructureSuggestionCommand = {
+    action: id,
+    ...(range ? { commandRange: { from: range.from, to: range.to } } : {}),
+  }
+  const chain = editor
+    .chain()
+    .focus()
+    .command(({ tr }) => {
+      tr.setMeta(INQTRIX_STRUCTURE_COMMAND_META, command)
+      return true
+    })
   if (range) chain.deleteRange(range)
   switch (id) {
     case 'paragraph':

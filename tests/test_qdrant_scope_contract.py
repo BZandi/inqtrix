@@ -75,3 +75,13 @@ def test_implicit_search_all_narrows_to_the_query_model():
     store = _store([_collection("a", "model-x"), _collection("b", "model-y")])
     _name, scope_filter = store._resolve_target(None, "model-x")
     assert _scoped_ids(scope_filter) == ["a"]
+
+
+def test_explicit_empty_scope_is_not_reinterpreted_as_search_all():
+    store = _store([_collection("a", "model-x")])
+
+    _name, empty_filter = store._resolve_target([], "model-x")
+    _name, implicit_filter = store._resolve_target(None, "model-x")
+
+    assert empty_filter is None
+    assert _scoped_ids(implicit_filter) == ["a"]

@@ -16,17 +16,25 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Sequence
 
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from inqtrix.quota.models import QuotaDimension, current_period_start
-from inqtrix.quota.models import DEFAULT_USER_ID, STOCK_PERIOD
-from inqtrix.storage.db import (
-    build_engine,
-    build_session_factory,
-    tenant_session,
+from inqtrix.quota.models import (
+    DEFAULT_USER_ID,
+    STOCK_PERIOD,
+    QuotaAdjustmentConflict,
+    QuotaDimension,
+    QuotaSubject,
+    StockLifecycleState,
+    current_period_start,
 )
-from inqtrix.storage.quota_orm import quota_limits, quota_usage_counters
+from inqtrix.storage.db import build_engine, build_session_factory, tenant_session
+from inqtrix.storage.quota_orm import (
+    quota_limits,
+    quota_stock_lifecycles,
+    quota_usage_adjustments,
+    quota_usage_counters,
+)
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
@@ -71,9 +79,7 @@ class PostgresQuotaStore:
         """
         await self._engine.dispose()
 
-    def _session(
-        self, tenant_id: str
-    ) -> "AbstractAsyncContextManager[AsyncSession]":
+    def _session(self, tenant_id: str) -> "AbstractAsyncContextManager[AsyncSession]":
         return tenant_session(
             self._session_factory,
             tenant_id=tenant_id,
@@ -110,14 +116,239 @@ class PostgresQuotaStore:
                     quota_usage_counters.c.period_start,
                 ],
                 set_={
-                    "used": func.greatest(
-                        0, quota_usage_counters.c.used + amount
-                    ),
+                    "used": func.greatest(0, quota_usage_counters.c.used + amount),
                     "updated_at": now,
                 },
             ).returning(quota_usage_counters.c.used)
             new_used = (await session.execute(stmt)).scalar_one()
         return int(new_used)
+
+    async def add_usage_once(
+        self,
+        *,
+        adjustment_id: str,
+        tenant_id: str,
+        subject_user_id: uuid.UUID,
+        dimension: QuotaDimension,
+        period_start: float,
+        amount: int,
+    ) -> int:
+        now = time.time()
+        async with self._session(tenant_id) as session:
+            inserted = (
+                await session.execute(
+                    pg_insert(quota_usage_adjustments)
+                    .values(
+                        adjustment_id=adjustment_id,
+                        tenant_id=tenant_id,
+                        subject_user_id=subject_user_id,
+                        dimension=dimension.value,
+                        period_start=period_start,
+                        amount=amount,
+                        created_at=now,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[quota_usage_adjustments.c.adjustment_id]
+                    )
+                    .returning(quota_usage_adjustments.c.adjustment_id)
+                )
+            ).scalar_one_or_none()
+            if inserted is None:
+                receipt = (
+                    await session.execute(
+                        select(
+                            quota_usage_adjustments.c.tenant_id,
+                            quota_usage_adjustments.c.subject_user_id,
+                            quota_usage_adjustments.c.dimension,
+                            quota_usage_adjustments.c.period_start,
+                            quota_usage_adjustments.c.amount,
+                        ).where(
+                            quota_usage_adjustments.c.adjustment_id == adjustment_id
+                        )
+                    )
+                ).one_or_none()
+                if receipt is None or (
+                    receipt.tenant_id != tenant_id
+                    or receipt.subject_user_id != subject_user_id
+                    or receipt.dimension != dimension.value
+                    or int(receipt.amount) != amount
+                ):
+                    raise QuotaAdjustmentConflict(adjustment_id)
+                # The original receipt remains authoritative after calendar
+                # rollover; a later period is not a contradictory replay and
+                # must not receive a second charge.
+                current = (
+                    await session.execute(
+                        select(quota_usage_counters.c.used).where(
+                            quota_usage_counters.c.tenant_id == tenant_id,
+                            quota_usage_counters.c.subject_user_id == subject_user_id,
+                            quota_usage_counters.c.dimension == dimension.value,
+                            quota_usage_counters.c.period_start == period_start,
+                        )
+                    )
+                ).scalar_one_or_none()
+                return int(current or 0)
+            seed = max(0, amount)
+            stmt = pg_insert(quota_usage_counters).values(
+                tenant_id=tenant_id,
+                subject_user_id=subject_user_id,
+                dimension=dimension.value,
+                period_start=period_start,
+                used=seed,
+                updated_at=now,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[
+                    quota_usage_counters.c.tenant_id,
+                    quota_usage_counters.c.subject_user_id,
+                    quota_usage_counters.c.dimension,
+                    quota_usage_counters.c.period_start,
+                ],
+                set_={
+                    "used": func.greatest(0, quota_usage_counters.c.used + amount),
+                    "updated_at": now,
+                },
+            ).returning(quota_usage_counters.c.used)
+            return int((await session.execute(stmt)).scalar_one())
+
+    async def reconcile_stock(
+        self,
+        *,
+        stock_key: str,
+        tenant_id: str,
+        subject_user_id: uuid.UUID,
+        dimension: QuotaDimension,
+        desired_amount: int,
+        tombstone: bool,
+    ) -> StockLifecycleState:
+        """Converge one resource stock and aggregate counter transactionally."""
+
+        if not dimension.is_stock:
+            raise ValueError("stock lifecycle requires a stock dimension")
+        if desired_amount < 0:
+            raise ValueError("stock amount cannot be negative")
+        if not stock_key.strip():
+            raise ValueError("stock key cannot be empty")
+        now = time.time()
+        async with self._session(tenant_id) as session:
+            await session.execute(
+                pg_insert(quota_stock_lifecycles)
+                .values(
+                    tenant_id=tenant_id,
+                    stock_key=stock_key,
+                    subject_user_id=subject_user_id,
+                    dimension=dimension.value,
+                    amount=0,
+                    tombstoned=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        quota_stock_lifecycles.c.tenant_id,
+                        quota_stock_lifecycles.c.stock_key,
+                    ]
+                )
+            )
+            row = (
+                (
+                    await session.execute(
+                        select(quota_stock_lifecycles)
+                        .where(
+                            quota_stock_lifecycles.c.tenant_id == tenant_id,
+                            quota_stock_lifecycles.c.stock_key == stock_key,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            if (
+                row["subject_user_id"] != subject_user_id
+                or row["dimension"] != dimension.value
+            ):
+                raise ValueError("stock key already belongs to another quota subject")
+            current_amount = int(row["amount"])
+            is_tombstoned = tombstone or bool(row["tombstoned"])
+            next_amount = 0 if is_tombstoned else desired_amount
+            await session.execute(
+                update(quota_stock_lifecycles)
+                .where(
+                    quota_stock_lifecycles.c.tenant_id == tenant_id,
+                    quota_stock_lifecycles.c.stock_key == stock_key,
+                )
+                .values(
+                    amount=next_amount,
+                    tombstoned=is_tombstoned,
+                    updated_at=now,
+                )
+            )
+            delta = next_amount - current_amount
+            if delta:
+                stmt = pg_insert(quota_usage_counters).values(
+                    tenant_id=tenant_id,
+                    subject_user_id=subject_user_id,
+                    dimension=dimension.value,
+                    period_start=STOCK_PERIOD,
+                    used=max(0, delta),
+                    updated_at=now,
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[
+                        quota_usage_counters.c.tenant_id,
+                        quota_usage_counters.c.subject_user_id,
+                        quota_usage_counters.c.dimension,
+                        quota_usage_counters.c.period_start,
+                    ],
+                    set_={
+                        "used": func.greatest(0, quota_usage_counters.c.used + delta),
+                        "updated_at": now,
+                    },
+                )
+                await session.execute(stmt)
+        return StockLifecycleState(
+            stock_key=stock_key,
+            subject=QuotaSubject(tenant_id=tenant_id, user_id=subject_user_id),
+            dimension=dimension,
+            amount=next_amount,
+            tombstoned=is_tombstoned,
+        )
+
+    async def read_stock(
+        self,
+        *,
+        stock_key: str,
+        tenant_id: str,
+    ) -> StockLifecycleState | None:
+        """Read one canonical resource stock under tenant RLS."""
+
+        async with self._session(tenant_id) as session:
+            row = (
+                (
+                    await session.execute(
+                        select(quota_stock_lifecycles).where(
+                            quota_stock_lifecycles.c.tenant_id == tenant_id,
+                            quota_stock_lifecycles.c.stock_key == stock_key,
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return None
+        dimension = QuotaDimension(str(row["dimension"]))
+        return StockLifecycleState(
+            stock_key=str(row["stock_key"]),
+            subject=QuotaSubject(
+                tenant_id=str(row["tenant_id"]),
+                user_id=row["subject_user_id"],
+            ),
+            dimension=dimension,
+            amount=int(row["amount"]),
+            tombstoned=bool(row["tombstoned"]),
+        )
 
     async def read_usage(
         self,
@@ -171,9 +402,7 @@ class PostgresQuotaStore:
         if dimension.is_stock:
             # Stock is freed by deletion, never reset; zeroing it would
             # decouple the counter from real occupancy. Loud bug signal.
-            raise ValueError(
-                f"cannot reset stock dimension {dimension.value}"
-            )
+            raise ValueError(f"cannot reset stock dimension {dimension.value}")
         active = _active_period(dimension, now)
         stamped = time.time()
         async with self._session(tenant_id) as session:
@@ -289,19 +518,27 @@ class PostgresQuotaStore:
     async def list_subjects(self, *, tenant_id: str) -> list[uuid.UUID]:
         async with self._session(tenant_id) as session:
             counter_subs = (
-                await session.execute(
-                    select(quota_usage_counters.c.subject_user_id)
-                    .where(quota_usage_counters.c.tenant_id == tenant_id)
-                    .distinct()
+                (
+                    await session.execute(
+                        select(quota_usage_counters.c.subject_user_id)
+                        .where(quota_usage_counters.c.tenant_id == tenant_id)
+                        .distinct()
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             limit_subs = (
-                await session.execute(
-                    select(quota_limits.c.subject_user_id)
-                    .where(quota_limits.c.tenant_id == tenant_id)
-                    .distinct()
+                (
+                    await session.execute(
+                        select(quota_limits.c.subject_user_id)
+                        .where(quota_limits.c.tenant_id == tenant_id)
+                        .distinct()
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
         subs = set(counter_subs) | set(limit_subs)
         subs.discard(DEFAULT_USER_ID)
         return sorted(subs)

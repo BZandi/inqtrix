@@ -30,8 +30,22 @@ def _payload(p: AccountPreferences) -> dict[str, Any]:
         "contrast_mode": p.contrast_mode, "locale": p.locale, "theme": p.theme,
         "theme_preset": p.theme_preset, "user_bubble_tone": p.user_bubble_tone,
         "enable_agent_memory": p.enable_agent_memory,
+        "chat_model_tier": p.chat_model_tier,
+        "agent_model_tier": p.agent_model_tier,
         "updated_at": p.updated_at,
     }
+
+
+def _tier(body: dict[str, Any], key: str) -> str:
+    """Read a model-tier field without the ``str(...)`` cast the other fields use.
+
+    ``str(None)`` is the string ``'None'`` — a value the service would reject
+    with a confusing message, and one a client sends simply by omitting the
+    key or sending JSON ``null``. Both mean "no preference" here, which is the
+    empty string.
+    """
+    value = body.get(key)
+    return "" if value is None else str(value)
 
 
 def build_router(container: "AppContainer") -> APIRouter:
@@ -68,6 +82,8 @@ def build_router(container: "AppContainer") -> APIRouter:
                 theme_preset=str(body.get("theme_preset", "standard")),
                 user_bubble_tone=str(body.get("user_bubble_tone", "gray")),
                 enable_agent_memory=bool(body.get("enable_agent_memory", False)),
+                chat_model_tier=_tier(body, "chat_model_tier"),
+                agent_model_tier=_tier(body, "agent_model_tier"),
                 updated_at=float(body["updated_at"]),
             )
         except AccountPreferencesValidationError as exc:

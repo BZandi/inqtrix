@@ -406,7 +406,11 @@ class MemoryAgentControlStore:
         updated_by: str,
         artifact_id: str | None = None,
         expected_revision: int | None = None,
+        expected_run_attempt: int | None = None,
     ) -> ArtifactRecord:
+        # In-process execution has no claim takeover.  Keep the parameter in
+        # lockstep with Postgres so the publisher uses one store contract.
+        del expected_run_attempt
         with self._runtime_write_guard(run_id), self._lock:
             existing = self._find_upsert_target_locked(
                 artifact_id=artifact_id,

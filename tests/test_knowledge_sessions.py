@@ -109,6 +109,34 @@ async def test_save_existing_by_non_owner_denied(service) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_claim_does_not_overwrite_an_existing_session(service) -> None:
+    first = await service.claim_session(
+        "ks_claimed",
+        title="Original",
+        caller_user_id=ALICE,
+        workspace_id="ws-a",
+        visible_to=_scoped(ALICE),
+        created_at=1.0,
+    )
+
+    with pytest.raises(KnowledgeSessionNotFound):
+        await service.claim_session(
+            "ks_claimed",
+            title="Hijack",
+            caller_user_id=BOB,
+            workspace_id="ws-b",
+            visible_to=_scoped(BOB),
+            created_at=2.0,
+        )
+
+    stored = await service.get_session("ks_claimed", visible_to=_scoped(ALICE))
+    assert stored == first
+    assert stored.title == "Original"
+    assert stored.created_by_user_id == ALICE
+    assert stored.workspace_id == "ws-a"
+
+
+@pytest.mark.asyncio
 async def test_update_preserves_created_at_and_owner(service) -> None:
     await _save(service, "ks_1", owner=USER, title="v1", created_at=1.0, updated_at=1.0)
     await _save(

@@ -27,7 +27,6 @@ def _write_fixture_repo(root: Path) -> None:
     (root / "package.json").write_text(
         json.dumps(
             {
-                "packageManager": "pnpm@11.1.1",
                 "devDependencies": {"root-tool": "1.0.0"},
             }
         ),
@@ -109,8 +108,6 @@ version = "1.0.0"
         ),
         encoding="utf-8",
     )
-    (root / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
-
     packages = {
         "react@1.0.0": {
             "name": "react",
@@ -160,13 +157,29 @@ version = "1.0.0"
             "license": "MIT",
         },
     }
-    for folder, package in packages.items():
-        package_root = root / "node_modules" / ".pnpm" / folder / "node_modules" / package["name"]
-        package_root.mkdir(parents=True)
-        (package_root / "package.json").write_text(
-            json.dumps(package),
-            encoding="utf-8",
-        )
+    lock_packages: dict[str, Any] = {
+        "": {
+            "name": "inqtrix",
+            "devDependencies": {"root-tool": "1.0.0"},
+        }
+    }
+    for package in packages.values():
+        lock_packages[f"node_modules/{package['name']}"] = {
+            key: value
+            for key, value in package.items()
+            if key != "name"
+        }
+    (root / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "name": "inqtrix",
+                "lockfileVersion": 3,
+                "requires": True,
+                "packages": lock_packages,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _metadata_provider(name: str) -> dict[str, Any]:
@@ -211,7 +224,10 @@ def test_notice_documents_are_deterministic(tmp_path):
         ("server-tool", "node-dev"),
         ("schema-tool", "node-dev"),
     }
-    assert "| react-prod | `react` | 1.0.0 | MIT | pnpm package metadata |" in markdown
+    assert (
+        "| react-prod | `react` | 1.0.0 | MIT | package-lock.json metadata |"
+        in markdown
+    )
 
 
 def test_missing_license_metadata_fails_loudly(tmp_path):

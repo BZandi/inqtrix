@@ -29,6 +29,11 @@ import { CitationGroupList } from './CitationRow'
 import { excerptHighlightRanges, HighlightedExcerpt, previewWindow } from './CitationExcerpt'
 import { KnowledgeStepList } from './KnowledgeStepList'
 import { profileDisplayName } from './stepLines'
+import { RetrievalDegradationNotice } from './RetrievalDegradationNotice'
+import {
+  knowledgeRetrievalDegradationText,
+  knowledgeSearchWarningNotice,
+} from './retrievalDegradation'
 
 type CitationPreview = {
   title: string
@@ -82,6 +87,20 @@ export function AnswerCard({
     verifiedLabel: t.knowledge.viewerVerified,
   }
   const profileLabel = answer.profileId ? profileDisplayName(answer.profileId, t.knowledge) : null
+  const searchWarningNotices = (answer.retrievalWarnings ?? []).map(
+    (warning) => knowledgeSearchWarningNotice(warning, t.knowledge),
+  )
+  const retrievalWarningMessages = [
+    ...(answer.retrievalDegradations ?? []).map(
+      (degradation) => knowledgeRetrievalDegradationText(degradation, t.knowledge),
+    ),
+    ...searchWarningNotices
+      .filter((notice) => notice.tone === 'warning')
+      .map((notice) => notice.message),
+  ]
+  const retrievalInformationalMessages = searchWarningNotices
+    .filter((notice) => notice.tone === 'informational')
+    .map((notice) => notice.message)
 
   async function copy(mode: AnswerCopyMode) {
     try {
@@ -191,6 +210,20 @@ export function AnswerCard({
           </div>
         )}
 
+        {(retrievalInformationalMessages.length > 0 || retrievalWarningMessages.length > 0) && (
+          <div className="mb-3 space-y-2">
+            <RetrievalDegradationNotice
+              announce={highlightEntry}
+              messages={retrievalInformationalMessages}
+              tone="informational"
+            />
+            <RetrievalDegradationNotice
+              announce={highlightEntry}
+              messages={retrievalWarningMessages}
+            />
+          </div>
+        )}
+
         {answer.refusal ? (
           <div className="flex items-start gap-2.5 rounded-lg border border-border/70 bg-surface/60 p-3">
             <Info className="icon-sm mt-0.5 shrink-0 text-muted-foreground/70" />
@@ -231,7 +264,7 @@ export function AnswerCard({
 
         {answer.references.length > 0 && (
           <div className="mt-4 border-t border-border/70 pt-3">
-            <h4 className="t-caption text-muted-foreground/60">{t.knowledge.sources}</h4>
+            <h4 className="t-caption text-muted-foreground">{t.knowledge.sources}</h4>
             <div className="mt-1.5">
               <CitationGroupList
                 activeKey={null}
@@ -248,7 +281,7 @@ export function AnswerCard({
           </div>
         )}
 
-        <div className="mt-3 flex min-w-0 items-center gap-1 text-muted-foreground/80">
+        <div className="mt-3 flex min-w-0 items-center gap-1 text-muted-foreground">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -362,12 +395,14 @@ function MetaLine({ answer }: { answer: KnowledgeAnswerRecord }) {
   if (answer.degradedStages.length > 0) {
     parts.push(t.knowledge.profileDegradedHint.replace('{stages}', answer.degradedStages.join(', ')))
   }
-  if (answer.grounding && answer.grounding.total > 0) {
-    parts.push(
-      t.knowledge.groundingMeta
-        .replace('{verified}', String(answer.grounding.verified))
-        .replace('{total}', String(answer.grounding.total)),
-    )
+  if (answer.grounding?.degraded) {
+    parts.push(t.knowledge.groundingUnavailableMeta)
+  } else if (answer.grounding && answer.grounding.total > 0) {
+      parts.push(
+        t.knowledge.groundingMeta
+          .replace('{verified}', String(answer.grounding.verified))
+          .replace('{total}', String(answer.grounding.total)),
+      )
   }
   // Surface the evidence gate on the completed answer (the live step ledger
   // shows it during the run) — but only when it is informative: more than one
@@ -382,7 +417,7 @@ function MetaLine({ answer }: { answer: KnowledgeAnswerRecord }) {
   }
   if (parts.length === 0) return null
   return (
-    <p className="min-w-0 t-meta text-muted-foreground/80">{parts.join(' · ')}</p>
+    <p className="min-w-0 t-meta text-muted-foreground">{parts.join(' · ')}</p>
   )
 }
 

@@ -27,7 +27,9 @@ import type {
   EditorEvidencePreset,
   EditorFolderRecord,
   EditorPanelTab,
+  EditorPrivateSuggestionDraftRecord,
   EditorSuggestionGroupRecord,
+  EditorSuggestionOrigin,
   EditorSuggestionRecord,
   EditorSuggestionRevisionSource,
   EditorViewMode,
@@ -35,6 +37,7 @@ import type {
   FileAssetRecord,
   FileGroupRecord,
   FileLibrarySectionRecord,
+  FileParseStatus,
   IndexingJobLive,
   KnowledgeAnswerRecord,
   KnowledgeSessionGroupRecord,
@@ -45,13 +48,16 @@ import type {
   ProjectState,
   ResearchRunRecord,
   VectorIndexMemberRecord,
-  VectorIndexMemberState,
   VectorIndexRecord,
   VectorIndexRunHistoryEntry,
   VectorIndexStatus,
 } from '@/features/project/types'
 import { DEFAULT_KNOWLEDGE_SESSION_TITLE } from '@/features/project/knowledgeSessionDefaults'
+import type { SessionDeletionState } from '@/features/project/sessionDeletion'
+import { sessionDeletionFromWire } from '@/features/project/sessionDeletion'
 import { createProjectEntityId as createId } from '@/features/project/entityId'
+import { isPristineDefaultFileSection } from '@/features/files/sections'
+import { stripServerUploadFailureWarning } from '@/features/files/ingest'
 import {
   clampPanelLayoutSize,
   type ProjectPanelLayoutKey,
@@ -86,6 +92,7 @@ import {
 } from '@/features/agent/model'
 import { agentSessionMetadataFromJson } from '@/features/agent/agentSessionSync'
 import {
+  agentModelSelectionKey,
   DEFAULT_AGENT_SOURCE_POLICY,
   type AgentSourcePolicy,
 } from '@/features/agent/executionPolicy'
@@ -112,7 +119,10 @@ import {
   type CanvasViewDescriptor,
 } from '@/features/canvas/types'
 import { moveItem } from '@/features/composer/reorder'
-import { knowledgeAnswerFromRunResult } from '@/features/knowledge/answer'
+import {
+  knowledgeAnswerFromRunResult,
+  knowledgeAnswerWithRunProgress,
+} from '@/features/knowledge/answer'
 import { applyKnowledgeRunEvent } from '@/features/knowledge/runSteps'
 import type { AppView, JobFilter, ResearchJob } from './types'
 
@@ -124,6 +134,12 @@ export const stackOptions = [
 
 export type ResearchDeskState = ProjectState
 
+export type EditorDocumentRecoveryCapture = {
+  capturedAt: string
+  contentMarkdown: string
+  documentId: string
+}
+
 export type ResearchDeskAction =
   | { ref: ChatContextReferenceRecord; type: 'attachChatContextToDraft' }
   | { type: 'attachReportToChatDraft'; runId: string }
@@ -132,12 +148,20 @@ export type ResearchDeskAction =
   | { ref: ChatContextReferenceRecord; type: 'removeChatContextFromDraft' }
   | { fromIndex: number; toIndex: number; type: 'reorderChatContextInDraft' }
   | { type: 'clearChatDraftAttachment' }
-  | { groupId?: string | null; type: 'createChatThread' }
+  | {
+    groupId?: string | null
+    /** The account's preferred tier, applied to the fresh thread. Passed in
+     * rather than read here so the reducer stays free of the theme layer. */
+    modelTier?: ChatModelTier | null
+    preview: string
+    title: string
+    type: 'createChatThread'
+  }
   | { messageId: string; threadId: string; type: 'branchChatThreadFromMessage' }
   | { type: 'createLocalRun'; request: CreateResearchRunRequest }
   | { type: 'cancelLocalRun'; runId: string }
-  | { type: 'clearChatThread'; threadId: string }
-  | { messageIds: string[]; threadId: string; type: 'deleteChatMessages' }
+  | { emptyPreview: string; type: 'clearChatThread'; threadId: string }
+  | { emptyPreview: string; messageIds: string[]; threadId: string; type: 'deleteChatMessages' }
   | { title: string; type: 'createChatThreadGroup' }
   | { ruleId: string; type: 'deleteChatRule' }
   | { groupId: string; type: 'deleteChatThreadGroup' }
@@ -147,6 +171,7 @@ export type ResearchDeskAction =
   | { folderId?: string | null; type: 'createEditorDocument' }
   | { title: string; type: 'createEditorFolder' }
   | { documentId: string; type: 'deleteEditorDocument' }
+  | { documentId: string; type: 'promoteEditorRecoveryDocument' }
   | { documentId: string; type: 'togglePinnedEditorDocument' }
   | { folderId: string; type: 'deleteEditorFolder' }
   | { documentId: string; type: 'openEditorDocument' }
@@ -172,6 +197,12 @@ export type ResearchDeskAction =
       type: 'acknowledgeEditorCommentOutbox'
     }
   | { group: EditorSuggestionGroupRecord; suggestions: EditorSuggestionRecord[]; type: 'createEditorSuggestionGroup' }
+  | {
+      anchor: EditorCommentThreadRecord['anchor']
+      commentId: string
+      suggestionDraft: EditorPrivateSuggestionDraftRecord
+      type: 'adoptEditorCommentSuggestionDraft'
+    }
   | {
       collaborationPublication?: EditorSuggestionRecord['collaborationPublication']
       suggestionId: string
@@ -230,14 +261,20 @@ export type ResearchDeskAction =
   | { session: AgentSessionRecord; type: 'createAgentSession' }
   | { sessionId: string; sourcePolicy: AgentSourcePolicy; type: 'setAgentSessionSourcePolicy' }
   | { sessionId: string; title: string; type: 'renameAgentSession' }
-  | { sessionId: string; type: 'deleteAgentSession' }
+  | { operationId?: string | null; sessionId: string; type: 'deleteAgentSession' }
+  | { deletion: SessionDeletionState; sessionId: string; type: 'setAgentSessionDeletionState' }
   | { sessionId: string | null; type: 'selectAgentSession' }
   | { sessionId: string; type: 'togglePinnedAgentSession' }
   | { groupId: string | null; sessionId: string; type: 'moveAgentSessionToGroup' }
   | { title: string; type: 'createAgentSessionGroup' }
   | { groupId: string; title: string; type: 'renameAgentSessionGroup' }
   | { groupId: string; type: 'deleteAgentSessionGroup' }
-  | { groups: ServerAgentSessionGroup[]; sessions: ServerAgentSession[]; type: 'upsertServerAgentSessions' }
+  | {
+      groups: ServerAgentSessionGroup[]
+      selectSessionId?: string
+      sessions: ServerAgentSession[]
+      type: 'upsertServerAgentSessions'
+    }
   | { draft: AgentPlanDraftState | null; runId: string; type: 'setAgentPlanDraft' }
   | { descriptor: CanvasViewDescriptor; source: CanvasOpenSource; type: 'openAgentCanvasView' }
   | { key: string; type: 'activateAgentCanvasTab' }
@@ -269,6 +306,14 @@ export type ResearchDeskAction =
   | { enabled: boolean; persistLocal?: boolean; type: 'setServerSyncEnabled' }
   | { documents: EditorDocumentRecord[]; type: 'upsertServerEditorDocuments' }
   | {
+      documents: EditorDocumentRecord[]
+      recoveryCaptures?: EditorDocumentRecoveryCapture[]
+      /** Synchronously retired by the sync lifecycle before this reducer
+       * transition so autosave cannot race the React render. */
+      retiredDocumentIds?: string[]
+      type: 'reconcileServerEditorDocuments'
+    }
+  | {
       collaboration: NonNullable<EditorDocumentRecord['collaboration']>
       documentId: string
       metadataRevision: number
@@ -298,12 +343,85 @@ export type ResearchDeskAction =
       type: 'reconcileServerEditorComments'
     }
   | { sections: FileLibrarySectionRecord[]; type: 'upsertServerAssetSections' }
+  | { sectionId: string; type: 'markFileLibrarySectionServerSynced' }
+  | {
+      hiddenServerIds: string[]
+      serverHasTemporarySection: boolean
+      serverIds: string[]
+      type: 'pruneLocalBootstrapFileSections'
+    }
   | { replacements: Record<string, string>; type: 'rekeyFileLibrarySectionIds' }
   | { groups: FileGroupRecord[]; type: 'upsertServerAssetGroups' }
+  | { groupId: string; type: 'markFileGroupServerSynced' }
   | { assets: FileAssetRecord[]; type: 'upsertServerAssetMetadata' }
-  | { assetId: string; extractedText: string; type: 'setServerAssetBody' }
+  | { assetId: string; type: 'markFileAssetServerSynced' }
+  | {
+      assetId: string
+      extractedText: string
+      preparedAt: string | null
+      preparedContentHash: string | null
+      preparedParserId: string | null
+      preparedText: string
+      type: 'setServerAssetBody'
+    }
   | { assetId: string; extractedText: string; type: 'upgradeFileAssetParse' }
   | { assetId: string; pending: boolean; type: 'setFileAssetParsePending' }
+  | { assetId: string; pending: boolean; type: 'setFileAssetUploadPending' }
+  | {
+      assetId: string
+      error: string | null
+      operationId: string | null
+      serverFileId: string | null
+      status: FileAssetRecord['uploadStatus']
+      type: 'adoptFileAssetUploadLifecycle'
+    }
+  | { assetId: string; serverFileId: string; type: 'completeFileAssetUpload' }
+  | { assetId: string; message: string; type: 'failFileAssetUpload' }
+  | {
+      fileIds: string[]
+      operationId: string
+      stage: string
+      status: 'queued' | 'running' | 'delete_failed'
+      error: string | null
+      type: 'setFileAssetDeletionState'
+    }
+  | { fileIds: string[]; operationId: string; type: 'completeFileAssetDeletion' }
+  | {
+      error: string | null
+      groupId: string
+      operationId: string
+      stage: string
+      status: 'queued' | 'running' | 'delete_failed'
+      type: 'setFileGroupDeletionState'
+    }
+  | {
+      groupId: string
+      operationId: string
+      type: 'completeFileGroupDeletion'
+    }
+  | {
+      error: string | null
+      operationId: string
+      sectionId: string
+      stage: string
+      status: 'queued' | 'running' | 'delete_failed'
+      type: 'setFileLibrarySectionDeletionState'
+    }
+  | {
+      operationId: string
+      sectionId: string
+      type: 'completeFileLibrarySectionDeletion'
+    }
+  | {
+      assetId: string
+      clearParsePending: boolean
+      extractedText: string
+      pageCount: number | null
+      parseStatus: FileParseStatus
+      parseWarning: string | null
+      textTruncated: boolean
+      type: 'applyFileAssetClientParse'
+    }
   | { indexes: VectorIndexRecord[]; type: 'upsertServerVectorIndexes' }
   | {
     assistantMessageId: string
@@ -360,9 +478,19 @@ export type ResearchDeskAction =
   | { key: ProjectPanelLayoutKey; size: number; type: 'setPanelLayoutSize' }
   | { enabled: boolean; type: 'setChatChainingEnabled' }
   | { type: 'setSelectedChatModelTier'; tier: ChatModelTier | null }
+  // Apply the account preference to the working value ONLY — never to the
+  // thread (the agent seeding rule; writing it there would look like a user
+  // pick and shadow the thread's own stored one).
+  | { type: 'seedChatModelTierFromPreference'; tier: ChatModelTier }
   | { type: 'setSelectedChatModel'; model: string | null }
   | { type: 'setSelectedChatEffort'; effort: string | null }
   | { type: 'setSelectedAgentModelTier'; tier: ChatModelTier | null }
+  // Apply the account preference to the working value ONLY. It is not a user
+  // pick, so it must never touch the session: writing it there would bump
+  // updatedAt, make the local copy look newer than the server row, and block
+  // the session's own stored pick from ever loading (root cause of the first
+  // failed attempt).
+  | { type: 'seedAgentModelTierFromPreference'; tier: ChatModelTier }
   | { type: 'setSelectedAgentModel'; model: string | null }
   | { type: 'setSelectedAgentEffort'; effort: string | null }
   | { type: 'setSelectedStack'; stack: string }
@@ -372,6 +500,8 @@ export type ResearchDeskAction =
   | { fileId: string; label: string; type: 'renameFileAsset' }
   | { fileId: string; groupId: string | null; sectionId: string; type: 'moveFileAsset' }
   | { fileId: string; type: 'deleteFileAsset' }
+  | { fileIds: string[]; type: 'deleteFileAssets' }
+  | { fileIds: string[]; groupId: string | null; sectionId: string; type: 'moveFileAssets' }
   | { sectionId: string; title: string; type: 'createFileGroup' }
   | { groupId: string; title: string; type: 'renameFileGroup' }
   | { groupId: string; type: 'deleteFileGroup' }
@@ -384,12 +514,18 @@ export type ResearchDeskAction =
   | { dims?: number; indexId: string; model: EmbedModelId; type: 'setVectorIndexModel' }
   | { fileIds: string[]; indexId: string; type: 'addDocsToVectorIndex' }
   | { fileId: string; indexId: string; type: 'removeDocFromVectorIndex' }
-  | { indexId: string; jobId: string; runningFileIds?: string[]; source: IndexingJobLive['source']; totalDocuments: number; type: 'startVectorIndexReindex' }
+  | { fileId: string; indexId: string; serverDocumentId: string; type: 'reconcileVectorIndexMemberDocument' }
+  | { indexId: string; jobId: string; queuedFileIds?: string[]; runningFileIds?: string[]; source: IndexingJobLive['source']; status?: IndexingJobLive['status']; totalDocuments: number; type: 'startVectorIndexReindex' }
   | { indexId: string; queuePosition: number | null; type: 'markVectorIndexQueued' }
-  | { completedDocuments: number; currentDocumentTitle?: string; embedded?: boolean; fileId?: string; indexId: string; totalDocuments: number; type: 'markVectorIndexProgress' }
+  | { currentBatch?: number; fileId: string; indexId: string; phase?: string; queuePosition?: number | null; status: 'queued' | 'running' | 'cancelling'; totalBatches?: number; type: 'markVectorIndexMemberProgress' }
+  | { completedDocuments: number; currentBatch: number; indexId: string; message: string; phase: string; status: 'paused_dependency' | 'paused_validation'; totalBatches: number; totalDocuments: number; type: 'markVectorIndexPaused' }
+  | { indexId: string; totalDocuments: number; type: 'markVectorIndexResumed' }
+  | { indexId: string; type: 'markVectorIndexSuperseded' }
+  | { completedDocuments: number; currentDocumentTitle?: string; embedded?: boolean; fileId?: string; indexId: string; runningFileIds?: string[]; totalDocuments: number; type: 'markVectorIndexProgress' }
   | { indexId: string; serverDocumentId: string; type: 'markVectorIndexDocumentEmbedded' }
-  | { embeddedFileIds?: string[]; skippedFileIds?: string[]; indexId: string; serverCollectionId?: string; serverCollectionModel?: string; serverDocumentIds?: Record<string, string>; type: 'completeVectorIndexReindex' }
-  | { indexId: string; message: string; type: 'markVectorIndexError' }
+  | { embeddedFileIds: string[]; skippedFileIds: string[]; indexId: string; serverCollectionId: string; serverCollectionModel: string; serverDocumentIds: Record<string, string>; type: 'adoptVectorIndexPartialResult' }
+  | { embeddedFileIds?: string[]; skippedFileIds?: string[]; indexId: string; result?: 'cancelled' | 'ok'; serverCollectionId?: string; serverCollectionModel?: string; serverDocumentIds?: Record<string, string>; type: 'completeVectorIndexReindex' }
+  | { indexId: string; message: string; serverCollectionId?: string; serverCollectionModel?: string; type: 'markVectorIndexError' }
   | { indexId: string; type: 'markVectorIndexCancelled' }
   | { title: string; type: 'createKnowledgeSessionGroup' }
   | { groupId: string; type: 'deleteKnowledgeSessionGroup' }
@@ -397,7 +533,8 @@ export type ResearchDeskAction =
   | { groupId: string; title: string; type: 'renameKnowledgeSessionGroup' }
   | { groupId: string | null; sessionId: string; targetIndex: number; type: 'moveKnowledgeSessionToGroup' }
   | { session: KnowledgeSessionRecord; type: 'createKnowledgeSession' }
-  | { type: 'deleteKnowledgeSession'; sessionId: string }
+  | { operationId?: string | null; type: 'deleteKnowledgeSession'; sessionId: string }
+  | { deletion: SessionDeletionState; sessionId: string; type: 'setKnowledgeSessionDeletionState' }
   | { sessionId: string; type: 'togglePinnedKnowledgeSession' }
   | { title: string; sessionId: string; type: 'renameKnowledgeSession' }
   | { type: 'selectKnowledgeSession'; sessionId: string }
@@ -448,8 +585,16 @@ export function researchDeskReducer(
     for (const [from, to] of replacements) {
       const section = fileLibrarySections[from]
       delete fileLibrarySections[from]
-      fileLibrarySections[to] = { ...section, id: to }
+      // A server-canonical row may already have arrived through another
+      // observation. Never overwrite it with this tab's bootstrap placeholder;
+      // only redirect local child references to its identity.
+      if (!fileLibrarySections[to]) {
+        fileLibrarySections[to] = { ...section, id: to }
+      }
     }
+    const fileLibrarySectionOrder = [...new Set(
+      state.fileLibrarySectionOrder.map(replaceId),
+    )]
     return {
       ...state,
       dirty: true,
@@ -461,7 +606,7 @@ export function researchDeskReducer(
         id,
         { ...group, sectionId: replaceId(group.sectionId) },
       ])),
-      fileLibrarySectionOrder: state.fileLibrarySectionOrder.map(replaceId),
+      fileLibrarySectionOrder,
       fileLibrarySections,
     }
   }
@@ -594,70 +739,70 @@ export function researchDeskReducer(
   }
   if (action.type === 'setSelectedChatModelTier') {
     // Picking a tier (the fallback picker) clears any explicit model choice.
-    return {
-      ...state,
-      dirty: true,
-      ui: {
-        ...state.ui,
-        selectedChatModelTier: action.tier,
-        selectedChatModel: null,
-        selectedChatEffort: null,
-      },
-    }
+    return withChatThreadModelSelection(state, {
+      ...state.ui,
+      selectedChatModelTier: action.tier,
+      selectedChatModel: null,
+      selectedChatEffort: null,
+    })
   }
   if (action.type === 'setSelectedChatModel') {
     // Picking a concrete model clears the tier and resets effort to the
     // model's provider default (the reasoning control re-sets it explicitly).
-    return {
-      ...state,
-      dirty: true,
-      ui: {
-        ...state.ui,
-        selectedChatModel: action.model,
-        selectedChatModelTier: null,
-        selectedChatEffort: null,
-      },
-    }
+    return withChatThreadModelSelection(state, {
+      ...state.ui,
+      selectedChatModel: action.model,
+      selectedChatModelTier: null,
+      selectedChatEffort: null,
+    })
   }
   if (action.type === 'setSelectedChatEffort') {
-    return {
-      ...state,
-      dirty: true,
-      ui: { ...state.ui, selectedChatEffort: action.effort },
-    }
+    return withChatThreadModelSelection(state, {
+      ...state.ui,
+      selectedChatEffort: action.effort,
+    })
+  }
+  if (action.type === 'seedChatModelTierFromPreference') {
+    if (
+      state.ui.selectedChatModelTier !== null
+      || state.ui.selectedChatModel !== null
+    ) return state
+    // ui only, no dirty: a preference echo is not a project change, and the
+    // thread is deliberately untouched.
+    return { ...state, ui: { ...state.ui, selectedChatModelTier: action.tier } }
   }
   if (action.type === 'setSelectedAgentModelTier') {
     // Same exclusivity contract as the chat picker: a tier pick clears
     // the explicit model AND the effort (effort is model-dependent).
-    return {
-      ...state,
-      dirty: true,
-      ui: {
-        ...state.ui,
-        selectedAgentModelTier: action.tier,
-        selectedAgentModel: null,
-        selectedAgentEffort: null,
-      },
-    }
+    return withAgentSessionModelSelection(state, {
+      ...state.ui,
+      selectedAgentModelTier: action.tier,
+      selectedAgentModel: null,
+      selectedAgentEffort: null,
+    })
   }
   if (action.type === 'setSelectedAgentModel') {
-    return {
-      ...state,
-      dirty: true,
-      ui: {
-        ...state.ui,
-        selectedAgentModel: action.model,
-        selectedAgentModelTier: null,
-        selectedAgentEffort: null,
-      },
-    }
+    return withAgentSessionModelSelection(state, {
+      ...state.ui,
+      selectedAgentModel: action.model,
+      selectedAgentModelTier: null,
+      selectedAgentEffort: null,
+    })
   }
   if (action.type === 'setSelectedAgentEffort') {
-    return {
-      ...state,
-      dirty: true,
-      ui: { ...state.ui, selectedAgentEffort: action.effort },
-    }
+    return withAgentSessionModelSelection(state, {
+      ...state.ui,
+      selectedAgentEffort: action.effort,
+    })
+  }
+  if (action.type === 'seedAgentModelTierFromPreference') {
+    if (
+      state.ui.selectedAgentModelTier !== null
+      || state.ui.selectedAgentModel !== null
+    ) return state
+    // ui only, no dirty: a preference echo is not a project change, and the
+    // session is deliberately untouched.
+    return { ...state, ui: { ...state.ui, selectedAgentModelTier: action.tier } }
   }
   if (action.type === 'setChatChainingEnabled') {
     return {
@@ -920,6 +1065,34 @@ export function researchDeskReducer(
       },
     }
   }
+  if (action.type === 'promoteEditorRecoveryDocument') {
+    const document = state.editorDocuments[action.documentId]
+    if (!document) return state
+    const { recovery, ...localDocument } = document
+    if (!recovery) return state
+    const updatedAt = new Date().toISOString()
+    const editorCommentOutbox = { ...(state.editorCommentOutbox ?? {}) }
+    for (const comment of Object.values(state.editorComments)) {
+      if (comment.documentId !== document.id) continue
+      editorCommentOutbox[comment.id] = {
+        documentId: document.id,
+        operation: 'upsert',
+        updatedAt: comment.updatedAt,
+      }
+    }
+    return {
+      ...state,
+      dirty: true,
+      editorCommentOutbox,
+      editorDocuments: {
+        ...state.editorDocuments,
+        [document.id]: {
+          ...localDocument,
+          updatedAt,
+        },
+      },
+    }
+  }
   if (action.type === 'renameEditorDocument') {
     const document = state.editorDocuments[action.documentId]
     const title = normalizeEditorDocumentTitle(action.title)
@@ -1117,6 +1290,22 @@ export function researchDeskReducer(
       ),
     }, updatedComment, 'upsert')
   }
+  if (action.type === 'adoptEditorCommentSuggestionDraft') {
+    const comment = state.editorComments[action.commentId]
+    if (!comment) return state
+    const updatedComment = {
+      ...comment,
+      anchor: action.anchor,
+      suggestionDraft: action.suggestionDraft,
+    }
+    return reconcilePrivateSuggestionDraftRecords({
+      ...state,
+      editorComments: {
+        ...state.editorComments,
+        [comment.id]: updatedComment,
+      },
+    }, [updatedComment])
+  }
   if (action.type === 'createEditorSuggestionGroup') {
     const now = new Date().toISOString()
     const commentIds = new Set(
@@ -1166,25 +1355,46 @@ export function researchDeskReducer(
         ? 'rejected'
         : 'stale'
     if (suggestion.status === status) return state
+    let editorComments = state.editorComments
+    const privateComment = suggestion.origin.commentId
+      ? state.editorComments[suggestion.origin.commentId]
+      : undefined
+    if (
+      action.type !== 'markEditorSuggestionStale'
+      && suggestion.privateDraft
+      && privateComment?.suggestionDraft?.patchId === suggestion.privateDraft.patchId
+    ) {
+      const { suggestionDraft, ...commentWithoutDraft } = privateComment
+      void suggestionDraft
+      editorComments = {
+        ...state.editorComments,
+        [privateComment.id]: commentWithoutDraft,
+      }
+    }
+    const updatedSuggestion: EditorSuggestionRecord = {
+      ...suggestion,
+      ...(action.type === 'acceptEditorSuggestion' && action.collaborationPublication
+        ? { collaborationPublication: action.collaborationPublication }
+        : {}),
+      status,
+      updatedAt: new Date().toISOString(),
+    }
+    if (action.type !== 'markEditorSuggestionStale') {
+      delete updatedSuggestion.privateDraft
+    }
     const nextState: ProjectState = {
       ...state,
       dirty: true,
+      editorComments,
       editorSuggestions: {
         ...state.editorSuggestions,
-        [suggestion.id]: {
-          ...suggestion,
-          ...(action.type === 'acceptEditorSuggestion' && action.collaborationPublication
-            ? { collaborationPublication: action.collaborationPublication }
-            : {}),
-          status,
-          updatedAt: new Date().toISOString(),
-        },
+        [suggestion.id]: updatedSuggestion,
       },
     }
     if (action.type !== 'acceptEditorSuggestion' || !suggestion.origin.commentId) {
       return nextState
     }
-    const comment = state.editorComments[suggestion.origin.commentId]
+    const comment = nextState.editorComments[suggestion.origin.commentId]
     if (!comment || comment.status === 'resolved') return nextState
     const updatedComment = { ...comment, status: 'resolved' as const, updatedAt: new Date().toISOString() }
     return markEditorCommentOutbox({
@@ -1470,6 +1680,14 @@ export function researchDeskReducer(
       for (const wire of action.artifacts) {
         const record = agentArtifactFromWire(wire)
         const existing = artifacts[record.artifactId]
+        if (existing?.status === 'writing' && existing.publicationId) {
+          // An SSE answer publication owns the body until ready/interrupted.
+          // A list request triggered just before `answer.started` may return
+          // the already-materialized full artifact; applying it here would
+          // replace the incremental Markdown with a one-frame jump.
+          artifactOrder.push(record.artifactId)
+          continue
+        }
         // The list row carries no body — keep a fetched body while it is
         // not older than the row's revision.
         artifacts[record.artifactId] =
@@ -1478,11 +1696,24 @@ export function researchDeskReducer(
             ? {
               ...record,
               contentMarkdown: existing.contentMarkdown,
+              payload: existing.payload,
               refs: existing.refs,
               revisions: existing.revisions,
             }
             : record
         artifactOrder.push(record.artifactId)
+      }
+      // A list request can start before `answer.started` and complete after
+      // the SSE publication already created a local writing artifact. That
+      // snapshot legitimately lacks the new id; retain every live publication
+      // in render order until a later authoritative row marks it terminal.
+      for (const artifactId of run.artifactOrder) {
+        const existing = artifacts[artifactId]
+        if (
+          !artifactOrder.includes(artifactId)
+          && existing?.status === 'writing'
+          && existing.publicationId
+        ) artifactOrder.push(artifactId)
       }
       return { ...run, artifacts, artifactOrder, artifactsStale: false }
     })
@@ -1490,6 +1721,8 @@ export function researchDeskReducer(
   if (action.type === 'setAgentRunArtifactDetail') {
     return updateAgentRun(state, action.runId, (run) => {
       const record = agentArtifactFromWire(action.artifact)
+      const existing = run.artifacts[record.artifactId]
+      if (existing?.status === 'writing' && existing.publicationId) return run
       return {
         ...run,
         artifacts: { ...run.artifacts, [record.artifactId]: record },
@@ -1537,7 +1770,9 @@ export function researchDeskReducer(
         : [action.session.id, ...state.agentSessionOrder],
       agentSessions: {
         ...state.agentSessions,
-        [action.session.id]: action.session,
+        // A locally created session is fully known — there is no pending
+        // detail fetch whose absence should hold back preference seeding.
+        [action.session.id]: { ...action.session, metadataHydrated: true },
       },
       ...withSelectedAgentSession(state, action.session.id),
     }
@@ -1582,14 +1817,35 @@ export function researchDeskReducer(
   }
   if (action.type === 'deleteAgentSession') {
     const session = state.agentSessions[action.sessionId]
-    if (!session) return state
+    if (!session && !action.operationId) return state
+    const removedRunIds = agentRunIdsForDeletedSession(
+      state.agentRuns,
+      action.sessionId,
+      session?.runIds ?? [],
+    )
+    const agentRuns = Object.fromEntries(
+      Object.entries(state.agentRuns).filter(([runId]) => !removedRunIds.has(runId)),
+    )
     const agentSessions = { ...state.agentSessions }
     delete agentSessions[action.sessionId]
-    const agentRuns = { ...state.agentRuns }
-    for (const runId of session.runIds) delete agentRuns[runId]
-    const agentSessionOrder = state.agentSessionOrder.filter(
-      (id) => id !== action.sessionId,
-    )
+    for (const [sessionId, candidate] of Object.entries(agentSessions)) {
+      const runIds = candidate.runIds.filter((runId) => !removedRunIds.has(runId))
+      if (
+        runIds.length === 0
+        && (
+          candidate.persistable === false
+          || removedRunIds.has(sessionId)
+          || state.agentRuns[sessionId] !== undefined
+        )
+      ) {
+        delete agentSessions[sessionId]
+      } else if (runIds.length !== candidate.runIds.length) {
+        agentSessions[sessionId] = { ...candidate, runIds }
+      }
+    }
+    const agentSessionOrder = state.agentSessionOrder.filter((id) => (
+      id !== action.sessionId && agentSessions[id] !== undefined
+    ))
     const nextSelected =
       state.selectedAgentSessionId === action.sessionId
         ? agentSessionOrder[0] ?? null
@@ -1601,6 +1857,15 @@ export function researchDeskReducer(
       // Deleting the ACTIVE session reassigns the selection — clear the
       // canvas so it does not keep the deleted session's tabs.
       agentCanvas: agentCanvasForSelection(state, nextSelected),
+      agentSessionDeletionReceipts: action.operationId
+        ? {
+          ...state.agentSessionDeletionReceipts,
+          [action.sessionId]: {
+            operationId: action.operationId,
+            runIds: [...removedRunIds],
+          },
+        }
+        : state.agentSessionDeletionReceipts,
       agentRuns,
       agentSessionOrder,
       agentSessions,
@@ -1609,15 +1874,34 @@ export function researchDeskReducer(
         ...selection.ui,
         pinnedExplorer: {
           ...state.ui.pinnedExplorer,
-          agentSessionIds: removeExplorerPin(
-            state.ui.pinnedExplorer.agentSessionIds,
-            action.sessionId,
+          agentSessionIds: state.ui.pinnedExplorer.agentSessionIds.filter(
+            (sessionId) => agentSessions[sessionId] !== undefined,
           ),
         },
       },
     }
   }
+  if (action.type === 'setAgentSessionDeletionState') {
+    const session = state.agentSessions[action.sessionId]
+    if (!session) return state
+    const nextSelected = state.selectedAgentSessionId === action.sessionId
+      ? state.agentSessionOrder.find((id) => (
+        id !== action.sessionId && !state.agentSessions[id]?.deletion
+      )) ?? null
+      : state.selectedAgentSessionId
+    const selection = withSelectedAgentSession(state, nextSelected)
+    return {
+      ...state,
+      agentCanvas: agentCanvasForSelection(state, nextSelected),
+      agentSessions: {
+        ...state.agentSessions,
+        [action.sessionId]: { ...session, deletion: action.deletion },
+      },
+      ...selection,
+    }
+  }
   if (action.type === 'selectAgentSession') {
+    if (action.sessionId && state.agentSessions[action.sessionId]?.deletion) return state
     if (state.selectedAgentSessionId === action.sessionId) return state
     // A session switch clears the canvas (see agentCanvasForSelection).
     return {
@@ -1724,8 +2008,10 @@ export function researchDeskReducer(
     const agentSessions = { ...state.agentSessions }
     let agentSessionOrder = state.agentSessionOrder
     for (const wire of action.sessions) {
+      if (state.agentSessionDeletionReceipts?.[wire.id]) continue
       const existing = agentSessions[wire.id]
       const serverUpdatedAt = new Date(wire.updated_at * 1000).toISOString()
+      const deletion = sessionDeletionFromWire(wire)
       if (!existing) {
         const metadata = agentSessionMetadataFromJson(wire.items_json)
         agentSessions[wire.id] = {
@@ -1736,12 +2022,17 @@ export function researchDeskReducer(
           updatedAt: serverUpdatedAt,
           runIds: [],
           sourcePolicy: metadata.sourcePolicy,
+          modelSelection: metadata.modelSelection ?? undefined,
+          // The list endpoint is metadata-only; only a response that carried
+          // items_json proves the stored pick is actually known.
+          metadataHydrated: wire.items_json !== undefined,
           persistable: true,
+          ...(deletion ? { deletion } : {}),
         }
         if (!agentSessionOrder.includes(wire.id)) {
           agentSessionOrder = [...agentSessionOrder, wire.id]
         }
-      } else if (existing.updatedAt <= serverUpdatedAt) {
+      } else if (deletion || existing.updatedAt <= serverUpdatedAt) {
         const metadata = wire.items_json === undefined
           ? null
           : agentSessionMetadataFromJson(wire.items_json)
@@ -1754,7 +2045,16 @@ export function researchDeskReducer(
             metadata?.sourcePolicy
             ?? existing.sourcePolicy
             ?? { ...DEFAULT_AGENT_SOURCE_POLICY },
+          // Same local-newer-wins rule as the policy: only a row that
+          // actually carried metadata may replace the local pick.
+          modelSelection:
+            metadata === null
+              ? existing.modelSelection
+              : metadata.modelSelection ?? undefined,
+          metadataHydrated:
+            wire.items_json !== undefined ? true : existing.metadataHydrated,
           persistable: true,
+          ...(deletion ? { deletion } : { deletion: undefined }),
         }
       } else if (existing.persistable === false) {
         // A real server session wins over an identically keyed derived shell.
@@ -1774,12 +2074,41 @@ export function researchDeskReducer(
         agentSessionGroupOrder = [...agentSessionGroupOrder, wire.id]
       }
     }
+    const selectSessionId = action.selectSessionId
+      && agentSessions[action.selectSessionId]
+      && !agentSessions[action.selectSessionId].deletion
+      ? action.selectSessionId
+      : null
+    const selection = selectSessionId
+      ? withSelectedAgentSession(state, selectSessionId, agentSessions)
+      : null
+    // Project a freshly hydrated stored pick into an UNTOUCHED working value.
+    // A value the user (or a prior projection) already set stays: a fresh
+    // user pick made while the detail fetch was in flight must win.
+    const baseUi = selection ? selection.ui : state.ui
+    const activeId = selection ? selectSessionId : baseUi.selectedAgentSessionId
+    const storedPick = activeId ? agentSessions[activeId]?.modelSelection : undefined
+    const uiUntouched
+      = baseUi.selectedAgentModelTier === null && baseUi.selectedAgentModel === null
+    const ui = storedPick && uiUntouched
+      ? {
+        ...baseUi,
+        selectedAgentEffort: storedPick.effort,
+        selectedAgentModel: storedPick.model,
+        selectedAgentModelTier: storedPick.tier,
+      }
+      : baseUi
     return {
       ...state,
+      ...(selection ?? {}),
+      ...(selection
+        ? { agentCanvas: agentCanvasForSelection(state, selectSessionId) }
+        : {}),
       agentSessionGroupOrder,
       agentSessionGroups,
       agentSessionOrder,
       agentSessions,
+      ui,
     }
   }
   if (action.type === 'setAgentPlanDraft') {
@@ -1875,6 +2204,9 @@ export function researchDeskReducer(
             source: incoming.source,
             createdAt: incoming.createdAt,
             updatedAt: incoming.updatedAt,
+            // Server-newer-wins like the fields above; an absent value on a
+            // newer row means the pick was cleared elsewhere.
+            modelSelection: incoming.modelSelection,
           }
           chatThreadGroupMemberships[incoming.id] =
             action.memberships[incoming.id] ?? null
@@ -1903,11 +2235,28 @@ export function researchDeskReducer(
       : action.append
         ? [...state.chatThreadOrder, ...newIds]
         : [...newIds, ...state.chatThreadOrder]
+    // Project a freshly hydrated stored pick into an UNTOUCHED working value
+    // (the agent-hydrate rule): a pick made while the page was loading wins.
+    const activeThread = state.ui.selectedChatThreadId
+      ? chatThreads[state.ui.selectedChatThreadId]
+      : undefined
+    const storedPick = activeThread?.modelSelection
+    const uiUntouched
+      = state.ui.selectedChatModelTier === null && state.ui.selectedChatModel === null
+    const ui = storedPick && uiUntouched
+      ? {
+        ...state.ui,
+        selectedChatEffort: storedPick.effort,
+        selectedChatModel: storedPick.model,
+        selectedChatModelTier: storedPick.tier,
+      }
+      : state.ui
     return {
       ...state,
       chatThreadGroupMemberships,
       chatThreadOrder,
       chatThreads,
+      ui,
     }
   }
   if (action.type === 'upsertServerChatMessages') {
@@ -1918,9 +2267,7 @@ export function researchDeskReducer(
     if (!thread || action.messages.length === 0) return state
     const byId = new Map(thread.messages.map((message) => [message.id, message]))
     for (const message of action.messages) byId.set(message.id, message)
-    const messages = [...byId.values()].sort((a, b) =>
-      a.createdAt.localeCompare(b.createdAt),
-    )
+    const messages = [...byId.values()].sort(compareChatMessagesChronologically)
     return {
       ...state,
       chatThreads: {
@@ -1960,6 +2307,205 @@ export function researchDeskReducer(
     const dirty = action.persistLocal === false ? state.dirty : true
     return { ...state, dirty, serverSyncEnabled: action.enabled }
   }
+  if (action.type === 'reconcileServerEditorDocuments') {
+    // The paginated scope=all response is authoritative for remote access.
+    // A record observed or acknowledged by the server must not survive a
+    // missing authoritative row. Never-confirmed local drafts carry no server
+    // provenance and remain available as offline work.
+    const authoritativeIds = new Set(action.documents.map((document) => document.id))
+    const retiredDocumentIds = new Set([
+      ...(action.retiredDocumentIds ?? []),
+      ...Object.values(state.editorDocuments)
+        .filter((document) => (
+          (document.serverSynced === true || document.access?.mode === 'shared')
+          && !authoritativeIds.has(document.id)
+        ))
+        .map((document) => document.id),
+    ])
+    const recoveryCaptures = new Map(
+      (action.recoveryCaptures ?? []).map((capture) => [
+        capture.documentId,
+        capture,
+      ]),
+    )
+    const recoveryByOriginalId = new Map<string, EditorDocumentRecord>()
+    for (const documentId of retiredDocumentIds) {
+      const source = state.editorDocuments[documentId]
+      const capture = recoveryCaptures.get(documentId)
+      if (!source || !capture) continue
+      recoveryByOriginalId.set(
+        documentId,
+        createEditorRecoveryDocument(source, capture),
+      )
+    }
+    const editorDocuments: Record<string, EditorDocumentRecord> = Object.fromEntries(
+      Object.entries(state.editorDocuments)
+        .filter(([documentId]) => !retiredDocumentIds.has(documentId)),
+    )
+    for (const recovery of recoveryByOriginalId.values()) {
+      editorDocuments[recovery.id] = recovery
+    }
+    const retainedDocumentOrder = state.editorDocumentOrder.flatMap((documentId) => {
+      if (!retiredDocumentIds.has(documentId)) return [documentId]
+      const recovery = recoveryByOriginalId.get(documentId)
+      return recovery ? [recovery.id] : []
+    })
+    for (const recovery of recoveryByOriginalId.values()) {
+      if (!retainedDocumentOrder.includes(recovery.id)) {
+        retainedDocumentOrder.unshift(recovery.id)
+      }
+    }
+    const newIds: string[] = []
+    for (const incoming of action.documents) {
+      const local = editorDocuments[incoming.id]
+      if (local) {
+        editorDocuments[incoming.id] = mergeServerEditorDocumentMetadata(
+          local,
+          incoming,
+        )
+      } else {
+        editorDocuments[incoming.id] = {
+          ...incoming,
+          serverSynced: true,
+        }
+        newIds.push(incoming.id)
+      }
+    }
+    const sortedNew = newIds.sort((a, b) =>
+      editorDocuments[b].updatedAt.localeCompare(editorDocuments[a].updatedAt),
+    )
+    const editorDocumentOrder = sortedNew.length > 0
+      ? [...sortedNew, ...retainedDocumentOrder]
+      : retainedDocumentOrder
+    const editorComments: Record<string, EditorCommentThreadRecord> = Object.fromEntries(
+      Object.entries(state.editorComments).filter(([, comment]) => (
+        !retiredDocumentIds.has(comment.documentId)
+      )),
+    )
+    const recoveryCommentIdByOriginalId = new Map<string, string>()
+    for (const [commentId, outboxEntry] of Object.entries(
+      state.editorCommentOutbox ?? {},
+    )) {
+      if (outboxEntry.operation !== 'upsert') continue
+      const recovery = recoveryByOriginalId.get(outboxEntry.documentId)
+      const comment = state.editorComments[commentId]
+      if (!recovery || !comment) continue
+      const recoveryCommentId = createId('editor-comment')
+      recoveryCommentIdByOriginalId.set(commentId, recoveryCommentId)
+      const { suggestionDraft, ...localComment } = comment
+      void suggestionDraft
+      editorComments[recoveryCommentId] = {
+        ...localComment,
+        documentId: recovery.id,
+        id: recoveryCommentId,
+      }
+    }
+    const editorCommentOutbox = Object.fromEntries(
+      Object.entries(state.editorCommentOutbox ?? {}).filter(([, entry]) => (
+        !retiredDocumentIds.has(entry.documentId)
+      )),
+    )
+    const editorSuggestionGroups: Record<string, EditorSuggestionGroupRecord> = Object.fromEntries(
+      Object.entries(state.editorSuggestionGroups).filter(([, group]) => (
+        !retiredDocumentIds.has(group.documentId)
+      )),
+    )
+    const editorSuggestions: Record<string, EditorSuggestionRecord> = Object.fromEntries(
+      Object.entries(state.editorSuggestions).filter(([, suggestion]) => (
+        !retiredDocumentIds.has(suggestion.documentId)
+      )),
+    )
+    const recoveryGroupIdByOriginalId = new Map<string, string>()
+    for (const suggestion of Object.values(state.editorSuggestions)) {
+      if (suggestion.status !== 'pending') continue
+      const recovery = recoveryByOriginalId.get(suggestion.documentId)
+      const sourceGroup = state.editorSuggestionGroups[suggestion.groupId]
+      if (!recovery || !sourceGroup) continue
+      const origin = remapRecoverySuggestionOrigin(
+        suggestion.origin,
+        recoveryCommentIdByOriginalId,
+      )
+      const groupOrigin = remapRecoverySuggestionOrigin(
+        sourceGroup.origin,
+        recoveryCommentIdByOriginalId,
+      )
+      if (!origin || !groupOrigin) continue
+      let recoveryGroupId = recoveryGroupIdByOriginalId.get(sourceGroup.id)
+      if (!recoveryGroupId) {
+        recoveryGroupId = createId('editor-suggestion-group')
+        recoveryGroupIdByOriginalId.set(sourceGroup.id, recoveryGroupId)
+        editorSuggestionGroups[recoveryGroupId] = {
+          ...sourceGroup,
+          documentId: recovery.id,
+          id: recoveryGroupId,
+          origin: groupOrigin,
+        }
+      }
+      const recoverySuggestionId = createId('editor-suggestion')
+      const localSuggestion = { ...suggestion }
+      delete localSuggestion.collaborationPublication
+      delete localSuggestion.privateDraft
+      editorSuggestions[recoverySuggestionId] = {
+        ...localSuggestion,
+        documentId: recovery.id,
+        groupId: recoveryGroupId,
+        id: recoverySuggestionId,
+        origin,
+      }
+    }
+    const openDocumentIds = state.editorUi.openDocumentIds.flatMap((documentId) => {
+      if (!retiredDocumentIds.has(documentId)) return [documentId]
+      const recovery = recoveryByOriginalId.get(documentId)
+      return recovery ? [recovery.id] : []
+    })
+    const previousActiveDocumentId = state.editorUi.activeDocumentId
+    const activeRecovery = previousActiveDocumentId
+      ? recoveryByOriginalId.get(previousActiveDocumentId)
+      : undefined
+    const activeDocumentId = (
+      previousActiveDocumentId
+      && !retiredDocumentIds.has(previousActiveDocumentId)
+    )
+      ? previousActiveDocumentId
+      : activeRecovery?.id
+        ?? openDocumentIds[openDocumentIds.length - 1]
+        ?? editorDocumentOrder[0]
+        ?? null
+    const selectedCommentId = state.editorUi.selectedCommentId
+      ? recoveryCommentIdByOriginalId.get(state.editorUi.selectedCommentId)
+        ?? (
+          editorComments[state.editorUi.selectedCommentId]
+            ? state.editorUi.selectedCommentId
+            : null
+        )
+      : null
+    return {
+      ...state,
+      dirty: recoveryByOriginalId.size > 0 ? true : state.dirty,
+      editorCommentOutbox,
+      editorComments,
+      editorDocumentOrder,
+      editorDocuments,
+      editorSuggestionGroups,
+      editorSuggestions,
+      editorUi: {
+        ...state.editorUi,
+        activeDocumentId,
+        openDocumentIds: activeDocumentId
+          ? addOpenEditorDocumentId(openDocumentIds, activeDocumentId)
+          : openDocumentIds,
+        selectedCommentId,
+      },
+      ui: {
+        ...state.ui,
+        pinnedExplorer: {
+          ...state.ui.pinnedExplorer,
+          editorDocumentIds: state.ui.pinnedExplorer.editorDocumentIds
+            .filter((documentId) => !retiredDocumentIds.has(documentId)),
+        },
+      },
+    }
+  }
   if (action.type === 'upsertServerEditorDocuments') {
     // Hydrate document METADATA from the server (M6b). Additive + local-
     // newer-wins + KEEPS the local body (the body loads separately via
@@ -1970,14 +2516,15 @@ export function researchDeskReducer(
     for (const incoming of action.documents) {
       const local = editorDocuments[incoming.id]
       if (local) {
-        if (incoming.updatedAt > local.updatedAt) {
-          editorDocuments[incoming.id] = {
-            ...incoming,
-            contentMarkdown: local.contentMarkdown,
-          }
-        }
+        editorDocuments[incoming.id] = mergeServerEditorDocumentMetadata(
+          local,
+          incoming,
+        )
       } else {
-        editorDocuments[incoming.id] = incoming
+        editorDocuments[incoming.id] = {
+          ...incoming,
+          serverSynced: true,
+        }
         newIds.push(incoming.id)
       }
     }
@@ -2004,6 +2551,7 @@ export function researchDeskReducer(
           collaboration: action.collaboration,
           contentMode: 'collaboration',
           ...(metadataRevision === undefined ? {} : { metadataRevision }),
+          serverSynced: true,
         },
       },
     }
@@ -2032,14 +2580,22 @@ export function researchDeskReducer(
     // fingerprint (updatedAt) stays put. No-op if the revision did not move
     // forward (a late/duplicate adopt must not rewind a fresher base).
     const document = state.editorDocuments[action.documentId]
-    if (!document || action.revision <= document.revision) return state
+    if (
+      !document
+      || action.revision < document.revision
+      || (
+        action.revision === document.revision
+        && document.serverSynced === true
+      )
+    ) return state
     return {
       ...state,
       editorDocuments: {
         ...state.editorDocuments,
         [action.documentId]: {
           ...document,
-          revision: action.revision,
+          revision: Math.max(document.revision, action.revision),
+          serverSynced: true,
         },
       },
     }
@@ -2050,7 +2606,11 @@ export function researchDeskReducer(
     if (
       !document
       || !Number.isSafeInteger(action.metadataRevision)
-      || action.metadataRevision <= currentRevision
+      || action.metadataRevision < currentRevision
+      || (
+        action.metadataRevision === currentRevision
+        && document.serverSynced === true
+      )
     ) return state
     return {
       ...state,
@@ -2058,7 +2618,8 @@ export function researchDeskReducer(
         ...state.editorDocuments,
         [action.documentId]: {
           ...document,
-          metadataRevision: action.metadataRevision,
+          metadataRevision: Math.max(currentRevision, action.metadataRevision),
+          serverSynced: true,
         },
       },
     }
@@ -2082,6 +2643,7 @@ export function researchDeskReducer(
             ...document,
             contentMarkdown: action.contentMarkdown,
             revision: action.revision,
+            serverSynced: true,
           },
         },
       }
@@ -2099,6 +2661,7 @@ export function researchDeskReducer(
         [action.documentId]: {
           ...document,
           revision: action.revision,
+          serverSynced: true,
         },
       },
     }
@@ -2147,7 +2710,10 @@ export function researchDeskReducer(
         editorComments[incoming.id] = incoming
       }
     }
-    return { ...state, editorComments }
+    return reconcilePrivateSuggestionDraftRecords(
+      { ...state, editorComments },
+      action.comments,
+    )
   }
   if (action.type === 'reconcileServerEditorComments') {
     const preserveCommentIds = new Set(action.preserveCommentIds)
@@ -2178,7 +2744,7 @@ export function researchDeskReducer(
           !suggestion.origin.commentId
           || !removedCommentIds.has(suggestion.origin.commentId)
         )))
-    return {
+    return reconcilePrivateSuggestionDraftRecords({
       ...state,
       editorComments,
       editorSuggestions,
@@ -2186,7 +2752,7 @@ export function researchDeskReducer(
         && removedCommentIds.has(state.editorUi.selectedCommentId)
         ? { ...state.editorUi, selectedCommentId: null }
         : state.editorUi,
-    }
+    }, action.comments)
   }
   if (action.type === 'upsertServerAssetSections') {
     // Hydrate file-library section metadata (M6c). Additive + local-newer-
@@ -2198,6 +2764,9 @@ export function researchDeskReducer(
       const local = fileLibrarySections[incoming.id]
       if (local) {
         if (incoming.updatedAt > local.updatedAt) fileLibrarySections[incoming.id] = incoming
+        else if (incoming.serverSynced === true && local.serverSynced !== true) {
+          fileLibrarySections[incoming.id] = { ...local, serverSynced: true }
+        }
       } else {
         fileLibrarySections[incoming.id] = incoming
         newIds.push(incoming.id)
@@ -2211,6 +2780,54 @@ export function researchDeskReducer(
       : state.fileLibrarySectionOrder
     return { ...state, fileLibrarySectionOrder, fileLibrarySections }
   }
+  if (action.type === 'markFileLibrarySectionServerSynced') {
+    const section = state.fileLibrarySections[action.sectionId]
+    if (!section || section.serverSynced === true) return state
+    return {
+      ...state,
+      fileLibrarySections: {
+        ...state.fileLibrarySections,
+        [section.id]: { ...section, serverSynced: true },
+      },
+    }
+  }
+  if (action.type === 'pruneLocalBootstrapFileSections') {
+    // A fresh client state contains three prepared sections with new opaque
+    // IDs. Once this owner/workspace already has server sections, those local
+    // placeholders must not be autosaved as another pair on every reload.
+    // Keep anything the user has touched/referenced, and retain a temporary
+    // section if the server scope has none so the upload invariant survives.
+    const serverIds = new Set(action.serverIds)
+    const hiddenServerIds = new Set(action.hiddenServerIds)
+    const referencedIds = new Set([
+      ...Object.values(state.fileGroups).map((group) => group.sectionId),
+      ...Object.values(state.fileAssets).map((asset) => asset.sectionId),
+    ])
+    const keep = (sectionId: string) => {
+      const section = state.fileLibrarySections[sectionId]
+      if (!section) return false
+      if (
+        hiddenServerIds.has(sectionId)
+        && !referencedIds.has(sectionId)
+        && isPristineDefaultFileSection(section)
+      ) return false
+      if (
+        serverIds.has(sectionId)
+        || referencedIds.has(sectionId)
+        || section.isBootstrapPlaceholder !== true
+      ) return true
+      return section.kind === 'temporary' && !action.serverHasTemporarySection
+    }
+    const removedIds = state.fileLibrarySectionOrder.filter((id) => !keep(id))
+    if (removedIds.length === 0) return state
+    const fileLibrarySections = { ...state.fileLibrarySections }
+    for (const id of removedIds) delete fileLibrarySections[id]
+    return {
+      ...state,
+      fileLibrarySectionOrder: state.fileLibrarySectionOrder.filter(keep),
+      fileLibrarySections,
+    }
+  }
   if (action.type === 'upsertServerAssetGroups') {
     if (action.groups.length === 0) return state
     const fileGroups = { ...state.fileGroups }
@@ -2218,7 +2835,20 @@ export function researchDeskReducer(
     for (const incoming of action.groups) {
       const local = fileGroups[incoming.id]
       if (local) {
-        if (incoming.updatedAt > local.updatedAt) fileGroups[incoming.id] = incoming
+        if (incoming.updatedAt > local.updatedAt) {
+          fileGroups[incoming.id] = {
+            ...incoming,
+            deletionError: local.deletionError,
+            deletionOperationId: local.deletionOperationId,
+            deletionStage: local.deletionStage,
+            lifecycleStatus: local.lifecycleStatus,
+          }
+        } else if (incoming.serverSynced === true && local.serverSynced !== true) {
+          fileGroups[incoming.id] = {
+            ...local,
+            serverSynced: true,
+          }
+        }
       } else {
         fileGroups[incoming.id] = incoming
         newIds.push(incoming.id)
@@ -2232,6 +2862,17 @@ export function researchDeskReducer(
       : state.fileGroupOrder
     return { ...state, fileGroupOrder, fileGroups }
   }
+  if (action.type === 'markFileGroupServerSynced') {
+    const group = state.fileGroups[action.groupId]
+    if (!group || group.serverSynced === true) return state
+    return {
+      ...state,
+      fileGroups: {
+        ...state.fileGroups,
+        [group.id]: { ...group, serverSynced: true },
+      },
+    }
+  }
   if (action.type === 'upsertServerAssetMetadata') {
     // Hydrate asset METADATA from the server (M6c). Additive + local-newer-
     // wins + KEEPS the local extractedText (the body loads separately via
@@ -2244,7 +2885,83 @@ export function researchDeskReducer(
       const local = fileAssets[incoming.id]
       if (local) {
         if (incoming.updatedAt > local.updatedAt) {
-          fileAssets[incoming.id] = { ...incoming, extractedText: local.extractedText }
+          const samePreparedBody = Boolean(
+            incoming.preparedContentHash
+            && incoming.preparedContentHash === local.preparedContentHash,
+          )
+          fileAssets[incoming.id] = {
+            ...incoming,
+            extractedText: local.extractedText,
+            preparedText: incoming.preparedText?.trim()
+              ? incoming.preparedText
+              : samePreparedBody
+                ? local.preparedText
+                : '',
+          }
+        } else if (
+          incoming.lifecycleStatus !== local.lifecycleStatus
+          || incoming.deletionOperationId !== local.deletionOperationId
+          || incoming.deletionStage !== local.deletionStage
+          || incoming.deletionError !== local.deletionError
+          || incoming.uploadPending !== local.uploadPending
+          || incoming.uploadError !== local.uploadError
+          || incoming.uploadStatus !== local.uploadStatus
+          || incoming.uploadOperationId !== local.uploadOperationId
+          || incoming.serverFileId !== local.serverFileId
+          || incoming.preparedParserId !== local.preparedParserId
+          || incoming.preparedContentHash !== local.preparedContentHash
+          || incoming.preparedAt !== local.preparedAt
+          || (incoming.serverSynced === true && local.serverSynced !== true)
+          || (
+            incoming.uploadStatus === 'ready'
+            && Boolean(incoming.parserId)
+            && incoming.parserId !== 'client'
+            && (
+              incoming.parserId !== local.parserId
+              || incoming.parseStatus !== local.parseStatus
+              || incoming.parseWarning !== local.parseWarning
+              || incoming.textTruncated !== local.textTruncated
+            )
+          )
+        ) {
+          // Destructive lifecycle fields are server-owned and must converge
+          // even when the local user edited ordinary metadata more recently.
+          // Otherwise a second tab can keep rendering an active row and never
+          // resume polling a durable deletion operation.
+          fileAssets[incoming.id] = {
+            ...local,
+            deletionError: incoming.deletionError,
+            deletionOperationId: incoming.deletionOperationId,
+            deletionStage: incoming.deletionStage,
+            lifecycleStatus: incoming.lifecycleStatus,
+            uploadError: incoming.uploadError,
+            uploadOperationId: incoming.uploadOperationId,
+            uploadPending: incoming.uploadPending,
+            uploadStatus: incoming.uploadStatus,
+            serverFileId: incoming.serverFileId,
+            serverSynced: incoming.serverSynced === true || local.serverSynced === true,
+            preparedAt: incoming.preparedAt,
+            preparedContentHash: incoming.preparedContentHash,
+            preparedParserId: incoming.preparedParserId,
+            preparedText: incoming.preparedText?.trim()
+              ? incoming.preparedText
+              : incoming.preparedContentHash
+                  && incoming.preparedContentHash === local.preparedContentHash
+                ? local.preparedText
+                : '',
+            ...(
+              incoming.uploadStatus === 'ready'
+              && Boolean(incoming.parserId)
+              && incoming.parserId !== 'client'
+                ? {
+                    parserId: incoming.parserId,
+                    parseStatus: incoming.parseStatus,
+                    parseWarning: incoming.parseWarning,
+                    textTruncated: incoming.textTruncated,
+                  }
+                : {}
+            ),
+          }
         }
       } else {
         fileAssets[incoming.id] = incoming
@@ -2259,17 +2976,35 @@ export function researchDeskReducer(
       : state.fileAssetOrder
     return { ...state, fileAssetOrder, fileAssets }
   }
+  if (action.type === 'markFileAssetServerSynced') {
+    const asset = state.fileAssets[action.assetId]
+    if (!asset || asset.serverSynced === true) return state
+    return {
+      ...state,
+      fileAssets: {
+        ...state.fileAssets,
+        [asset.id]: { ...asset, serverSynced: true },
+      },
+    }
+  }
   if (action.type === 'setServerAssetBody') {
-    // Load-on-use: fill an asset's extractedText from the server. Never
-    // changes updatedAt (so the autosave does not read it back as a local
-    // edit) and never sets dirty. Mirror of setServerEditorDocumentBody.
+    // Load-on-use: keep the editable body separate from the server-fenced
+    // canonical body used by Chat/Editor. Never changes updatedAt (so the
+    // autosave does not read it back as a local edit) and never sets dirty.
     const asset = state.fileAssets[action.assetId]
     if (!asset) return state
     return {
       ...state,
       fileAssets: {
         ...state.fileAssets,
-        [action.assetId]: { ...asset, extractedText: action.extractedText },
+        [action.assetId]: {
+          ...asset,
+          extractedText: action.extractedText,
+          preparedAt: action.preparedAt,
+          preparedContentHash: action.preparedContentHash,
+          preparedParserId: action.preparedParserId,
+          preparedText: action.preparedText,
+        },
       },
     }
   }
@@ -2317,6 +3052,177 @@ export function researchDeskReducer(
       fileAssets: {
         ...state.fileAssets,
         [asset.id]: { ...asset, parsePending: action.pending },
+      },
+    }
+  }
+  if (action.type === 'setFileAssetUploadPending') {
+    // Transient upload-in-flight flag (drives the "Wird hochgeladen…"
+    // badge). Never dirty/persisted. Entering pending also clears a
+    // previous upload error — this is the retry entry point.
+    const asset = state.fileAssets[action.assetId]
+    if (
+      !asset
+      || (Boolean(asset.uploadPending) === action.pending
+        && (!action.pending || asset.uploadError == null))
+    ) {
+      return state
+    }
+    return {
+      ...state,
+      fileAssets: {
+        ...state.fileAssets,
+        [asset.id]: {
+          ...asset,
+          uploadPending: action.pending,
+          ...(action.pending ? { uploadError: null } : {}),
+          ...(action.pending
+            ? { uploadStatus: asset.uploadOperationId ? 'retrying' : 'uploading' }
+            : {}),
+        },
+      },
+    }
+  }
+  if (action.type === 'adoptFileAssetUploadLifecycle') {
+    const asset = state.fileAssets[action.assetId]
+    if (!asset || (asset.lifecycleStatus ?? 'active') !== 'active' || !action.status) {
+      return state
+    }
+    const pending = action.status === 'awaiting_upload'
+      || action.status === 'uploading'
+      || action.status === 'retrying'
+      || action.status === 'parsing'
+      || action.status === 'finalizing'
+    const ready = action.status === 'ready' && action.serverFileId !== null
+    return {
+      ...state,
+      ...(ready ? { dirty: true } : {}),
+      fileAssets: {
+        ...state.fileAssets,
+        [asset.id]: {
+          ...asset,
+          ...(ready
+            ? {
+                parseWarning: stripServerUploadFailureWarning(asset.parseWarning),
+                serverFileId: action.serverFileId,
+                serverSynced: true,
+                updatedAt: new Date().toISOString(),
+              }
+            : {}),
+          uploadError: action.error,
+          uploadOperationId: action.operationId,
+          uploadPending: pending,
+          uploadStatus: action.status,
+        },
+      },
+    }
+  }
+  if (action.type === 'completeFileAssetUpload') {
+    // The original bytes reached the server. serverFileId is persisted
+    // data (enables server parse + knowledge ingestion), so this is a
+    // real edit: bumps updatedAt + dirty. Also settles the transient
+    // upload state and retracts a persisted earlier-failure warning —
+    // "Datei bleibt lokal" is false once the retry succeeded.
+    const asset = state.fileAssets[action.assetId]
+    if (!asset || (asset.lifecycleStatus ?? 'active') !== 'active') return state
+    return {
+      ...state,
+      dirty: true,
+      fileAssets: {
+        ...state.fileAssets,
+        [asset.id]: {
+          ...asset,
+          parseWarning: stripServerUploadFailureWarning(asset.parseWarning),
+          serverFileId: action.serverFileId,
+          serverSynced: true,
+          updatedAt: new Date().toISOString(),
+          uploadError: null,
+          uploadStatus: 'ready',
+          uploadPending: false,
+        },
+      },
+    }
+  }
+  if (action.type === 'failFileAssetUpload') {
+    // Upload failed: the transient error drives the badge + retry; the
+    // persisted trace goes into parseWarning (same wording contract as
+    // the batch ingest path), so a reload shows the same local-only
+    // warning. Bumps updatedAt + dirty for the warning only.
+    const asset = state.fileAssets[action.assetId]
+    if (!asset || (asset.lifecycleStatus ?? 'active') !== 'active') return state
+    const warning = asset.parseWarning
+      ? asset.parseWarning.includes(action.message)
+        ? asset.parseWarning
+        : `${asset.parseWarning} ${action.message}`
+      : action.message
+    return {
+      ...state,
+      dirty: true,
+      fileAssets: {
+        ...state.fileAssets,
+        [asset.id]: {
+          ...asset,
+          parseWarning: warning,
+          updatedAt: new Date().toISOString(),
+          uploadError: action.message,
+          uploadStatus: 'failed',
+          uploadPending: false,
+        },
+      },
+    }
+  }
+  if (action.type === 'applyFileAssetClientParse') {
+    // The deferred client parse settled onto a placeholder row. If the
+    // higher-fidelity server (MarkItDown) parse already landed, only
+    // backfill the page count — never downgrade its text or status.
+    // clearParsePending stays false while a server parse is still in
+    // flight for this asset, so the "Parsing…" badge hands over instead
+    // of flickering off and on.
+    const asset = state.fileAssets[action.assetId]
+    if (!asset || (asset.lifecycleStatus ?? 'active') !== 'active') return state
+    if (asset.parserId === 'markitdown') {
+      if (asset.pageCount != null || action.pageCount == null) {
+        if (!action.clearParsePending || !asset.parsePending) return state
+        return {
+          ...state,
+          fileAssets: {
+            ...state.fileAssets,
+            [asset.id]: { ...asset, parsePending: false },
+          },
+        }
+      }
+      return {
+        ...state,
+        dirty: true,
+        fileAssets: {
+          ...state.fileAssets,
+          [asset.id]: {
+            ...asset,
+            pageCount: action.pageCount,
+            updatedAt: new Date().toISOString(),
+            ...(action.clearParsePending ? { parsePending: false } : {}),
+          },
+        },
+      }
+    }
+    const warning = asset.parseWarning && action.parseWarning
+      ? `${action.parseWarning} ${asset.parseWarning}`
+      : action.parseWarning ?? asset.parseWarning
+    return {
+      ...state,
+      dirty: true,
+      fileAssets: {
+        ...state.fileAssets,
+        [asset.id]: {
+          ...asset,
+          extractedText: action.extractedText,
+          pageCount: action.pageCount,
+          parserId: 'client',
+          parseStatus: action.parseStatus,
+          parseWarning: warning,
+          textTruncated: action.textTruncated,
+          updatedAt: new Date().toISOString(),
+          ...(action.clearParsePending ? { parsePending: false } : {}),
+        },
       },
     }
   }
@@ -2383,7 +3289,10 @@ export function researchDeskReducer(
       ? touchKnowledgeSessions(
         updateKnowledgeItem({ ...state, dirty: true }, knowledgeItem.id, (item) => ({
           ...item,
-          answer: knowledgeAnswerFromRunResult(action.result),
+          answer: knowledgeAnswerWithRunProgress(
+            knowledgeAnswerFromRunResult(action.result),
+            item.progress,
+          ),
           completedAt,
           progress: {
             ...item.progress,
@@ -2514,7 +3423,8 @@ export function researchDeskReducer(
     return moveKnowledgeSessionToGroup(state, action.sessionId, action.groupId, action.targetIndex)
   }
   if (action.type === 'selectKnowledgeSession') {
-    if (!state.knowledgeSessions[action.sessionId]) return state
+    if (!state.knowledgeSessions[action.sessionId]
+      || state.knowledgeSessions[action.sessionId]?.deletion) return state
     return { ...state, selectedKnowledgeSessionId: action.sessionId }
   }
   if (action.type === 'renameKnowledgeSession') {
@@ -2538,7 +3448,7 @@ export function researchDeskReducer(
   if (action.type === 'deleteKnowledgeSession') {
     // The last remaining session is deletable too: the empty state shows the
     // composer, and the next ask creates a fresh session (startKnowledgeAsk).
-    if (!state.knowledgeSessions[action.sessionId]) return state
+    if (!state.knowledgeSessions[action.sessionId] && !action.operationId) return state
     const knowledgeSessions = { ...state.knowledgeSessions }
     delete knowledgeSessions[action.sessionId]
     const knowledgeSessionOrder = state.knowledgeSessionOrder.filter((id) => id !== action.sessionId)
@@ -2562,6 +3472,12 @@ export function researchDeskReducer(
       knowledgeSessionGroupMemberships,
       knowledgeSessionOrder,
       knowledgeSessions,
+      knowledgeSessionDeletionReceipts: action.operationId
+        ? {
+          ...state.knowledgeSessionDeletionReceipts,
+          [action.sessionId]: action.operationId,
+        }
+        : state.knowledgeSessionDeletionReceipts,
       selectedKnowledgeSessionId,
       ui: {
         ...state.ui,
@@ -2570,6 +3486,23 @@ export function researchDeskReducer(
           knowledgeSessionIds: removeExplorerPin(state.ui.pinnedExplorer.knowledgeSessionIds, action.sessionId),
         },
       },
+    }
+  }
+  if (action.type === 'setKnowledgeSessionDeletionState') {
+    const session = state.knowledgeSessions[action.sessionId]
+    if (!session) return state
+    const selectedKnowledgeSessionId = state.selectedKnowledgeSessionId === action.sessionId
+      ? state.knowledgeSessionOrder.find((id) => (
+        id !== action.sessionId && !state.knowledgeSessions[id]?.deletion
+      )) ?? null
+      : state.selectedKnowledgeSessionId
+    return {
+      ...state,
+      knowledgeSessions: {
+        ...state.knowledgeSessions,
+        [action.sessionId]: { ...session, deletion: action.deletion },
+      },
+      selectedKnowledgeSessionId,
     }
   }
   if (action.type === 'upsertServerKnowledgeSessionGroups') {
@@ -2599,9 +3532,10 @@ export function researchDeskReducer(
     const knowledgeSessionGroupMemberships = { ...state.knowledgeSessionGroupMemberships }
     const newIds: string[] = []
     for (const incoming of action.sessions) {
+      if (state.knowledgeSessionDeletionReceipts?.[incoming.id]) continue
       const local = knowledgeSessions[incoming.id]
       if (local) {
-        if (incoming.updatedAt > local.updatedAt) {
+        if (incoming.deletion || incoming.updatedAt > local.updatedAt) {
           knowledgeSessions[incoming.id] = incoming
           knowledgeSessionGroupMemberships[incoming.id] =
             action.memberships[incoming.id] ?? null
@@ -2617,9 +3551,11 @@ export function researchDeskReducer(
       ? state.knowledgeSessionOrder
       : [...newIds, ...state.knowledgeSessionOrder]
     const selectedKnowledgeSessionId =
-      state.selectedKnowledgeSessionId && knowledgeSessions[state.selectedKnowledgeSessionId]
+      state.selectedKnowledgeSessionId
+        && knowledgeSessions[state.selectedKnowledgeSessionId]
+        && !knowledgeSessions[state.selectedKnowledgeSessionId].deletion
         ? state.selectedKnowledgeSessionId
-        : knowledgeSessionOrder[0] ?? null
+        : knowledgeSessionOrder.find((id) => !knowledgeSessions[id]?.deletion) ?? null
     return {
       ...state,
       knowledgeSessionGroupMemberships,
@@ -2671,6 +3607,7 @@ export function researchDeskReducer(
     }
   }
   if (action.type === 'setServerKnowledgeSessionItems') {
+    if (state.knowledgeSessionDeletionReceipts?.[action.sessionId]) return state
     const session = state.knowledgeSessions[action.sessionId]
     if (!session) return state
     const existingOtherIds = state.knowledgeItemOrder.filter((itemId) =>
@@ -2855,9 +3792,19 @@ export function researchDeskReducer(
     }
   }
   if (action.type === 'selectChatThread') {
+    if (state.ui.selectedChatThreadId === action.threadId) return state
+    // Project the target thread's own pick into the working value — ui only.
+    // A thread without a stored pick clears it so the preference may seed.
+    const selection = state.chatThreads[action.threadId]?.modelSelection ?? null
     return {
       ...state,
-      ui: { ...state.ui, selectedChatThreadId: action.threadId },
+      ui: {
+        ...state.ui,
+        selectedChatThreadId: action.threadId,
+        selectedChatEffort: selection?.effort ?? null,
+        selectedChatModel: selection?.model ?? null,
+        selectedChatModelTier: selection?.tier ?? null,
+      },
     }
   }
   if (action.type === 'setResearchRunAutocomplete') {
@@ -2948,7 +3895,6 @@ export function researchDeskReducer(
     if (!report) return state
 
     const thread = createChatThread({
-      includeGreeting: false,
       preview: `Report attached: ${report.title}`,
       title: `Chat: ${report.title}`,
     })
@@ -2999,7 +3945,12 @@ export function researchDeskReducer(
   if (action.type === 'renameFileAsset') {
     const asset = state.fileAssets[action.fileId]
     const label = action.label.trim()
-    if (!asset || !label || asset.label === label) return state
+    if (
+      !asset
+      || (asset.lifecycleStatus ?? 'active') !== 'active'
+      || !label
+      || asset.label === label
+    ) return state
     return {
       ...state,
       dirty: true,
@@ -3010,34 +3961,196 @@ export function researchDeskReducer(
     }
   }
   if (action.type === 'moveFileAsset') {
-    const asset = state.fileAssets[action.fileId]
-    if (!asset || !state.fileLibrarySections[action.sectionId]) return state
+    // The single move is the batch of one — one implementation, no drift.
+    return researchDeskReducer(state, {
+      fileIds: [action.fileId], groupId: action.groupId,
+      sectionId: action.sectionId, type: 'moveFileAssets',
+    })
+  }
+  if (action.type === 'moveFileAssets') {
+    // Bulk move (selection mode): ONE state update regardless of count.
+    if (!state.fileLibrarySections[action.sectionId]) return state
     const targetGroup = action.groupId ? state.fileGroups[action.groupId] : null
     const groupId = targetGroup && targetGroup.sectionId === action.sectionId ? action.groupId : null
-    if (asset.sectionId === action.sectionId && asset.groupId === groupId) return state
+    const now = new Date().toISOString()
+    let changed = false
+    const fileAssets = { ...state.fileAssets }
+    for (const fileId of action.fileIds) {
+      const asset = fileAssets[fileId]
+      if (
+        !asset
+        || (asset.lifecycleStatus ?? 'active') !== 'active'
+        || (asset.sectionId === action.sectionId && asset.groupId === groupId)
+      ) continue
+      fileAssets[fileId] = { ...asset, groupId, sectionId: action.sectionId, updatedAt: now }
+      changed = true
+    }
+    if (!changed) return state
+    return { ...state, dirty: true, fileAssets }
+  }
+  if (action.type === 'setFileAssetDeletionState') {
+    let changed = false
+    const fileAssets = { ...state.fileAssets }
+    for (const fileId of action.fileIds) {
+      const asset = fileAssets[fileId]
+      if (!asset) continue
+      if (
+        (
+          asset.deletionOperationId
+          && asset.deletionOperationId !== action.operationId
+        )
+        || (!asset.deletionOperationId && asset.serverSynced !== true)
+      ) continue
+      const lifecycleStatus = action.status === 'delete_failed' ? 'delete_failed' : 'deleting'
+      if (
+        asset.lifecycleStatus === lifecycleStatus
+        && asset.deletionOperationId === action.operationId
+        && asset.deletionStage === action.stage
+        && asset.deletionError === action.error
+      ) continue
+      fileAssets[fileId] = {
+        ...asset,
+        lifecycleStatus,
+        deletionError: action.error,
+        deletionOperationId: action.operationId,
+        deletionStage: action.stage,
+        parsePending: false,
+        uploadPending: false,
+      }
+      changed = true
+    }
+    return changed ? { ...state, fileAssets } : state
+  }
+  if (action.type === 'completeFileAssetDeletion') {
+    const ownedIds = action.fileIds.filter((fileId) => {
+      const asset = state.fileAssets[fileId]
+      return Boolean(
+        asset
+        && (
+          asset.lifecycleStatus === 'deleting'
+          || asset.lifecycleStatus === 'delete_failed'
+        )
+        && asset.deletionOperationId === action.operationId,
+      )
+    })
+    return researchDeskReducer(state, {
+      fileIds: ownedIds,
+      type: 'deleteFileAssets',
+    })
+  }
+  if (action.type === 'setFileGroupDeletionState') {
+    const group = state.fileGroups[action.groupId]
+    if (!group) return state
+    if (
+      (
+        group.deletionOperationId
+        && group.deletionOperationId !== action.operationId
+      )
+      || (!group.deletionOperationId && group.serverSynced !== true)
+    ) return state
+    const lifecycleStatus = action.status === 'delete_failed' ? 'delete_failed' : 'deleting'
+    if (
+      group.lifecycleStatus === lifecycleStatus
+      && group.deletionOperationId === action.operationId
+      && group.deletionStage === action.stage
+      && group.deletionError === action.error
+    ) return state
     return {
       ...state,
-      dirty: true,
-      fileAssets: {
-        ...state.fileAssets,
-        [asset.id]: { ...asset, groupId, sectionId: action.sectionId, updatedAt: new Date().toISOString() },
+      fileGroups: {
+        ...state.fileGroups,
+        [group.id]: {
+          ...group,
+          deletionError: action.error,
+          deletionOperationId: action.operationId,
+          deletionStage: action.stage,
+          lifecycleStatus,
+        },
       },
     }
   }
+  if (action.type === 'completeFileGroupDeletion') {
+    const group = state.fileGroups[action.groupId]
+    if (
+      !group
+      || (
+        group.lifecycleStatus !== 'deleting'
+        && group.lifecycleStatus !== 'delete_failed'
+      )
+      || group.deletionOperationId !== action.operationId
+    ) return state
+    return researchDeskReducer(state, {
+      groupId: action.groupId,
+      type: 'deleteFileGroup',
+    })
+  }
+  if (action.type === 'setFileLibrarySectionDeletionState') {
+    const section = state.fileLibrarySections[action.sectionId]
+    if (!section || section.kind === 'temporary') return state
+    if (
+      (
+        section.deletionOperationId
+        && section.deletionOperationId !== action.operationId
+      )
+      || (!section.deletionOperationId && section.serverSynced !== true)
+    ) return state
+    const lifecycleStatus = action.status === 'delete_failed' ? 'delete_failed' : 'deleting'
+    if (
+      section.lifecycleStatus === lifecycleStatus
+      && section.deletionOperationId === action.operationId
+      && section.deletionStage === action.stage
+      && section.deletionError === action.error
+    ) return state
+    return {
+      ...state,
+      fileLibrarySections: {
+        ...state.fileLibrarySections,
+        [section.id]: {
+          ...section,
+          deletionError: action.error,
+          deletionOperationId: action.operationId,
+          deletionStage: action.stage,
+          lifecycleStatus,
+        },
+      },
+    }
+  }
+  if (action.type === 'completeFileLibrarySectionDeletion') {
+    const section = state.fileLibrarySections[action.sectionId]
+    if (
+      !section
+      || (
+        section.lifecycleStatus !== 'deleting'
+        && section.lifecycleStatus !== 'delete_failed'
+      )
+      || section.deletionOperationId !== action.operationId
+    ) return state
+    return researchDeskReducer(state, {
+      sectionId: action.sectionId,
+      type: 'deleteFileLibrarySection',
+    })
+  }
   if (action.type === 'deleteFileAsset') {
-    if (!state.fileAssets[action.fileId]) return state
+    // The single delete is the batch of one — one implementation, no drift.
+    return researchDeskReducer(state, { fileIds: [action.fileId], type: 'deleteFileAssets' })
+  }
+  if (action.type === 'deleteFileAssets') {
+    // Bulk delete (selection mode): ONE state update regardless of count, so
+    // deleting hundreds of files costs one render + one autosave diff.
+    const removed = new Set(action.fileIds.filter((fileId) => state.fileAssets[fileId]))
+    if (removed.size === 0) return state
     const fileAssets = { ...state.fileAssets }
-    delete fileAssets[action.fileId]
-    const keepRef = (ref: ChatContextReferenceRecord) => ref.kind !== 'file-asset' || ref.fileId !== action.fileId
+    for (const fileId of removed) delete fileAssets[fileId]
+    const keepRef = (ref: ChatContextReferenceRecord) => ref.kind !== 'file-asset' || !removed.has(ref.fileId)
     const { vectorIndexes } = dropFilesFromVectorIndexes(
       state.vectorIndexes,
-      new Set([action.fileId]),
+      removed,
       new Date().toISOString(),
     )
     return {
       ...state,
       dirty: true,
-      fileAssetOrder: state.fileAssetOrder.filter((fileId) => fileId !== action.fileId),
+      fileAssetOrder: state.fileAssetOrder.filter((fileId) => !removed.has(fileId)),
       fileAssets,
       ui: {
         ...state.ui,
@@ -3104,7 +4217,13 @@ export function researchDeskReducer(
       dirty: true,
       fileLibrarySections: {
         ...state.fileLibrarySections,
-        [section.id]: { ...section, title, updatedAt: new Date().toISOString() },
+        [section.id]: {
+          ...section,
+          isBootstrapPlaceholder: false,
+          semanticRole: 'custom',
+          title,
+          updatedAt: new Date().toISOString(),
+        },
       },
     }
   }
@@ -3114,6 +4233,7 @@ export function researchDeskReducer(
       createdAt: now,
       id: createId('file-section'),
       kind: 'custom',
+      semanticRole: 'custom',
       title: action.title.trim() || 'Neue Sammlung',
       updatedAt: now,
     }
@@ -3266,9 +4386,42 @@ export function researchDeskReducer(
       updatedAt: new Date().toISOString(),
     })
   }
+  if (action.type === 'reconcileVectorIndexMemberDocument') {
+    const index = state.vectorIndexes[action.indexId]
+    if (!index) return state
+    const member = index.members.find((entry) => entry.fileId === action.fileId)
+    if (
+      !member
+      || member.serverDocumentId === action.serverDocumentId
+      || !action.serverDocumentId
+    ) return state
+    return writeVectorIndex(state, {
+      ...index,
+      members: index.members.map((entry) => (
+        entry.fileId === action.fileId
+          ? { ...entry, serverDocumentId: action.serverDocumentId }
+          : entry
+      )),
+      updatedAt: new Date().toISOString(),
+    })
+  }
   if (action.type === 'startVectorIndexReindex') {
     const index = state.vectorIndexes[action.indexId]
     if (!index) return state
+    const existing = state.indexingJobs[action.indexId]
+    if (existing?.jobId === action.jobId) {
+      return {
+        ...state,
+        indexingJobs: {
+          ...state.indexingJobs,
+          [action.indexId]: {
+            ...existing,
+            status: action.status ?? existing.status,
+            totalDocuments: action.totalDocuments,
+          },
+        },
+      }
+    }
     const now = new Date().toISOString()
     const next = writeVectorIndex(state, {
       ...index,
@@ -3283,6 +4436,12 @@ export function researchDeskReducer(
         [action.indexId]: {
           completedDocuments: 0,
           jobId: action.jobId,
+          memberProgress: Object.fromEntries(
+            (action.queuedFileIds ?? []).map((fileId) => [
+              fileId,
+              { status: 'queued' as const },
+            ]),
+          ),
           percent: 0,
           // The run's working set. A client subset (incremental add) is passed
           // explicitly; the durable server re-embed omits it (the worker, not
@@ -3291,7 +4450,33 @@ export function researchDeskReducer(
           runningFileIds: action.runningFileIds ?? index.members.map((member) => member.fileId),
           source: action.source,
           startedAt: now,
+          status: action.status ?? 'running',
           totalDocuments: action.totalDocuments,
+        },
+      },
+    }
+  }
+  if (action.type === 'markVectorIndexMemberProgress') {
+    const live = state.indexingJobs[action.indexId]
+    if (!live) return state
+    const previous = live.memberProgress?.[action.fileId]
+    return {
+      ...state,
+      indexingJobs: {
+        ...state.indexingJobs,
+        [action.indexId]: {
+          ...live,
+          memberProgress: {
+            ...live.memberProgress,
+            [action.fileId]: {
+              ...previous,
+              currentBatch: action.currentBatch,
+              phase: action.phase,
+              queuePosition: action.queuePosition,
+              status: action.status,
+              totalBatches: action.totalBatches,
+            },
+          },
         },
       },
     }
@@ -3305,9 +4490,104 @@ export function researchDeskReducer(
       ...state,
       indexingJobs: {
         ...state.indexingJobs,
-        [action.indexId]: { ...live, queuePosition: action.queuePosition },
+        [action.indexId]: {
+          ...live,
+          queuePosition: action.queuePosition,
+          status: 'queued',
+        },
       },
     }
+  }
+  if (action.type === 'markVectorIndexPaused') {
+    const live = state.indexingJobs[action.indexId]
+    if (!live || live.source !== 'server') return state
+    const percent = action.totalDocuments > 0
+      ? Math.round((action.completedDocuments / action.totalDocuments) * 100)
+      : live.percent
+    return {
+      ...state,
+      indexingJobs: {
+        ...state.indexingJobs,
+        [action.indexId]: {
+          ...live,
+          completedDocuments: action.completedDocuments,
+          currentBatch: action.currentBatch,
+          memberProgress: Object.fromEntries(
+            Object.entries(live.memberProgress ?? {}).concat(
+              live.runningFileIds
+                .filter((fileId) => !live.memberProgress?.[fileId])
+                .map((fileId) => [fileId, { status: action.status }]),
+            ).map(([fileId, progress]) => [
+              fileId,
+              live.runningFileIds.includes(fileId)
+                ? {
+                    ...progress,
+                    currentBatch: action.currentBatch,
+                    phase: action.phase,
+                    queuePosition: null,
+                    status: action.status,
+                    totalBatches: action.totalBatches,
+                  }
+                : progress,
+            ]),
+          ),
+          pauseMessage: action.message,
+          percent,
+          phase: action.phase,
+          queuePosition: null,
+          status: action.status,
+          totalBatches: action.totalBatches,
+          totalDocuments: action.totalDocuments,
+        },
+      },
+    }
+  }
+  if (action.type === 'markVectorIndexResumed') {
+    const live = state.indexingJobs[action.indexId]
+    if (!live || live.source !== 'server') return state
+    return {
+      ...state,
+      indexingJobs: {
+        ...state.indexingJobs,
+        [action.indexId]: {
+          ...live,
+          currentBatch: undefined,
+          memberProgress: Object.fromEntries(
+            Object.entries(live.memberProgress ?? {}).map(([fileId, progress]) => [
+              fileId,
+              progress.status === 'paused_dependency'
+                || progress.status === 'paused_validation'
+                ? {
+                    ...progress,
+                    currentBatch: undefined,
+                    queuePosition: null,
+                    status: 'running' as const,
+                    totalBatches: undefined,
+                  }
+                : progress,
+            ]),
+          ),
+          pauseMessage: undefined,
+          phase: undefined,
+          status: 'running',
+          totalBatches: undefined,
+          totalDocuments: action.totalDocuments,
+        },
+      },
+    }
+  }
+  if (action.type === 'markVectorIndexSuperseded') {
+    const index = state.vectorIndexes[action.indexId]
+    if (!index || index.status !== 'indexing') return state
+    const status: VectorIndexStatus = index.members.some(
+      (member) => member.state === 'pending',
+    ) ? 'stale' : 'ready'
+    const next = writeVectorIndex(state, {
+      ...index,
+      status,
+      updatedAt: new Date().toISOString(),
+    })
+    return clearIndexingJob(next, action.indexId)
   }
   if (action.type === 'markVectorIndexProgress') {
     // Hot path: update ONLY the ephemeral live entry — no writeVectorIndex,
@@ -3321,12 +4601,15 @@ export function researchDeskReducer(
     // Client-build path reports the just-confirmed member (fileId) so the file
     // list can flip that row to its real outcome live. The durable server-job
     // path omits fileId (it streams only counts) — then leave the sets as-is.
+    // A member is sorted into a set ONLY on an explicit outcome: an event that
+    // merely announces which document started (title + counts, no outcome)
+    // must never mark that member skipped.
     const embeddedFileIds =
-      action.fileId && action.embedded
+      action.fileId && action.embedded === true
         ? [...(live.embeddedFileIds ?? []), action.fileId]
         : live.embeddedFileIds
     const skippedFileIds =
-      action.fileId && !action.embedded
+      action.fileId && action.embedded === false
         ? [...(live.skippedFileIds ?? []), action.fileId]
         : live.skippedFileIds
     return {
@@ -3337,12 +4620,21 @@ export function researchDeskReducer(
           ...live,
           completedDocuments: action.completedDocuments,
           currentDocumentTitle: action.currentDocumentTitle,
+          currentBatch: undefined,
           embeddedFileIds,
+          // The client-driven run reports which members are ACTUALLY in
+          // flight; only those may read "läuft". A queued member keeps its
+          // pending state instead of pulsing for the whole run.
+          ...(action.runningFileIds ? { runningFileIds: action.runningFileIds } : {}),
           percent,
           // Progress means a slot freed up and the job is running now —
           // clear any queued position so the UI leaves the waiting state.
           queuePosition: null,
+          pauseMessage: undefined,
+          phase: undefined,
           skippedFileIds,
+          status: 'running',
+          totalBatches: undefined,
           totalDocuments: action.totalDocuments,
         },
       },
@@ -3372,6 +4664,23 @@ export function researchDeskReducer(
       },
     }
   }
+  if (action.type === 'adoptVectorIndexPartialResult') {
+    const index = state.vectorIndexes[action.indexId]
+    if (!index || index.status !== 'indexing') return state
+    const members = reconcileVectorIndexMembers(
+      index.members,
+      action.embeddedFileIds,
+      action.skippedFileIds,
+      action.serverDocumentIds,
+    )
+    return writeVectorIndex(state, {
+      ...index,
+      members,
+      serverCollectionId: action.serverCollectionId,
+      serverCollectionModel: action.serverCollectionModel,
+      updatedAt: new Date().toISOString(),
+    })
+  }
   if (action.type === 'completeVectorIndexReindex') {
     const index = state.vectorIndexes[action.indexId]
     if (!index || index.status !== 'indexing') return state
@@ -3386,30 +4695,18 @@ export function researchDeskReducer(
     // that still owes vectors). When `embeddedFileIds` is absent (durable
     // re-embed of an existing collection) every member was re-embedded.
     const embeddedSet = action.embeddedFileIds ? new Set(action.embeddedFileIds) : null
-    const skippedSet = action.skippedFileIds ? new Set(action.skippedFileIds) : null
-    // Persist each member's backend document id (merge: this run's map for the
-    // just-ingested, existing ids kept) so a later removal deletes the exact doc.
-    const docIds = action.serverDocumentIds
-    const withDocId = (member: VectorIndexMemberRecord): string | undefined =>
-      docIds?.[member.fileId] ?? member.serverDocumentId
-    const nextMemberState = (member: VectorIndexMemberRecord): VectorIndexMemberState => {
-      if (embeddedSet?.has(member.fileId)) return 'embedded'
-      if (skippedSet?.has(member.fileId)) return 'skipped'
-      // Not part of THIS run (e.g. an incremental add of other docs): keep a
-      // terminal state the member already reached — only a genuinely
-      // unprocessed member stays 'pending'. A previously-skipped doc must not
-      // silently revert to pending.
-      return member.state === 'pending' ? 'pending' : member.state
-    }
-    const members = embeddedSet
-      ? index.members.map((member): VectorIndexMemberRecord => ({
-          ...member,
-          serverDocumentId: withDocId(member),
-          state: nextMemberState(member),
-        }))
+    const members = action.embeddedFileIds
+      ? reconcileVectorIndexMembers(
+          index.members,
+          action.embeddedFileIds,
+          action.skippedFileIds ?? [],
+          action.serverDocumentIds ?? {},
+        )
       : index.members.map((member): VectorIndexMemberRecord => ({
           ...member,
-          serverDocumentId: withDocId(member),
+          serverDocumentId:
+            action.serverDocumentIds?.[member.fileId]
+            ?? member.serverDocumentId,
           // Durable re-embed re-vectorizes existing documents in place; a
           // no-text 'skipped' member has no document to re-embed, so it stays
           // skipped rather than falsely flipping to embedded.
@@ -3424,7 +4721,9 @@ export function researchDeskReducer(
         documents: embeddedSet ? embeddedSet.size : (live?.totalDocuments ?? index.members.length),
         durationMs: runDurationMs(live, now),
         finishedAt: now,
-        result: 'ok',
+        // A cancelled run reconciles through here too: what embedded is real
+        // and is adopted, but the history must say the run was stopped.
+        result: action.result ?? 'ok',
         startedAt: live?.startedAt ?? now,
       }),
       lastError: null,
@@ -3457,6 +4756,10 @@ export function researchDeskReducer(
         startedAt: live?.startedAt ?? now,
       }),
       lastError: action.message,
+      serverCollectionId:
+        action.serverCollectionId ?? index.serverCollectionId ?? null,
+      serverCollectionModel:
+        action.serverCollectionModel ?? index.serverCollectionModel ?? null,
       status: 'error',
       updatedAt: now,
     })
@@ -3584,7 +4887,10 @@ export function researchDeskReducer(
     return moveChatThreadToGroup(state, action.threadId, action.groupId, action.targetIndex)
   }
   if (action.type === 'createChatThread') {
-    const thread = createChatThread()
+    const thread = createChatThread({
+      preview: action.preview,
+      title: action.title,
+    })
     const groupId = action.groupId && state.chatThreadGroups[action.groupId]
       ? action.groupId
       : null
@@ -3606,6 +4912,12 @@ export function researchDeskReducer(
       dirty: true,
       ui: {
         ...state.ui,
+        // A new chat starts on the account preference, not on whatever the
+        // previous chat was switched to. Clearing model and effort alongside
+        // keeps the exclusivity contract the pickers rely on.
+        selectedChatEffort: null,
+        selectedChatModel: null,
+        selectedChatModelTier: action.modelTier ?? null,
         selectedChatThreadId: thread.id,
       },
     }
@@ -3640,7 +4952,7 @@ export function researchDeskReducer(
         [thread.id]: {
           ...thread,
           messages: [],
-          preview: 'No user message yet',
+          preview: action.emptyPreview,
           updatedAt,
         },
       },
@@ -3653,7 +4965,12 @@ export function researchDeskReducer(
     }
   }
   if (action.type === 'deleteChatMessages') {
-    return deleteChatMessages(state, action.threadId, action.messageIds)
+    return deleteChatMessages(
+      state,
+      action.threadId,
+      action.messageIds,
+      action.emptyPreview,
+    )
   }
   if (action.type === 'editChatUserMessage') {
     return editChatUserMessage(state, action.threadId, action.messageId, action.contentMarkdown)
@@ -3709,6 +5026,7 @@ function deleteChatMessages(
   state: ResearchDeskState,
   threadId: string,
   messageIds: readonly string[],
+  emptyPreview: string,
 ): ResearchDeskState {
   const thread = state.chatThreads[threadId]
   if (!thread || messageIds.length === 0) return state
@@ -3721,7 +5039,7 @@ function deleteChatMessages(
     ...state,
     chatThreads: {
       ...state.chatThreads,
-      [thread.id]: threadWithMessages(thread, messages, updatedAt),
+      [thread.id]: threadWithMessages(thread, messages, updatedAt, emptyPreview),
     },
     dirty: true,
   }
@@ -3783,7 +5101,7 @@ function branchChatThreadFromMessage(
       createdAt: now,
       id: createId('chat'),
       messages,
-      preview: 'No user message yet',
+      preview: sourceThread.preview,
       source: 'api',
       title: firstUserMessage
         ? titleFromMessage(firstUserMessage.contentMarkdown)
@@ -3824,17 +5142,21 @@ function threadWithMessages(
   thread: ChatThreadRecord,
   messages: ChatMessageRecord[],
   updatedAt: string,
+  emptyPreview = thread.preview,
 ): ChatThreadRecord {
   return {
     ...thread,
     messages,
-    preview: chatPreviewFromMessages(messages),
+    preview: chatPreviewFromMessages(messages, emptyPreview),
     updatedAt,
   }
 }
 
-function chatPreviewFromMessages(messages: readonly ChatMessageRecord[]) {
-  return [...messages].reverse().find((message) => message.role === 'user')?.contentMarkdown ?? 'No user message yet'
+function chatPreviewFromMessages(
+  messages: readonly ChatMessageRecord[],
+  emptyPreview: string,
+) {
+  return [...messages].reverse().find((message) => message.role === 'user')?.contentMarkdown ?? emptyPreview
 }
 
 function moveKnowledgeSessionGroup(
@@ -4167,30 +5489,43 @@ function createLocalResearchRun(
 
 function createChatThread(options: {
   id?: string
-  includeGreeting?: boolean
-  preview?: string
+  preview: string
   source?: ChatThreadRecord['source']
-  title?: string
-} = {}): ChatThreadRecord {
+  title: string
+}): ChatThreadRecord {
   const now = new Date().toISOString()
-  const includeGreeting = options.includeGreeting ?? true
 
   return {
     createdAt: now,
     id: options.id ?? createId('chat'),
-    messages: includeGreeting ? [
-      {
-        contentMarkdown: 'New conversation ready. Ask a question or sketch the research you want to derive from it.',
-        createdAt: now,
-        id: createId('msg'),
-        role: 'assistant',
-      },
-    ] : [],
-    preview: options.preview ?? 'No user message yet',
+    messages: [],
+    preview: options.preview,
     source: options.source ?? 'api',
-    title: options.title ?? 'New conversation',
+    title: options.title,
     updatedAt: now,
   }
+}
+
+/** Keep persisted turns semantic when an older client stored both roles at
+ * one instant; the database id is only a pagination tiebreaker. */
+function compareChatMessagesChronologically(
+  left: ChatMessageRecord,
+  right: ChatMessageRecord,
+): number {
+  const createdOrder = left.createdAt.localeCompare(right.createdAt)
+  if (createdOrder !== 0) return createdOrder
+  if (left.role !== right.role) return left.role === 'user' ? -1 : 1
+  return left.id.localeCompare(right.id)
+}
+
+/** Give the assistant placeholder its own stable ordering instant. Its
+ * streamed content may change later, but its position in the turn must not. */
+function assistantTimestampAfter(userCreatedAt: string): string {
+  const userTimestamp = Date.parse(userCreatedAt)
+  if (!Number.isFinite(userTimestamp)) {
+    throw new RangeError('Chat message createdAt must be a valid ISO timestamp')
+  }
+  return new Date(userTimestamp + 1).toISOString()
 }
 
 function startChatExchange(
@@ -4202,7 +5537,6 @@ function startChatExchange(
 
   const thread = state.chatThreads[action.threadId] ?? createChatThread({
     id: action.threadId,
-    includeGreeting: false,
     preview: trimmedContent,
     source: 'api',
     title: titleFromMessage(trimmedContent),
@@ -4230,7 +5564,7 @@ function startChatExchange(
   }
   const assistantMessage = {
     contentMarkdown: '',
-    createdAt: action.createdAt,
+    createdAt: assistantTimestampAfter(action.createdAt),
     id: action.assistantMessageId,
     modelResolution: action.modelResolution,
     requestContext: action.requestContext,
@@ -4393,6 +5727,62 @@ function createEditorDocument(options: {
     sourceRunId: options.sourceRunId,
     title: normalizeEditorDocumentTitle(options.title ?? 'Untitled.md'),
     updatedAt: now,
+  }
+}
+
+function createEditorRecoveryDocument(
+  source: EditorDocumentRecord,
+  capture: EditorDocumentRecoveryCapture,
+): EditorDocumentRecord {
+  return {
+    contentMarkdown: capture.contentMarkdown,
+    createdAt: capture.capturedAt,
+    folderId: null,
+    id: createId('editor-recovery'),
+    recovery: {
+      capturedAt: capture.capturedAt,
+      originalDocumentId: source.id,
+      reason: 'remote_deleted',
+    },
+    revision: 0,
+    source: source.source,
+    ...(source.sourceRunId ? { sourceRunId: source.sourceRunId } : {}),
+    title: source.title,
+    updatedAt: capture.capturedAt,
+  }
+}
+
+function remapRecoverySuggestionOrigin(
+  origin: EditorSuggestionOrigin,
+  commentIds: ReadonlyMap<string, string>,
+): EditorSuggestionOrigin | null {
+  if (!origin.commentId) return origin
+  const commentId = commentIds.get(origin.commentId)
+  if (!commentId) {
+    return origin.kind === 'global_run' ? { kind: 'global_run' } : null
+  }
+  return { ...origin, commentId }
+}
+
+function mergeServerEditorDocumentMetadata(
+  local: EditorDocumentRecord,
+  incoming: EditorDocumentRecord,
+): EditorDocumentRecord {
+  if (incoming.updatedAt > local.updatedAt) {
+    return {
+      ...incoming,
+      contentMarkdown: local.contentMarkdown,
+      serverSynced: true,
+    }
+  }
+  return {
+    ...incoming,
+    ...local,
+    access: incoming.access,
+    collaboration: incoming.collaboration,
+    contentMode: incoming.contentMode,
+    metadataRevision: incoming.metadataRevision,
+    serverSynced: true,
   }
 }
 
@@ -4862,6 +6252,27 @@ function runDurationMs(live: IndexingJobLive | undefined, now: string): number {
   return Math.max(0, new Date(now).getTime() - new Date(live.startedAt).getTime())
 }
 
+function reconcileVectorIndexMembers(
+  members: readonly VectorIndexMemberRecord[],
+  embeddedFileIds: readonly string[],
+  skippedFileIds: readonly string[],
+  serverDocumentIds: Readonly<Record<string, string>>,
+): VectorIndexMemberRecord[] {
+  const embedded = new Set(embeddedFileIds)
+  const skipped = new Set(skippedFileIds)
+  return members.map((member): VectorIndexMemberRecord => ({
+    ...member,
+    serverDocumentId:
+      serverDocumentIds[member.fileId]
+      ?? member.serverDocumentId,
+    state: embedded.has(member.fileId)
+      ? 'embedded'
+      : skipped.has(member.fileId)
+        ? 'skipped'
+        : member.state,
+  }))
+}
+
 /** Drop the ephemeral live-progress entry for an index (run finished). */
 function clearIndexingJob(state: ProjectState, indexId: string): ProjectState {
   if (!(indexId in state.indexingJobs)) return state
@@ -4946,6 +6357,129 @@ function retireActiveEditorSuggestionsForComments(
     }),
   )
   return changed ? next : suggestions
+}
+
+function privateSuggestionOriginForComment(
+  comment: EditorCommentThreadRecord,
+): EditorSuggestionOrigin {
+  if (comment.kind === 'evidence_review') {
+    return {
+      commentId: comment.id,
+      kind: 'evidence_review',
+      preset: comment.evidencePreset ?? 'add_sources',
+    }
+  }
+  if (comment.kind === 'inline_edit') {
+    return { commentId: comment.id, kind: 'inline_edit' }
+  }
+  return { commentId: comment.id, kind: 'global_run' }
+}
+
+/** Materialize server-confirmed private drafts into the existing review model.
+ * The resulting records are a view of the nested comment authority, never a
+ * second persistence source. */
+function reconcilePrivateSuggestionDraftRecords(
+  state: ProjectState,
+  comments: readonly EditorCommentThreadRecord[],
+): ProjectState {
+  if (comments.length === 0) return state
+  const editorSuggestionGroups = { ...state.editorSuggestionGroups }
+  const editorSuggestions = { ...state.editorSuggestions }
+  let editorComments = state.editorComments
+  const groupCleanupCandidates = new Set<string>()
+  let changed = false
+
+  for (const comment of comments) {
+    const draft = comment.suggestionDraft
+    for (const suggestion of Object.values(editorSuggestions)) {
+      if (suggestion.origin.commentId !== comment.id) continue
+      const replacedByServerDraft = Boolean(
+        draft
+        && suggestion.id !== draft.suggestionId
+        && (suggestion.status === 'pending' || suggestion.status === 'stale'),
+      )
+      if (!suggestion.privateDraft && !replacedByServerDraft) continue
+      if (draft && suggestion.id === draft.suggestionId) continue
+      delete editorSuggestions[suggestion.id]
+      groupCleanupCandidates.add(suggestion.groupId)
+      changed = true
+    }
+    if (!draft) continue
+
+    const existingTerminal = editorSuggestions[draft.suggestionId]
+    if (
+      existingTerminal
+      && (existingTerminal.status === 'accepted' || existingTerminal.status === 'rejected')
+      && existingTerminal.updatedAt >= draft.updatedAt
+    ) {
+      const currentComment = editorComments[comment.id]
+      if (currentComment?.suggestionDraft?.patchId === draft.patchId) {
+        const { suggestionDraft, ...commentWithoutStaleDraft } = currentComment
+        void suggestionDraft
+        editorComments = {
+          ...editorComments,
+          [comment.id]: commentWithoutStaleDraft,
+        }
+        changed = true
+      }
+      continue
+    }
+
+    const origin = privateSuggestionOriginForComment(comment)
+    const group: EditorSuggestionGroupRecord = {
+      createdAt: draft.createdAt,
+      documentId: comment.documentId,
+      id: draft.groupId,
+      origin,
+      ...(draft.warnings?.length ? { warnings: [...draft.warnings] } : {}),
+    }
+    const suggestion: EditorSuggestionRecord = {
+      anchor: comment.anchor,
+      blockId: comment.anchor.blockId ?? '',
+      createdAt: draft.createdAt,
+      documentId: comment.documentId,
+      groupId: draft.groupId,
+      id: draft.suggestionId,
+      originalMarkdown: comment.anchor.selectedMarkdown,
+      originalText: comment.anchor.selectedText,
+      origin,
+      privateDraft: {
+        patchId: draft.patchId,
+        publicationCommandId: draft.publicationCommandId,
+        revision: draft.revision,
+      },
+      proposedText: draft.proposedText,
+      revision: draft.revision,
+      status: 'pending',
+      updatedAt: draft.updatedAt,
+      ...(draft.changeSummary?.length
+        ? { changeSummary: [...draft.changeSummary] }
+        : {}),
+      ...(draft.evidence ? { evidence: draft.evidence } : {}),
+      ...(draft.revisionHistory?.length
+        ? { revisionHistory: [...draft.revisionHistory] }
+        : {}),
+      ...(draft.warnings?.length ? { warnings: [...draft.warnings] } : {}),
+    }
+    if (
+      editorSuggestionGroups[group.id] !== group
+      || editorSuggestions[suggestion.id] !== suggestion
+    ) {
+      editorSuggestionGroups[group.id] = group
+      editorSuggestions[suggestion.id] = suggestion
+      changed = true
+    }
+  }
+
+  for (const groupId of groupCleanupCandidates) {
+    if (Object.values(editorSuggestions).some((suggestion) => suggestion.groupId === groupId)) {
+      continue
+    }
+    delete editorSuggestionGroups[groupId]
+  }
+  return changed
+    ? { ...state, editorComments, editorSuggestionGroups, editorSuggestions }
+    : state
 }
 
 function retireActiveDocumentInstructionSuggestions(
@@ -5211,6 +6745,47 @@ function retainedAgentTreeIds(
   return retained
 }
 
+function agentRunIdsForDeletedSession(
+  agentRuns: Readonly<Record<string, AgentRunRecord>>,
+  sessionId: string,
+  directRunIds: readonly string[],
+): Set<string> {
+  const removed = new Set(directRunIds)
+  for (const [runId, run] of Object.entries(agentRuns)) {
+    if (run.sessionId === sessionId) removed.add(runId)
+  }
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const [runId, run] of Object.entries(agentRuns)) {
+      if (removed.has(runId)) continue
+      if (
+        (run.rootRunId !== undefined && removed.has(run.rootRunId))
+        || (run.parentRunId !== undefined && removed.has(run.parentRunId))
+      ) {
+        removed.add(runId)
+        changed = true
+      }
+    }
+  }
+  return removed
+}
+
+function matchesCompletedAgentSessionDeletion(
+  state: ProjectState,
+  summary: ResearchRunSummary,
+): boolean {
+  const receipts = state.agentSessionDeletionReceipts
+  if (!receipts) return false
+  if (summary.session_id && receipts[summary.session_id]) return true
+  const candidates = [summary.run_id, summary.root_run_id, summary.parent_run_id]
+    .filter((value): value is string => Boolean(value))
+  return Object.values(receipts).some((receipt) => {
+    const removed = new Set(receipt.runIds)
+    return candidates.some((runId) => removed.has(runId))
+  })
+}
+
 /** Merge an agent-run summary and keep its session's turn list in sync.
  * Runs without a session id get a synthetic one keyed by the run id so
  * they stay visible. Never sets `dirty` (server-derived rows). */
@@ -5245,12 +6820,112 @@ function agentCanvasForSelection(
 function withSelectedAgentSession(
   state: ProjectState,
   sessionId: string | null,
+  sessions: ProjectState['agentSessions'] = state.agentSessions,
 ): Pick<ProjectState, 'selectedAgentSessionId' | 'ui'> {
+  if (state.ui.selectedAgentSessionId === sessionId) {
+    return { selectedAgentSessionId: sessionId, ui: state.ui }
+  }
+  // Project the target session's own pick into the working value — ui only,
+  // never a write back into the session. A session without a stored pick
+  // clears the value so the account preference may seed it.
+  const selection = sessionId ? sessions[sessionId]?.modelSelection ?? null : null
   return {
     selectedAgentSessionId: sessionId,
-    ui: state.ui.selectedAgentSessionId === sessionId
-      ? state.ui
-      : { ...state.ui, selectedAgentSessionId: sessionId },
+    ui: {
+      ...state.ui,
+      selectedAgentSessionId: sessionId,
+      selectedAgentEffort: selection?.effort ?? null,
+      selectedAgentModel: selection?.model ?? null,
+      selectedAgentModelTier: selection?.tier ?? null,
+    },
+  }
+}
+
+/** The chat twin of withAgentSessionModelSelection: apply a picker change to
+ * the working state AND to the thread it belongs to. Guards make sure only a
+ * real chat-thread context persists: the editor still dispatches the chat
+ * set-actions until stage 3 decouples it (activeView gate), and the incognito
+ * thread never appears in `chatThreads`, so it can never be written. */
+function withChatThreadModelSelection(
+  state: ProjectState,
+  ui: ProjectState['ui'],
+): ProjectState {
+  const threadId = ui.selectedChatThreadId
+  const thread = threadId ? state.chatThreads[threadId] : null
+  if (!thread || !threadId || ui.activeView !== 'chat') {
+    return { ...state, dirty: true, ui }
+  }
+  const cleared = ui.selectedChatEffort === null
+    && ui.selectedChatModel === null
+    && ui.selectedChatModelTier === null
+  const next = cleared
+    ? undefined
+    : {
+      effort: ui.selectedChatEffort,
+      model: ui.selectedChatModel,
+      tier: ui.selectedChatModelTier,
+    }
+  if (agentModelSelectionKey(thread.modelSelection) === agentModelSelectionKey(next)) {
+    return { ...state, dirty: true, ui }
+  }
+  return {
+    ...state,
+    dirty: true,
+    chatThreads: {
+      ...state.chatThreads,
+      [threadId]: {
+        ...thread,
+        modelSelection: next,
+        updatedAt: new Date().toISOString(),
+      },
+    },
+    ui,
+  }
+}
+
+/** Apply a picker change to the working state AND to the session it belongs
+ * to, so a reload returns to the model this session ran with. The session
+ * copy is the durable one; `ui` stays the working value the composer reads.
+ * Without a writable active session only `ui` changes — the very first pick
+ * can happen before any session exists. Clearing everything (the picker's
+ * "Auto" row) REMOVES the stored pick, which is what lets the preference
+ * seed again: Auto means "follow my default", not "pin null". */
+function withAgentSessionModelSelection(
+  state: ProjectState,
+  ui: ProjectState['ui'],
+): ProjectState {
+  const sessionId = ui.selectedAgentSessionId
+  const session = sessionId ? state.agentSessions[sessionId] : null
+  if (!session || !sessionId || session.deletion || session.persistable === false) {
+    return { ...state, dirty: true, ui }
+  }
+  const cleared = ui.selectedAgentEffort === null
+    && ui.selectedAgentModel === null
+    && ui.selectedAgentModelTier === null
+  const next = cleared
+    ? undefined
+    : {
+      effort: ui.selectedAgentEffort,
+      model: ui.selectedAgentModel,
+      tier: ui.selectedAgentModelTier,
+    }
+  // No-op guard: an unchanged pick must not bump updatedAt, or the autosave
+  // would push on every render.
+  if (agentModelSelectionKey(session.modelSelection) === agentModelSelectionKey(next)) {
+    return { ...state, dirty: true, ui }
+  }
+  return {
+    ...state,
+    dirty: true,
+    agentSessions: {
+      ...state.agentSessions,
+      [sessionId]: {
+        ...session,
+        modelSelection: next,
+        updatedAt: new Date().toISOString(),
+      },
+    },
+    ui,
   }
 }
 
@@ -5259,6 +6934,7 @@ function withAgentRunSummary(
   summary: ResearchRunSummary,
   select: boolean,
 ): ProjectState {
+  if (matchesCompletedAgentSessionDeletion(state, summary)) return state
   const current = state.agentRuns[summary.run_id]
   const run = mergeAgentRunSummary(current, summary)
   const sessionId = run.sessionId || run.runId

@@ -410,7 +410,7 @@ and the canonical npm `package-lock.json`.
 | react-prod | `diff` | 9.0.0 | BSD-3-Clause | package-lock.json metadata |
 | react-prod | `dingbat-to-unicode` | 1.0.1 | BSD-2-Clause | package-lock.json metadata |
 | react-prod | `docx` | 9.7.1 | MIT | package-lock.json metadata |
-| react-prod | `dompurify` | 3.4.12 | (MPL-2.0 OR Apache-2.0) | package-lock.json metadata |
+| react-prod | `dompurify` | 3.4.13 | (MPL-2.0 OR Apache-2.0) | package-lock.json metadata |
 | react-prod | `duck` | 0.1.12 | BSD | package-lock.json metadata |
 | react-prod | `entities` | 6.0.1 | BSD-2-Clause | package-lock.json metadata |
 | react-prod | `es-toolkit` | 1.49.0 | MIT | package-lock.json metadata |
@@ -488,7 +488,7 @@ and the canonical npm `package-lock.json`.
 | react-prod | `mdast-util-to-markdown` | 2.1.2 | MIT | package-lock.json metadata |
 | react-prod | `mdast-util-to-string` | 4.0.0 | MIT | package-lock.json metadata |
 | react-prod | `merge-refs` | 2.0.0 | MIT | package-lock.json metadata |
-| react-prod | `mermaid` | 11.16.0 | MIT | package-lock.json metadata |
+| react-prod | `mermaid` | 11.16.1 | MIT | package-lock.json metadata |
 | react-prod | `micromark` | 4.0.2 | MIT | package-lock.json metadata |
 | react-prod | `micromark-core-commonmark` | 2.0.3 | MIT | package-lock.json metadata |
 | react-prod | `micromark-extension-gfm` | 3.0.0 | MIT | package-lock.json metadata |
@@ -523,7 +523,7 @@ and the canonical npm `package-lock.json`.
 | react-prod | `motion-dom` | 12.42.2 | MIT | package-lock.json metadata |
 | react-prod | `motion-utils` | 12.39.0 | MIT | package-lock.json metadata |
 | react-prod | `ms` | 2.1.3 | MIT | package-lock.json metadata |
-| react-prod | `nanoid` | 3.3.16 | MIT | package-lock.json metadata |
+| react-prod | `nanoid` | 3.3.18 | MIT | package-lock.json metadata |
 | react-prod | `nanoid` | 5.1.16 | MIT | package-lock.json metadata |
 | react-prod | `oniguruma-parser` | 0.12.2 | MIT | package-lock.json metadata |
 | react-prod | `oniguruma-to-es` | 4.3.6 | MIT | package-lock.json metadata |
@@ -732,7 +732,7 @@ and the canonical npm `package-lock.json`.
 | react-dev | `ajv` | 6.15.0 | MIT | package-lock.json metadata |
 | react-dev | `assertion-error` | 2.0.1 | MIT | package-lock.json metadata |
 | react-dev | `balanced-match` | 4.0.4 | MIT | package-lock.json metadata |
-| react-dev | `brace-expansion` | 5.0.8 | MIT | package-lock.json metadata |
+| react-dev | `brace-expansion` | 5.0.9 | MIT | package-lock.json metadata |
 | react-dev | `chai` | 6.2.2 | MIT | package-lock.json metadata |
 | react-dev | `convert-source-map` | 2.0.0 | MIT | package-lock.json metadata |
 | react-dev | `cross-spawn` | 7.0.6 | MIT | package-lock.json metadata |
@@ -802,7 +802,7 @@ and the canonical npm `package-lock.json`.
 | react-dev | `pathe` | 2.0.3 | MIT | package-lock.json metadata |
 | react-dev | `picocolors` | 1.1.1 | ISC | package-lock.json metadata |
 | react-dev | `picomatch` | 4.0.5 | MIT | package-lock.json metadata |
-| react-dev | `postcss` | 8.5.19 | MIT | package-lock.json metadata |
+| react-dev | `postcss` | 8.5.26 | MIT | package-lock.json metadata |
 | react-dev | `prelude-ls` | 1.2.1 | MIT | package-lock.json metadata |
 | react-dev | `punycode` | 2.3.1 | MIT | package-lock.json metadata |
 | react-dev | `rolldown` | 1.0.3 | MIT | package-lock.json metadata |

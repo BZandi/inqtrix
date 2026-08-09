@@ -3071,7 +3071,7 @@
       "license": "(MPL-2.0 OR Apache-2.0)",
       "metadata_source": "package-lock.json metadata",
       "name": "dompurify",
-      "version": "3.4.12"
+      "version": "3.4.13"
     },
     {
       "dependency_surface": "react-prod",
@@ -3695,7 +3695,7 @@
       "license": "MIT",
       "metadata_source": "package-lock.json metadata",
       "name": "mermaid",
-      "version": "11.16.0"
+      "version": "11.16.1"
     },
     {
       "dependency_surface": "react-prod",
@@ -3975,7 +3975,7 @@
       "license": "MIT",
       "metadata_source": "package-lock.json metadata",
       "name": "nanoid",
-      "version": "3.3.16"
+      "version": "3.3.18"
     },
     {
       "dependency_surface": "react-prod",
@@ -5647,7 +5647,7 @@
       "license": "MIT",
       "metadata_source": "package-lock.json metadata",
       "name": "brace-expansion",
-      "version": "5.0.8"
+      "version": "5.0.9"
     },
     {
       "dependency_surface": "react-dev",
@@ -6207,7 +6207,7 @@
       "license": "MIT",
       "metadata_source": "package-lock.json metadata",
       "name": "postcss",
-      "version": "8.5.19"
+      "version": "8.5.26"
     },
     {
       "dependency_surface": "react-dev",

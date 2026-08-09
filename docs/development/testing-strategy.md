@@ -341,6 +341,11 @@ helm lint deploy/helm/inqtrix
 helm template inqtrix deploy/helm/inqtrix -f deploy/helm/inqtrix/values-dev.yaml
 ```
 
+`helm template` is the step that proves the chart's fail-fast guards; a bare
+render exits 1. `helm lint` is a style and structure check only: since Helm 4 a
+failing guard surfaces as `level=INFO msg="funcMap fail"` while the lint still
+reports "0 chart(s) failed". A green lint is therefore not evidence.
+
 `npm ls yjs` must resolve one compatible Yjs copy. Browser, shared schema, and
 Node package versions must stay exact and coordinated; a duplicated Yjs or
 mixed Tiptap schema is a visible verification blocker, not a warning.

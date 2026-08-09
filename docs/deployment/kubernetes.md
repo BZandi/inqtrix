@@ -153,7 +153,10 @@ The chart has no external Helm dependencies, so no `helm dependency update` is
 needed. Validate it any time with:
 
 ```bash
-# A bare lint/render hits the fail-fast guard (default postgres backend, no DB).
+# A bare `helm template` hits the fail-fast guard (default postgres backend, no
+# DB) and exits 1. `helm lint` does not: since Helm 4 the guards surface only as
+# `level=INFO msg="funcMap fail"` and the lint still reports "0 chart(s) failed".
+# Treat lint as a style/structure check and `helm template` as the guard proof.
 # Pass a DB source to validate cleanly; the memory backend with migrations off is
 # the simplest and renders a coherent stateless manifest for inspection:
 helm lint deploy/helm/inqtrix \

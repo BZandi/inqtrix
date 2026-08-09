@@ -27,6 +27,17 @@ No released artefacts yet. The repository is marked experimental (see the discla
 
 ### Changed
 
+- **Dependency and build hygiene.** Mermaid moves to 11.16.1, closing the five
+  advisories that reach the browser: CSS injection into sibling elements,
+  prototype pollution through the configuration and architecture-diagram paths,
+  and infinite-loop denial of service in XY and radar charts. The renderer
+  already ran with `securityLevel: 'strict'` and `htmlLabels: false`, which
+  bounded the impact. Lockfile-only patches cover DOMPurify, PostCSS, nanoid and
+  brace-expansion, so `npm audit` reports no vulnerabilities again. The container
+  build context no longer carries local E2E results or README media, and the
+  collaboration image installs only the two workspaces its bundle needs instead
+  of the entire workspace graph.
+
 - **Fast run cancellation.** Cancelling a running research run now takes
   effect within seconds instead of minutes: provider retry ladders check for
   cancellation before every attempt and during backoff sleeps, the search and

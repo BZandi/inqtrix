@@ -29,8 +29,12 @@ packages/editor-schema/dist
 .cursor
 .claude
 
-# Tests, docs, examples — not needed in the runtime images
+# Tests, local run artefacts, docs, examples, README media — no image build
+# reads them. `e2e` carries the local Playwright/verification results, which are
+# the single largest thing the daemon would otherwise copy on every build.
 tests
+e2e
 docs
 examples
 logs
+assets

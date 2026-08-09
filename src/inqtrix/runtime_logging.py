@@ -309,6 +309,15 @@ _EVENT_SCHEMAS: dict[str, frozenset[str]] = {
         "quotes_total",
         "quotes_verified",
     }),
+    # Counter-only by design: the rejected quote texts never cross the
+    # event boundary (same discipline as grounding.checked).
+    "inqtrix.knowledge.answer.retry": frozenset({
+        "task_id",
+        "attempt",
+        "query_index",
+        "quotes_total",
+        "quotes_unverified",
+    }),
     # Agent-Desk narration (plan B2): a strict allowlist so the prose
     # channel can never grow surprise fields — the transcript renders
     # the payload verbatim.

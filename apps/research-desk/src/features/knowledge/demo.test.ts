@@ -20,13 +20,15 @@ describe('buildDemoAskScript', () => {
       vocabulary_bridge: true,
     })
     // Early-stop scenario (R5): one gate judgement + a rewrite that adds no new
-    // evidence → gate.exhausted, then straight to the answer/grounding.
+    // evidence → gate.exhausted, then the answer path including the single
+    // visible regeneration (demonstrates the answer-retry step) and grounding.
     expect(eventTypes).toEqual([
       'inqtrix.knowledge.profile.resolved',
       'inqtrix.knowledge.decomposition.completed',
       'inqtrix.knowledge.retrieval.completed',
       'inqtrix.knowledge.gate.evaluated',
       'inqtrix.knowledge.gate.exhausted',
+      'inqtrix.knowledge.answer.retry',
       'inqtrix.knowledge.grounding.checked',
     ])
     expect(gates).toHaveLength(1)

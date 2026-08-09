@@ -255,4 +255,19 @@ describe('knowledgeStepLine', () => {
       'ausreichend · Evidenzbewertung nicht auswertbar — Antwortpfad sichtbar degradiert',
     )
   })
+
+  it('renders the visible answer regeneration step', () => {
+    expect(line({
+      facts: { quotesTotal: 10, quotesUnverified: 1 },
+      id: 'answer-retry',
+      kind: 'answer-retry',
+      status: 'running',
+    }).primary).toBe('Formuliere Antwort neu (1 Zitat(e) nicht belegt)…')
+    expect(line({
+      facts: { quotesTotal: 10, quotesUnverified: 1 },
+      id: 'answer-retry',
+      kind: 'answer-retry',
+      status: 'done',
+    }).primary).toBe('Antwort neu formuliert (1 Zitat(e) waren nicht belegt)')
+  })
 })

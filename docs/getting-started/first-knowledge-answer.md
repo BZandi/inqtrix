@@ -115,6 +115,7 @@ curl -N http://localhost:5100/v1/runs/run_.../events
 | `inqtrix.knowledge.profile.resolved` | Which profile actually runs, with `degraded_stages`. |
 | `inqtrix.knowledge.retrieval.completed` | Retrieval pass finished, candidate counts. |
 | `inqtrix.knowledge.gate.evaluated` | Sufficiency-gate verdict per round. |
+| `inqtrix.knowledge.answer.retry` | The single visible answer regeneration after unverified quotes (`attempt`, `quotes_total`, `quotes_unverified`); at most one per run, never silent, never carrying quote text. |
 | `inqtrix.knowledge.grounding.checked` | Typed quote-verification verdict, bounded repair flag, and verified/total counts; it never carries quote or source text. |
 | `inqtrix.run.completed` / `failed` / `cancelled` | Terminal; `completed` carries the `result_url`. |
 

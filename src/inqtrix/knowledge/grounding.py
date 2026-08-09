@@ -17,6 +17,18 @@ Malformed output and unverified quotes produce a typed rejection.  A single,
 deterministic format repair may accept Markdown heading adornment around the
 two required section labels; it never invents a quote, changes evidence text,
 or calls another model.
+
+Page-break artifacts: PDF extraction (pdfminer) writes the printed page
+number and a form feed INTO sentences that span a page break
+(``…environments\n\n11\n\n\x0c in which…``).  A model quoting such a
+sentence naturally omits the page number and would fail the byte-strict
+check even though the quote is faithful.  Every quote is therefore checked
+against two surfaces of its assigned evidence entry: the raw text, and the
+text with ``\x0c``-anchored page-break sequences removed
+(:func:`strip_page_break_artifacts`).  The anchor keeps the tolerance
+content-safe — a number without a form feed (an article number, a year,
+a list item) is never touched, and quotes that DO include the page number
+still verify against the raw surface.
 """
 
 from __future__ import annotations
@@ -75,11 +87,15 @@ class QuoteCheck:
             formatting (whitespace, Unicode/typography, case);
             ``False`` for paraphrases, ellipses, and out-of-range
             labels alike.
+        artifact_tolerated: ``True`` when the quote verified ONLY via
+            the page-break-artifact-free surface (never via the raw
+            evidence text) — the audit trail of the bounded tolerance.
     """
 
     label: str
     text: str
     verified: bool
+    artifact_tolerated: bool = False
 
 
 class GroundingStatus(StrEnum):
@@ -177,6 +193,47 @@ def _normalize(text: str) -> str:
     return " ".join(folded.split()).casefold()
 
 
+# A page break as pdfminer renders it: the printed page number framed by
+# BLANK lines directly before the form feed (the corpus-evidenced shape),
+# or a bare form feed. The form feed anchors the artifact; the blank-line
+# frame keeps digits that merely end a wrapped text line (amounts, years,
+# column values — single newline, no frame) out of reach, and a number
+# AFTER the form feed is never touched at all. Anything the frame misses
+# leaves the quote unverified and falls to the visible regeneration.
+_PAGE_BREAK_ARTIFACT = re.compile(
+    r"\n[ \t]*\n[ \t]*\d{1,4}[ \t]*\n[ \t]*\n\s*\x0c"
+    r"|\n?[ \t]*\x0c"
+)
+
+
+def strip_page_break_artifacts(text: str) -> str:
+    """Remove ``\\x0c``-anchored page-break sequences from evidence text.
+
+    Idempotent and content-safe: only sequences containing a form feed are
+    touched, and each is replaced by a newline so surrounding sentences
+    join exactly as a reader joins them across a page break.
+    """
+    if "\x0c" not in text:
+        return text
+    return _PAGE_BREAK_ARTIFACT.sub("\n", text)
+
+
+def _quote_surfaces(evidence: str) -> tuple[str, ...]:
+    """Both normalized surfaces one evidence entry offers to quotes.
+
+    The raw surface keeps today's byte-strict behaviour (a quote that
+    includes the printed page number still verifies); the artifact-free
+    surface accepts the human reading of a sentence that spans a page
+    break. Identical surfaces collapse to one.
+    """
+    raw = _normalize(evidence)
+    stripped_source = strip_page_break_artifacts(evidence)
+    if stripped_source == evidence:
+        return (raw,)
+    stripped = _normalize(stripped_source)
+    return (raw,) if stripped == raw else (raw, stripped)
+
+
 def quote_is_verbatim(text: str, evidence_texts: list[str]) -> bool:
     """Whether *text* appears verbatim in ANY of the evidence texts.
 
@@ -193,15 +250,16 @@ def quote_is_verbatim(text: str, evidence_texts: list[str]) -> bool:
 
     Returns:
         ``True`` when the normalizer-folded quote is a substring of at
-        least one normalizer-folded evidence text.
+        least one evidence surface (raw or page-break-artifact-free).
     """
     normalized = _normalize(text)
     if not normalized:
         return False
     return any(
-        normalized in _normalize(evidence)
+        normalized in surface
         for evidence in evidence_texts
         if evidence
+        for surface in _quote_surfaces(evidence)
     )
 
 
@@ -241,14 +299,28 @@ def check_grounding(
             failure_code=GroundingFailureCode.FORMAT_INVALID,
         )
 
+    surfaces = [_quote_surfaces(evidence) for evidence in evidence_texts]
     quotes: list[QuoteCheck] = []
     for index, text in shape.quotes:
-        verified = (
-            1 <= index <= len(evidence_texts)
-            and _normalize(text) in _normalize(evidence_texts[index - 1])
+        normalized = _normalize(text)
+        # A quote that normalizes to nothing (zero-width characters only)
+        # proves nothing — '' is a substring of every surface.
+        in_range = bool(normalized) and 1 <= index <= len(evidence_texts)
+        raw_verified = in_range and normalized in surfaces[index - 1][0]
+        verified = raw_verified or (
+            in_range
+            and any(
+                normalized in surface
+                for surface in surfaces[index - 1][1:]
+            )
         )
         quotes.append(
-            QuoteCheck(label=f"K{index}", text=text, verified=verified)
+            QuoteCheck(
+                label=f"K{index}",
+                text=text,
+                verified=verified,
+                artifact_tolerated=verified and not raw_verified,
+            )
         )
     if any(not quote.verified for quote in quotes):
         return GroundingReport(

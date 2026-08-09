@@ -133,6 +133,15 @@ export function knowledgeStepLine(
         primary: step.status === 'running' ? t.stepAnswerRunning : t.stepAnswerDone,
         status: step.status,
       }
+    case 'answer-retry':
+      return {
+        id: step.id,
+        primary: (step.status === 'running'
+          ? t.stepAnswerRetryRunning
+          : t.stepAnswerRetryDone)
+          .replace('{unverified}', String(facts.quotesUnverified ?? 0)),
+        status: step.status,
+      }
     case 'grounding':
       return {
         id: step.id,

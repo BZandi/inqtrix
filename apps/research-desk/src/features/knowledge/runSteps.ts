@@ -78,6 +78,8 @@ export function applyKnowledgeRunEvent(
       return applyGateEvaluated(progress, event)
     case 'inqtrix.knowledge.gate.exhausted':
       return applyGateExhausted(progress)
+    case 'inqtrix.knowledge.answer.retry':
+      return applyAnswerRetry(progress, event)
     case 'inqtrix.knowledge.grounding.checked':
       return applyGroundingChecked(progress, event)
     case 'inqtrix.run.completed':
@@ -254,6 +256,28 @@ function applyGateExhausted(
   return next
 }
 
+function applyAnswerRetry(
+  progress: KnowledgeRunProgressRecord,
+  event: ResearchRunEvent,
+): KnowledgeRunProgressRecord {
+  // The single visible answer regeneration. Its OWN step id: appending
+  // under 'answer' would upsert-overwrite the first attempt and hide the
+  // retry — exactly the silent retry this step exists to rule out.
+  let next = progress.steps.some((step) => step.id === 'answer')
+    ? progress
+    : appendAnswerStep(progress)
+  next = markStepDone(next, 'answer')
+  return appendStep(next, {
+    facts: {
+      quotesTotal: numberFact(event.data.quotes_total),
+      quotesUnverified: numberFact(event.data.quotes_unverified),
+    },
+    id: 'answer-retry',
+    kind: 'answer-retry',
+    status: 'running',
+  })
+}
+
 function applyGroundingChecked(
   progress: KnowledgeRunProgressRecord,
   event: ResearchRunEvent,
@@ -265,6 +289,7 @@ function applyGroundingChecked(
     ? progress
     : appendAnswerStep(progress)
   next = markStepDone(next, 'answer')
+  next = markStepDone(next, 'answer-retry')
   next = appendStep(next, {
     facts: {
       groundingMarker: stringFact(event.data.marker),

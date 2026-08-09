@@ -342,6 +342,16 @@ export function buildDemoAskScript(runId: string): DemoAskScript {
         }),
       },
       {
+        // One quote fails verbatim verification → the single visible
+        // answer regeneration (demonstrates the answer-retry step).
+        delayMs: 2400,
+        event: event('inqtrix.knowledge.answer.retry', {
+          attempt: 2,
+          quotes_total: 3,
+          quotes_unverified: 1,
+        }),
+      },
+      {
         delayMs: 2400,
         event: event('inqtrix.knowledge.grounding.checked', {
           marker: '_knowledge_grounding_parsed',

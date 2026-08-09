@@ -27,6 +27,21 @@ No released artefacts yet. The repository is marked experimental (see the discla
 
 ### Changed
 
+- **Quote grounding tolerates page-break artifacts; one visible answer
+  retry.** PDF extraction writes the printed page number and a form feed
+  into sentences that span a page break; a model quoting such a sentence
+  naturally omits the artifact and previously failed the byte-strict
+  verification, terminally rejecting the whole answer. Quotes are now
+  checked against a second, artifact-free surface of their assigned
+  evidence (anchored strictly on the form feed — a number without the
+  form feed is never touched, so `Article 11` stays inviolable), and a
+  remaining unverified quote triggers at most one answer regeneration
+  that is visible as its own progress step
+  (`inqtrix.knowledge.answer.retry`, counter-only payload), logged, and
+  recorded per attempt in `knowledge_grounding.attempts` with additive
+  usage. Format failures and a second unverified attempt keep today's
+  fail-closed terminal error.
+
 - **Large-document indexing survives provider rate limits.** One document
   historically reached the embedding provider as a single request carrying
   every chunk; documents beyond a per-minute quota (hundreds of chunks,

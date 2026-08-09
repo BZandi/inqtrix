@@ -1523,6 +1523,29 @@ def test_child_projection_is_bounded_and_preserves_parent_snapshot() -> None:
 
     store.emit(
         child["run_id"],
+        "inqtrix.knowledge.answer.retry",
+        {
+            "attempt": 2,
+            "quotes_total": 2,
+            "quotes_unverified": 1,
+            # Outside the registered schema: must not cross the boundary.
+            "quote_text": "private source passage",
+        },
+    )
+    projected = projected_events()
+    retry = projected[-1]["data"]
+    assert retry["event_type"] == "inqtrix.knowledge.answer.retry"
+    # The regeneration attempt travels under its own metrics key so the
+    # task-attempt field cannot clobber it.
+    assert retry["metrics"] == {
+        "quotes_total": 2,
+        "quotes_unverified": 1,
+        "answer_attempt": 2,
+    }
+    assert "quote_text" not in retry
+
+    store.emit(
+        child["run_id"],
         "inqtrix.knowledge.retrieval.degraded",
         {
             "reason": "vector_overfetch_cap",

@@ -2541,6 +2541,14 @@ def test_rag_grounding_rejection_fails_task_and_reaches_mission_audit(
             del request, runtime
             assert context.event_sink is not None
             context.event_sink(
+                "inqtrix.knowledge.answer.retry",
+                {
+                    "attempt": 2,
+                    "quotes_total": 1,
+                    "quotes_unverified": 1,
+                },
+            )
+            context.event_sink(
                 "inqtrix.knowledge.grounding.checked",
                 {
                     "marker": GROUNDING_MARKER_FALLBACK,
@@ -2614,6 +2622,22 @@ def test_rag_grounding_rejection_fails_task_and_reaches_mission_audit(
             "quotes_verified": 0,
             "task_id": "t1",
             "attempt": 1,
+            "query_index": 1,
+        }
+    ]
+    retry = [
+        event["data"]
+        for event in events
+        if event["type"] == "inqtrix.knowledge.answer.retry"
+    ]
+    # The forwarder enriches with task_id/query_index but must NOT
+    # clobber the event's own regeneration attempt (documented always 2).
+    assert retry == [
+        {
+            "attempt": 2,
+            "quotes_total": 1,
+            "quotes_unverified": 1,
+            "task_id": "t1",
             "query_index": 1,
         }
     ]

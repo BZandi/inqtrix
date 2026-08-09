@@ -4589,18 +4589,22 @@ def _run_rag_query(
         """Preserve nested Knowledge verdicts in mission/parent audit."""
 
         if event not in {
+            "inqtrix.knowledge.answer.retry",
             "inqtrix.knowledge.grounding.checked",
             "inqtrix.knowledge.retrieval.degraded",
             "inqtrix.knowledge.retrieval.warning",
         }:
             return
+        # Enrichment first, payload last: an event that carries its own
+        # `attempt` (answer.retry's regeneration attempt, documented as
+        # always 2) must not be clobbered by the mission task attempt.
         deps.emit(
             event,
             {
-                **dict(payload),
                 "task_id": task.task_id,
                 "attempt": attempt,
                 "query_index": active_query_index,
+                **dict(payload),
             },
         )
 

@@ -31,6 +31,9 @@ from inqtrix.knowledge.contextualize import contextualize_followup_question
 from inqtrix.knowledge.evidence import KnowledgeEvidenceProjector
 from inqtrix.knowledge.gate import GateDecision, evaluate_evidence
 from inqtrix.knowledge.grounding import (
+    GroundingFailureCode,
+    GroundingReport,
+    QuoteCheck,
     check_grounding,
     grounding_failure_message,
 )
@@ -66,6 +69,10 @@ log = logging.getLogger("inqtrix")
 
 _EVIDENCE_BUDGET_FLOOR_CHARS = 8_000
 _PROMPT_RESERVED_TOKENS = 4_000
+# Bounded answer regeneration: at most ONE visible retry after a
+# quote-unverified grounding rejection (attempt 2 of 2). Never silent —
+# the retry is announced via progress event, log line, and span attempt.
+_ANSWER_GROUNDING_ATTEMPTS = 2
 
 # Visible-not-silent marker (Designprinzip 1): the BM25 tokenizer language does
 # not match the confidently-detected query language, so the lexical branch's
@@ -899,45 +906,99 @@ class KnowledgeAlgorithm:
             else:
                 model = None
                 effort = None
-            prompt = build_knowledge_answer_prompt(
-                request.question,
-                evidence_block,
-                history=request.history,
-                grounding=plan.grounding_enabled,
-                report=plan.report,
+            # Evidence excerpts are projected ONCE: prompt labels K1..Kn and
+            # every grounding attempt must verify against the same surfaces.
+            evidence_excerpts = (
+                [
+                    KnowledgeEvidenceProjector.project(
+                        candidate, reference_id=f"K{index}"
+                    ).excerpt
+                    for index, candidate in enumerate(
+                        used_candidates, start=1
+                    )
+                ]
+                if plan.grounding_enabled
+                else []
             )
-            response = llm.complete_with_metadata(
-                prompt,
-                model=model,
-                reasoning_effort=effort,
-                timeout=context.agent_settings.reasoning_timeout,
-            )
-            answer = response.content
-            usage = {
-                "prompt_tokens": getattr(response, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(response, "completion_tokens", 0)
-                or 0,
-            }
-            if plan.grounding_enabled:
+            usage = {"prompt_tokens": 0, "completion_tokens": 0}
+            attempts_state: list[dict[str, Any]] = []
+            unverified: list[QuoteCheck] = []
+            failed_quote_texts: tuple[str, ...] = ()
+            report: GroundingReport | None = None
+            for attempt in range(1, _ANSWER_GROUNDING_ATTEMPTS + 1):
+                prompt = build_knowledge_answer_prompt(
+                    request.question,
+                    evidence_block,
+                    history=request.history,
+                    grounding=plan.grounding_enabled,
+                    report=plan.report,
+                    unverified_quotes=failed_quote_texts,
+                )
+                try:
+                    response = llm.complete_with_metadata(
+                        prompt,
+                        model=model,
+                        reasoning_effort=effort,
+                        timeout=context.agent_settings.reasoning_timeout,
+                    )
+                except Exception as exc:
+                    if attempt == 1 or report is None:
+                        raise
+                    # The regeneration call itself failed (throttle,
+                    # timeout, overflow). Attempt 1's typed grounding
+                    # rejection stays the graceful terminal outcome —
+                    # raising here would discard its booked usage and
+                    # turn a fail-closed verdict into a hard crash.
+                    log.warning(
+                        "Antwort-Regeneration fehlgeschlagen "
+                        "(error_type=%s) — der Grounding-Terminalfehler "
+                        "des ersten Versuchs bleibt bestehen.",
+                        type(exc).__name__,
+                    )
+                    failure_code = report.failure_code
+                    if failure_code is None:
+                        raise
+                    message = grounding_failure_message(
+                        failure_code,
+                        language=detect_ui_language(request.question),
+                    )
+                    answer = message
+                    terminal_failure = {
+                        "type": failure_code.value,
+                        "message": message,
+                    }
+                    break
+                answer = response.content
+                # Additive across attempts: both calls are real spend and
+                # the quota booking reads this one sum per run.
+                usage["prompt_tokens"] += (
+                    getattr(response, "prompt_tokens", 0) or 0
+                )
+                usage["completion_tokens"] += (
+                    getattr(response, "completion_tokens", 0) or 0
+                )
+                if not plan.grounding_enabled:
+                    break
                 # Verification runs against the chunks' SOURCE text:
                 # a "verbatim, verified" quote must exist in the cited
                 # document, not in the contextualization prefix or the
                 # rendering scaffolding the prompt carries.
                 with operation_span("knowledge.grounding") as ground_span:
-                    report = check_grounding(
-                        answer,
-                        [
-                            KnowledgeEvidenceProjector.project(
-                                candidate, reference_id=f"K{index}"
-                            ).excerpt
-                            for index, candidate in enumerate(
-                                used_candidates, start=1
-                            )
-                        ],
-                    )
+                    report = check_grounding(answer, evidence_excerpts)
                     if ground_span is not None:
                         verified = sum(
                             1 for quote in report.quotes if quote.verified
+                        )
+                        ground_span.set_attribute(
+                            "inqtrix.grounding.attempt", attempt
+                        )
+                        ground_span.set_attribute(
+                            "inqtrix.grounding.quotes_artifact_tolerated",
+                            sum(
+                                1
+                                for quote in report.quotes
+                                if quote.artifact_tolerated
+                            ),
                         )
                         ground_span.set_attribute(
                             "inqtrix.grounding.status", report.status.value
@@ -962,6 +1023,89 @@ class KnowledgeAlgorithm:
                 unverified = [
                     quote for quote in report.quotes if not quote.verified
                 ]
+                attempts_state.append(
+                    {
+                        "status": report.status.value,
+                        "failure_code": (
+                            report.failure_code.value
+                            if report.failure_code is not None
+                            else None
+                        ),
+                        "format_repaired": report.format_repaired,
+                        "quotes_total": len(report.quotes),
+                        "quotes_verified": len(report.quotes)
+                        - len(unverified),
+                        "quotes": [
+                            {
+                                "label": quote.label,
+                                "text": quote.text,
+                                "verified": quote.verified,
+                                "artifact_tolerated": quote.artifact_tolerated,
+                            }
+                            for quote in report.quotes
+                        ],
+                    }
+                )
+                if report.publishable:
+                    terminal_failure = None
+                    break
+                if (
+                    attempt < _ANSWER_GROUNDING_ATTEMPTS
+                    and report.failure_code
+                    is GroundingFailureCode.QUOTE_UNVERIFIED
+                ):
+                    # One visible regeneration, never a silent retry: the
+                    # progress step, this log line, and the event announce
+                    # it before the second model call runs.
+                    failed_quote_texts = tuple(
+                        quote.text for quote in unverified
+                    )
+                    log.warning(
+                        "Knowledge-Grounding: %d von %d Zitaten nicht "
+                        "belegt — sichtbare Antwort-Regeneration "
+                        "(Versuch %d/%d).",
+                        len(unverified),
+                        len(report.quotes),
+                        attempt + 1,
+                        _ANSWER_GROUNDING_ATTEMPTS,
+                    )
+                    emit(
+                        "inqtrix.knowledge.answer.retry",
+                        {
+                            "attempt": attempt + 1,
+                            "quotes_total": len(report.quotes),
+                            "quotes_unverified": len(unverified),
+                        },
+                    )
+                    continue
+                failure_code = report.failure_code
+                if failure_code is None:  # defensive: rejected => code
+                    raise RuntimeError(
+                        "Knowledge grounding rejected without a failure code"
+                    )
+                message = grounding_failure_message(
+                    failure_code,
+                    language=detect_ui_language(request.question),
+                )
+                # Never expose the rejected model completion.  Returning a
+                # safe diagnostic together with the established terminal
+                # failure marker preserves usage/audit data while every
+                # native/chat/Agent adapter can reject the result through
+                # the ONE AgentResult terminal-failure contract.
+                answer = message
+                terminal_failure = {
+                    "type": failure_code.value,
+                    "message": message,
+                }
+                log.warning(
+                    "Knowledge-Grounding abgelehnt (failure_code=%s, "
+                    "quotes_total=%d, quotes_unverified=%d).",
+                    failure_code.value,
+                    len(report.quotes),
+                    len(unverified),
+                )
+                break
+            if plan.grounding_enabled and report is not None:
                 grounding_state.update(
                     marker=report.marker,
                     status=report.status.value,
@@ -978,37 +1122,12 @@ class KnowledgeAlgorithm:
                             "label": quote.label,
                             "text": quote.text,
                             "verified": quote.verified,
+                            "artifact_tolerated": quote.artifact_tolerated,
                         }
                         for quote in report.quotes
                     ],
+                    attempts=attempts_state,
                 )
-                if not report.publishable:
-                    failure_code = report.failure_code
-                    if failure_code is None:  # defensive: rejected => code
-                        raise RuntimeError(
-                            "Knowledge grounding rejected without a failure code"
-                        )
-                    message = grounding_failure_message(
-                        failure_code,
-                        language=detect_ui_language(request.question),
-                    )
-                    # Never expose the rejected model completion.  Returning a
-                    # safe diagnostic together with the established terminal
-                    # failure marker preserves usage/audit data while every
-                    # native/chat/Agent adapter can reject the result through
-                    # the ONE AgentResult terminal-failure contract.
-                    answer = message
-                    terminal_failure = {
-                        "type": failure_code.value,
-                        "message": message,
-                    }
-                    log.warning(
-                        "Knowledge-Grounding abgelehnt (failure_code=%s, "
-                        "quotes_total=%d, quotes_unverified=%d).",
-                        failure_code.value,
-                        len(report.quotes),
-                        len(unverified),
-                    )
                 emit(
                     "inqtrix.knowledge.grounding.checked",
                     {

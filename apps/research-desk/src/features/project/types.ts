@@ -902,6 +902,7 @@ export type KnowledgeStepKind =
   | 'gate'
   | 'gate-exhausted'
   | 'answer'
+  | 'answer-retry'
   | 'grounding'
 
 /** Numeric/string facts captured from one knowledge SSE event. The
@@ -924,6 +925,9 @@ export type KnowledgeStepFacts = {
   profile?: string
   quotesTotal?: number
   quotesVerified?: number
+  /** Unverified-quote count that triggered the single visible answer
+   * regeneration (answer-retry step). */
+  quotesUnverified?: number
   /** Backend parse/verification marker. A fallback marker is a visible
    * degradation even when no quote rows could be produced. */
   groundingMarker?: string

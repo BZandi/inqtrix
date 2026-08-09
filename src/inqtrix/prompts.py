@@ -891,6 +891,7 @@ def build_knowledge_answer_prompt(
     history: str = "",
     grounding: bool = False,
     report: bool = False,
+    unverified_quotes: tuple[str, ...] = (),
 ) -> str:
     """Build the answer-synthesis prompt for the knowledge algorithm.
 
@@ -909,6 +910,11 @@ def build_knowledge_answer_prompt(
             structuring rule with a fixed four-section report
             skeleton. Composes with *grounding* (the quote block
             still precedes the report).
+        unverified_quotes: Quote texts from a previous attempt that
+            failed verbatim verification. Non-empty only on the single
+            visible regeneration attempt: the prompt names them and
+            instructs the model to re-quote exactly or replace them.
+            Empty tuples leave the prompt byte-identical to today.
 
     Returns:
         The full German prompt. The citation rules mirror the web
@@ -936,6 +942,20 @@ def build_knowledge_answer_prompt(
         if grounding
         else ""
     )
+    retry_block = ""
+    if grounding and unverified_quotes:
+        failed_lines = "\n".join(
+            f'- "{quote}"' for quote in unverified_quotes
+        )
+        retry_block = (
+            "\nKORREKTUR:\n"
+            "Ein frueherer Antwortversuch enthielt Zitate, die NICHT "
+            "woertlich in den genannten Auszuegen stehen:\n"
+            f"{failed_lines}\n"
+            "Uebernimm diese Zitate nicht erneut. Zitiere stattdessen "
+            "zeichengenau aus den Auszuegen oder stuetze die betroffene "
+            "Aussage auf eine andere Belegstelle.\n"
+        )
     structure_rule = (
         _KNOWLEDGE_REPORT_STRUCTURE
         if report
@@ -963,4 +983,5 @@ def build_knowledge_answer_prompt(
         "- Antworte in der Sprache der Frage.\n"
         f"{structure_rule}"
         f"{grounding_block}"
+        f"{retry_block}"
     )

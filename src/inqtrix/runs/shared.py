@@ -72,6 +72,7 @@ _CHILD_PROJECTED_EVENTS = frozenset(
         "inqtrix.progress.message",
         "inqtrix.knowledge.retrieval.degraded",
         "inqtrix.knowledge.retrieval.warning",
+        "inqtrix.knowledge.answer.retry",
         "inqtrix.knowledge.grounding.checked",
     }
 )
@@ -371,6 +372,23 @@ def build_child_progress_payload(
             projected["metrics"] = {
                 **dict(projected.get("metrics") or {}),
                 **grounding_metrics,
+            }
+    if event_type == "inqtrix.knowledge.answer.retry":
+        # The visible regeneration must stay visible ACROSS the run
+        # boundary: the parent receives the counters (never quote text),
+        # and the regeneration attempt travels under its own key so the
+        # task-attempt field below cannot clobber it.
+        retry_metrics = {
+            key: clean[key]
+            for key in ("quotes_total", "quotes_unverified")
+            if clean.get(key) is not None
+        }
+        if clean.get("attempt") is not None:
+            retry_metrics["answer_attempt"] = clean["attempt"]
+        if retry_metrics:
+            projected["metrics"] = {
+                **dict(projected.get("metrics") or {}),
+                **retry_metrics,
             }
     if event_type == "inqtrix.knowledge.retrieval.degraded":
         # Only the reason and bounded counters cross into the parent.  The

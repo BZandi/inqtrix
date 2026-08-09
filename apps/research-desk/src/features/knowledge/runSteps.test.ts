@@ -401,4 +401,55 @@ describe('applyKnowledgeRunEvent', () => {
     const after = applyKnowledgeRunEvent(before, event('inqtrix.progress.message', { message: 'x' }))
     expect(after).toBe(before)
   })
+
+  it('keeps the answer retry as its OWN step between answer and grounding', () => {
+    // Anti-overwrite proof: the retry must never upsert into the 'answer'
+    // step — a hidden second attempt would be exactly the silent retry the
+    // step exists to rule out.
+    const progress = reduceEvents([
+      profileResolved,
+      event('inqtrix.knowledge.retrieval.completed', { candidate_count: 16, top_k: 8 }),
+      event('inqtrix.knowledge.gate.evaluated', { round: 0, rewritten: false, sufficient: true }),
+      event('inqtrix.knowledge.answer.retry', {
+        attempt: 2,
+        quotes_total: 10,
+        quotes_unverified: 1,
+      }),
+      event('inqtrix.knowledge.grounding.checked', {
+        marker: 'm',
+        quotes_total: 10,
+        quotes_verified: 10,
+      }),
+    ])
+
+    const kinds = progress.steps.map((step) => step.kind)
+    expect(kinds.indexOf('answer')).toBeGreaterThanOrEqual(0)
+    expect(kinds.indexOf('answer-retry')).toBe(kinds.indexOf('answer') + 1)
+    expect(kinds.indexOf('grounding')).toBe(kinds.indexOf('answer-retry') + 1)
+    // Both attempts coexist with their own ids and end resolved.
+    expect(progress.steps.find((step) => step.id === 'answer')?.status).toBe('done')
+    expect(progress.steps.find((step) => step.id === 'answer-retry')).toMatchObject({
+      facts: { quotesTotal: 10, quotesUnverified: 1 },
+      status: 'done',
+    })
+  })
+
+  it('shows a running retry step while the second attempt is in flight', () => {
+    const progress = reduceEvents([
+      profileResolved,
+      event('inqtrix.knowledge.retrieval.completed', { candidate_count: 16, top_k: 8 }),
+      event('inqtrix.knowledge.answer.retry', {
+        attempt: 2,
+        quotes_total: 10,
+        quotes_unverified: 2,
+      }),
+    ])
+
+    expect(progress.steps.find((step) => step.id === 'answer')?.status).toBe('done')
+    expect(progress.steps.at(-1)).toMatchObject({
+      id: 'answer-retry',
+      kind: 'answer-retry',
+      status: 'running',
+    })
+  })
 })

@@ -453,3 +453,35 @@ export function partitionEditorDocumentsByAccess<
   }
   return { owned, shared }
 }
+
+/** How long the startup transients may present CALM before they earn color.
+ *
+ * Opening a document legitimately passes inactive -> syncing -> saved within
+ * a few hundred milliseconds. Showing that sequence verbatim flashes a gray
+ * dot, an amber dot and three label swaps for a state nobody can act on.
+ * Within this grace window both startup transients present as ONE quiet
+ * "syncing" with a muted dot; a session still not up after the window shows
+ * its real state — and every exceptional kind bypasses the calm entirely
+ * (the useCalmCollaborationStatusKind philosophy, applied to startup).
+ */
+export const COLLABORATION_STARTUP_GRACE_MS = 1_200
+
+const STARTUP_TRANSIENT_KINDS: ReadonlySet<EditorCollaborationStatusKind> = new Set([
+  'inactive',
+  'syncing',
+])
+
+export function startupPresentation(
+  kind: EditorCollaborationStatusKind,
+  sinceMountMs: number,
+  collaborationExpected: boolean,
+): { calm: boolean; kind: EditorCollaborationStatusKind } {
+  // A local markdown document is FINAL `inactive` ("Lokal") — there is no
+  // session coming, so the grace would show 1.2s of "syncing" for a state
+  // that was already the truth. Only documents that actually start a
+  // collaboration session get the calm window.
+  if (!collaborationExpected) return { calm: false, kind }
+  if (!STARTUP_TRANSIENT_KINDS.has(kind)) return { calm: false, kind }
+  if (sinceMountMs >= COLLABORATION_STARTUP_GRACE_MS) return { calm: false, kind }
+  return { calm: true, kind: 'syncing' }
+}

@@ -16,6 +16,9 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    // build/ carries the vite-plugin contracts (they drive a real `vite
+    // build` of a fixture — their regressions are only observable on built
+    // output, never in src).
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'build/**/*.test.ts'],
   },
 })

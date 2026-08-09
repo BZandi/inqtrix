@@ -355,7 +355,7 @@ function TopBarFixture() {
   return (
     <main className="w-screen bg-background">
       <EditorTopBarLayout
-        actions={<EditorCollaborationStatus model={model} variant="topbar" />}
+        actions={<EditorCollaborationStatus collaborationExpected model={model} variant="topbar" />}
         leading={(
           <span className="t-list-regular min-w-0 truncate" data-testid="long-title">
             A deliberately long collaboration document title that must remain inside its narrow track.md
@@ -385,7 +385,7 @@ function StatusHysteresisFixture() {
   return (
     <main className="space-y-3 p-4">
       <div className="w-64">
-        <EditorCollaborationStatus model={model} variant="topbar" />
+        <EditorCollaborationStatus collaborationExpected model={model} variant="topbar" />
       </div>
       <button data-testid="quick-save-pulse" onClick={() => pulse(100)} type="button">
         Quick pulse

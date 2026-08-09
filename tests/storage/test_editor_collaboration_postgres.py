@@ -2643,6 +2643,105 @@ async def test_session_rate_limit_serializes_one_user_across_documents(
 
 
 @pytest.mark.asyncio
+async def test_issuing_a_lease_sweeps_only_the_actors_stale_rows(
+    database: _DatabaseHarness,
+) -> None:
+    """Row hygiene lives at the producer: minting a lease deletes the SAME
+    actor's rows that expired beyond the grace window — expirations inside
+    the grace and other actors' trails must survive."""
+    document_id = "ed_collaboration_sweep"
+    await _seed_markdown_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    await _activate_document(
+        database,
+        tenant_id=TENANT_A,
+        document_id=document_id,
+        owner_user_id=OWNER_A,
+    )
+    session_id = "session:collaboration-sweep"
+    await _seed_browser_session(
+        database,
+        tenant_id=TENANT_A,
+        user_id=OWNER_A,
+        session_id=session_id,
+    )
+    grace = collaboration_postgres._LEASE_SWEEP_GRACE_SECONDS
+
+    def expired_row(
+        token: str, user_id: uuid.UUID, expires_at: float
+    ) -> dict[str, object]:
+        return {
+            "lease_id": uuid.uuid4(),
+            "token_hash": _sha256(token.encode()),
+            "tenant_id": TENANT_A,
+            "document_id": document_id,
+            "generation": 1,
+            "user_id": user_id,
+            "permission": "edit",
+            "session_id": session_id,
+            "issued_at": expires_at - 60.0,
+            "expires_at": expires_at,
+        }
+
+    async with database.session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                insert(editor_collaboration_leases),
+                [
+                    expired_row(
+                        "sweep:own-stale", OWNER_A, database.now - grace - 10.0
+                    ),
+                    expired_row(
+                        "sweep:own-recent", OWNER_A, database.now - 30.0
+                    ),
+                    expired_row(
+                        "sweep:other-stale", OWNER_B, database.now - grace - 10.0
+                    ),
+                ],
+            )
+
+    await database.store.issue_lease(
+        CollaborationLease(
+            lease_id=uuid.uuid4(),
+            token_hash=_sha256(b"sweep:new"),
+            tenant_id=TENANT_A,
+            document_id=document_id,
+            generation=1,
+            user_id=OWNER_A,
+            permission="edit",
+            session_id=session_id,
+            issued_at=database.now,
+            expires_at=database.now + 3_600.0,
+            last_validated_at=database.now,
+        ),
+        max_active=5,
+        max_issued_per_window=30,
+        issued_since=database.now - 60.0,
+    )
+
+    async with database.session_factory() as session:
+        remaining = set(
+            (
+                await session.execute(
+                    select(editor_collaboration_leases.c.token_hash).where(
+                        editor_collaboration_leases.c.tenant_id == TENANT_A
+                    )
+                )
+            ).scalars()
+        )
+    assert _sha256(b"sweep:own-stale") not in remaining
+    assert {
+        _sha256(b"sweep:own-recent"),
+        _sha256(b"sweep:other-stale"),
+        _sha256(b"sweep:new"),
+    } <= remaining
+
+
+@pytest.mark.asyncio
 async def test_simultaneous_cold_instance_acquire_has_one_fenced_loser(
     database: _DatabaseHarness,
 ) -> None:

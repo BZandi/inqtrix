@@ -79,6 +79,7 @@ import {
 import { routeAgentRunToView } from './followTarget'
 import { agentOverridesFromSelection } from '@/features/researchRuns/modelSelection'
 import {
+  agentCenterScreen,
   canEditAgentRun,
   isActiveAgentRun,
   restoredAgentSessionId,
@@ -450,6 +451,12 @@ export function AgentWorkspace({
       .filter((run): run is AgentRunRecord => Boolean(run))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   }, [selectedSession, state.agentRuns])
+  // Runs the store already carried when this workspace mounted are HISTORY:
+  // they render in place instead of replaying their entry animation over the
+  // view-level entry (a remount is navigation, not new content). Only runs
+  // that appear later — a real new answer — animate in.
+  const mountRunIdsRef = useRef<ReadonlySet<string> | null>(null)
+  mountRunIdsRef.current ??= new Set(Object.keys(state.agentRuns))
   const latestRun = sessionRuns.at(-1)
   const runningRun = sessionRuns.find((run) => isActiveAgentRun(run.status))
   const statusExecution = useMemo(
@@ -976,12 +983,18 @@ export function AgentWorkspace({
             so questions and answers read at the SAME measure across
             desks — and flush with the composer below. */}
         <div className="mx-auto w-full max-w-5xl px-4 py-4 md:px-8">
-          {sessionRuns.length === 0
-            && serverEnabled
-            && (!sessionsSettled || (selectedSession && !runsHydrated)) ? (
+          {agentCenterScreen({
+            hasRuns: sessionRuns.length > 0,
+            hasSelectedSession: Boolean(selectedSession),
+            runsHydrated,
+            serverEnabled,
+            sessionsKnown: sessionsSettled,
+          }) === 'skeleton' ? (
             // Hydration window: sessions/runs are still paging in — a
             // skeleton, never a false "empty" welcome (same primitive as
-            // Chat/Knowledge).
+            // Chat/Knowledge). `sessionsSettled` survives view switches
+            // (identity cache in useAgentSessionsApi), so this branch is
+            // for genuine unknowns only, never a remount over known data.
             <ConversationSkeleton reduceMotion={reduceMotion} />
           ) : sessionRuns.length === 0 ? (
             <div className="flex min-h-[40vh] items-center justify-center">
@@ -1013,6 +1026,7 @@ export function AgentWorkspace({
               {sessionRuns.map((run) => (
                 <AgentRunTurn
                   actions={timelineActions}
+                  animateEntry={!mountRunIdsRef.current?.has(run.runId)}
                   key={run.runId}
                   run={run}
                   transportDegraded={pollingRunIds?.includes(run.runId)}

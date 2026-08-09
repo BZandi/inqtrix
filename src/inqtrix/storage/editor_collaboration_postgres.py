@@ -515,6 +515,34 @@ async def _lock_lease_rate_scope(
     )
 
 
+# Expired lease rows stay readable for one day (debugging a session storm
+# needs the trail), then the actor who mints the next lease sweeps their own
+# remains. Cleaning at the only two row-producing call sites keeps the table
+# bounded without a cross-tenant maintenance door: the delete runs inside the
+# caller's tenant scope, under the (tenant, user) advisory lock both paths
+# already hold, and over the caller's own rows via ix_collaboration_leases_user.
+_LEASE_SWEEP_GRACE_SECONDS = 24 * 3600.0
+
+
+async def _sweep_expired_actor_leases(
+    session: "AsyncSession",
+    lease: CollaborationLease,
+) -> None:
+    await session.execute(
+        delete(editor_collaboration_leases).where(
+            editor_collaboration_leases.c.tenant_id == lease.tenant_id,
+            (
+                editor_collaboration_leases.c.user_id == lease.user_id
+                if lease.actor_kind == "user"
+                else editor_collaboration_leases.c.guest_identity_id
+                == lease.guest_identity_id
+            ),
+            editor_collaboration_leases.c.expires_at
+            < lease.issued_at - _LEASE_SWEEP_GRACE_SECONDS,
+        )
+    )
+
+
 async def _active_guest_access(
     session: "AsyncSession",
     *,
@@ -1245,6 +1273,7 @@ class PostgresEditorCollaborationStore:
             )
             if issued_count >= max_issued_per_window:
                 raise CollaborationRateLimited("session_rate_limited")
+            await _sweep_expired_actor_leases(session, lease)
             await session.execute(
                 insert(editor_collaboration_leases).values(**_lease_values(lease))
             )
@@ -1409,6 +1438,7 @@ class PostgresEditorCollaborationStore:
             )
             if issued_count >= max_issued_per_window:
                 raise CollaborationRateLimited("session_rate_limited")
+            await _sweep_expired_actor_leases(session, replacement)
             await session.execute(
                 update(editor_collaboration_leases)
                 .where(

@@ -37,6 +37,12 @@ const AUTOSAVE_DEBOUNCE_MS = 1_500
  * server RUNS hydrated separately via the run list. Hydrates on activation,
  * pushes fingerprint-guarded changes debounced, deletes removed rows.
  */
+/** Hydration identities (workspace:epoch) whose first listing SUCCEEDED in
+ * this document lifetime. See the `settled` note in the hook; a full reload
+ * drops the set, so a genuine cold start still shows the loading skeleton
+ * exactly once, and a failed listing never marks its identity as known. */
+const settledHydrationIdentities = new Set<string>()
+
 export function useAgentSessionsApi({
   apiKey,
   dispatch,
@@ -71,7 +77,19 @@ export function useAgentSessionsApi({
   // must end the skeleton and surface via `error`), while `hydrated`
   // stays success-only — flush must never push/delete against a
   // baseline that was never seeded (it would resurrect deleted rows).
-  const [settled, setSettled] = useState(false)
+  //
+  // The state is remount-local, but the ANSWER it carries ("has the first
+  // listing for this workspace+epoch finished?") is not: a view switch
+  // remounts the desk while the store keeps every session, and re-arming
+  // the skeleton over known data is exactly the center-column flash. The
+  // module-level identity set makes remounts start settled; a project
+  // epoch change mints a new identity and is genuinely unknown again.
+  const hydrationIdentity = `${workspaceId}:${projectEpoch}`
+  const [settled, setSettled] = useState(
+    () => settledHydrationIdentities.has(hydrationIdentity),
+  )
+  const hydrationIdentityRef = useRef(hydrationIdentity)
+  hydrationIdentityRef.current = hydrationIdentity
 
   const sessionsRef = useRef(sessions)
   sessionsRef.current = sessions
@@ -115,7 +133,7 @@ export function useAgentSessionsApi({
     flushingRef.current = false
     flushPendingRef.current = false
     setHydrated(false)
-    setSettled(false)
+    setSettled(settledHydrationIdentities.has(hydrationIdentityRef.current))
   }, [])
 
   const hydrate = useCallback(
@@ -142,10 +160,15 @@ export function useAgentSessionsApi({
             )
           }
           setHydrated(true)
+          settledHydrationIdentities.add(hydrationIdentityRef.current)
           setSettled(true)
           setError(null)
         } catch (caught) {
           if (!token.cancelled) {
+            // Settles THIS mount (the skeleton must end and yield to the
+            // error surface) but does NOT mark the identity as known: a
+            // failed listing left the question unanswered, so the next
+            // mount honestly starts loading again.
             setSettled(true)
             setError(
               caught instanceof Error ? caught.message : String(caught),

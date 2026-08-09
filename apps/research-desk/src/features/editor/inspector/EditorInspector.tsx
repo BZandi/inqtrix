@@ -57,6 +57,8 @@ import {
   type InspectorHistoryKind,
   type InspectorOpenFilters,
   type InspectorParticipant,
+  COLLABORATION_STARTUP_GRACE_MS,
+  startupPresentation,
 } from './model'
 
 type InspectorDecision = 'accept' | 'reject'
@@ -434,6 +436,7 @@ export function EditorInspector({
       </div>
 
       <EditorCollaborationStatus
+        collaborationExpected={collaborationActive}
         model={collaborationStatus}
         onLogin={onLogin}
         onReconnect={onReconnect}
@@ -711,27 +714,39 @@ export function EditorWriteModeControl({
         lockLabel={commentLocked ? lockLabel : null}
         onClick={() => onModeChange('comment')}
       />
-      {mode === 'view' ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="flex size-6 items-center justify-center text-muted-foreground" tabIndex={0}>
-              <LockKeyhole className="icon-xs" />
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>{lockLabel}</TooltipContent>
-        </Tooltip>
-      ) : null}
+      {/* The read-only badge owns its slot permanently — `invisible` keeps
+          the 24px reserved, so leaving/entering view mode never re-lays the
+          group out. */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            className={cn(
+              'flex size-6 items-center justify-center text-muted-foreground',
+              mode !== 'view' && 'invisible',
+            )}
+            tabIndex={mode === 'view' ? 0 : -1}
+          >
+            <LockKeyhole className="icon-xs" />
+          </span>
+        </TooltipTrigger>
+        {mode === 'view' ? <TooltipContent>{lockLabel}</TooltipContent> : null}
+      </Tooltip>
     </div>
   )
 }
 
 export function EditorCollaborationStatus({
+  collaborationExpected,
   model,
   onLogin,
   onReconnect,
   onReload,
   variant,
 }: {
+  /** Whether this document is a collaboration document at all. A local
+   * markdown document is FINAL `inactive` ("Lokal") — the startup grace
+   * must never dress it up as syncing. */
+  collaborationExpected: boolean
   model: EditorCollaborationStatusModel
   onLogin?: () => void
   onReconnect?: () => Promise<void>
@@ -741,7 +756,34 @@ export function EditorCollaborationStatus({
   const { locale } = useLocale()
   const labels = copy[locale]
   const [actionPending, setActionPending] = useState(false)
-  const visibleKind = useCalmCollaborationStatusKind(model.kind)
+  const calmedKind = useCalmCollaborationStatusKind(model.kind)
+  // Startup grace: within the first COLLABORATION_STARTUP_GRACE_MS the two
+  // expected startup transients present as ONE quiet syncing state with a
+  // muted dot — a session still not up after the window shows its real
+  // state, and exceptional kinds bypass the calm entirely (model contract).
+  const mountedAtRef = useRef(Date.now())
+  const [startupGraceElapsed, setStartupGraceElapsed] = useState(false)
+  useEffect(() => {
+    const remaining = COLLABORATION_STARTUP_GRACE_MS
+      - (Date.now() - mountedAtRef.current)
+    if (remaining <= 0) {
+      setStartupGraceElapsed(true)
+      return undefined
+    }
+    const timer = window.setTimeout(
+      () => setStartupGraceElapsed(true),
+      remaining,
+    )
+    return () => window.clearTimeout(timer)
+  }, [])
+  const presented = startupPresentation(
+    calmedKind,
+    startupGraceElapsed
+      ? COLLABORATION_STARTUP_GRACE_MS
+      : Date.now() - mountedAtRef.current,
+    collaborationExpected,
+  )
+  const visibleKind = presented.kind
   const statusLabel = labels.status[visibleKind]
   const projectionLabel = model.projectionConfirmedAt
     ? `${labels.projection}: ${new Date(model.projectionConfirmedAt).toLocaleString(locale)}`
@@ -814,27 +856,42 @@ export function EditorCollaborationStatus({
                 aria-hidden
                 className={cn(
                   'size-2 shrink-0 rounded-full',
-                  visibleKind === 'saved' ? 'bg-success'
-                    : visibleKind === 'saving'
-                      || visibleKind === 'syncing'
-                      || visibleKind === 'reconnecting'
-                      ? 'bg-warning'
-                      : visibleKind === 'read_only' || visibleKind === 'inactive'
-                        ? 'bg-muted-foreground/50'
-                        : 'bg-destructive',
+                  presented.calm ? 'bg-muted-foreground/50'
+                    : visibleKind === 'saved' ? 'bg-success'
+                      : visibleKind === 'saving'
+                        || visibleKind === 'syncing'
+                        || visibleKind === 'reconnecting'
+                        ? 'bg-warning'
+                        : visibleKind === 'read_only' || visibleKind === 'inactive'
+                          ? 'bg-muted-foreground/50'
+                          : 'bg-destructive',
                 )}
               />
               <span
                 className={cn(
-                  't-meta-sm truncate text-muted-foreground',
-                  variant === 'topbar' && 'w-[6.75rem]',
+                  // A FIXED track in both variants: the label swaps between
+                  // very different lengths ("Wird synchronisiert" ->
+                  // "Gespeichert") and a content-sized span re-laid the
+                  // whole chip out on every state change.
+                  't-meta-sm w-[6.75rem] truncate text-muted-foreground',
                 )}
                 data-editor-status-label
               >
                 {statusLabel}
               </span>
             </span>
-            <span aria-hidden className="flex shrink-0 items-center" data-participant-count={model.participants.length}>
+            <span
+              aria-hidden
+              className={cn(
+                // Reserved presence slot (3 avatars + overflow badge at the
+                // variant's stack width): peers joining fill the box from
+                // the right instead of widening the chip and shifting the
+                // toolbar row.
+                'flex shrink-0 items-center justify-end',
+                variant === 'topbar' ? 'w-16' : 'w-20',
+              )}
+              data-participant-count={model.participants.length}
+            >
               {model.participants.length === 0 ? <Users className="icon-sm text-muted-foreground" /> : null}
               {model.visibleParticipants.map((participant, index) => (
                 <span
@@ -1178,13 +1235,18 @@ function ModeButton({ active, disabled, icon, label, lockLabel, onClick }: {
       className={cn(
         'flex h-6 items-center gap-1 rounded-sm px-2 text-xs font-medium transition-colors',
         active ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+        // Locked state changes COLOR only, never geometry: an extra lock
+        // glyph here once made the whole group ~72px wider while the
+        // session came up, shifting the toolbar, the title truncation
+        // point and the actions in one visible jolt (the 4-column grid
+        // redistributes every Δ across both 1fr tracks). The tooltip and
+        // aria-disabled carry the why.
         disabled && 'cursor-not-allowed opacity-50',
       )}
       disabled={disabled}
       onClick={onClick}
       type="button"
     >
-      {disabled ? <LockKeyhole className="icon-xs" /> : null}
       <span aria-hidden data-editor-mode-icon>{icon}</span>
       <span data-editor-mode-label>{label}</span>
     </button>

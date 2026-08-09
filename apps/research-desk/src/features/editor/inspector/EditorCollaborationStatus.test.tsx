@@ -26,7 +26,7 @@ function statusMarkup() {
   })
   return renderToStaticMarkup(
     <LocaleProvider>
-      <EditorCollaborationStatus model={model} variant="topbar" />
+      <EditorCollaborationStatus collaborationExpected model={model} variant="topbar" />
     </LocaleProvider>,
   )
 }
@@ -54,6 +54,7 @@ describe('EditorCollaborationStatus', () => {
         actions={(
           <LocaleProvider>
             <EditorCollaborationStatus
+              collaborationExpected
               model={buildEditorCollaborationStatusModel({
                 access: 'edit',
                 active: true,
@@ -89,6 +90,7 @@ describe('EditorCollaborationStatus', () => {
     const markup = renderToStaticMarkup(
       <LocaleProvider>
         <EditorCollaborationStatus
+          collaborationExpected
           model={buildEditorCollaborationStatusModel({
             access: 'view',
             active: true,

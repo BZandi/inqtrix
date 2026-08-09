@@ -123,7 +123,8 @@ function themeVariablesFor(theme: MermaidTheme): Record<string, string> {
   }
 }
 
-async function ensureMermaidRender(
+/** Exported for the leak-contract test only. */
+export async function ensureMermaidRender(
   code: string,
   theme: MermaidTheme,
   preset: ThemePreset,
@@ -132,6 +133,8 @@ async function ensureMermaidRender(
   const key = cacheKey(code, theme, preset, contrastMode)
   if (mermaidCache.has(key) || mermaidPending.has(key)) return
   mermaidPending.add(key)
+  mermaidCounter += 1
+  const renderId = `inqtrix-mermaid-${mermaidCounter}`
   try {
     const themeVariables = themeVariablesFor(theme)
     const mermaid = (await import('mermaid')).default
@@ -152,8 +155,7 @@ async function ensureMermaidRender(
           diagramMarginX: 24,
         },
       })
-      mermaidCounter += 1
-      return mermaid.render(`inqtrix-mermaid-${mermaidCounter}`, code)
+      return mermaid.render(renderId, code)
     })
     mermaidCache.set(key, { kind: 'svg', svg })
   } catch (error) {
@@ -163,6 +165,13 @@ async function ensureMermaidRender(
     mermaidCache.set(key, { kind: 'error', message })
   } finally {
     mermaidPending.delete(key)
+    // Mermaid appends a temporary `#d<renderId>` container to document.body
+    // and removes it on success — but LEAKS it on a parse error. As a direct
+    // body child below the viewport the stray gives the document real scroll
+    // extent (html/body are overflow: visible), so a wheel over any surface
+    // without an inner scroller — the left app rail — scrolled the whole
+    // shell upward. Pinned by MermaidFigure.test.ts.
+    document.getElementById(`d${renderId}`)?.remove()
   }
 }
 

@@ -4,8 +4,16 @@ import {
   INQTRIX_STRUCTURE_SUGGESTION_ATTR,
   SUGGESTION_MARK_NAMES,
 } from '@inqtrix/editor-schema'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
+
+// Linger contracts drive the registry's real timers with vi fake timers; a
+// failed assertion must not leak the fake clock — or a lingering registry
+// entry — into unrelated tests.
+afterEach(() => {
+  destroyLingeringCollaborationLifecycles()
+  vi.useRealTimers()
+})
 
 import type { EditorCollaborationSession } from '@/api/inqtrixClient'
 import {
@@ -14,12 +22,15 @@ import {
   COLLABORATION_AWARENESS_THROTTLE_MS,
   collaborationReconnectDelayMs,
   containsStructureSuggestionAttribute,
+  LIFECYCLE_LINGER_MS,
+  MAX_LINGERING_LIFECYCLES,
   acquireLifecycleController,
   collaborationDocumentLifecycleHasUnconfirmedChanges,
   collaborationHandleForRequestedDocument,
   collaborationWebSocketUrl,
   consumeLifecycleFailure,
   createHocuspocusProvider,
+  destroyLingeringCollaborationLifecycles,
   flushActiveCollaborationDocuments,
   leaseRefreshDelayMs,
   releaseLifecycleController,
@@ -1154,7 +1165,7 @@ describe('collaboration document lifecycle', () => {
   it('waits for active collaboration durability before the logout boundary', async () => {
     const key = 'workspace-1:logout-boundary:g2'
     const harness = createHarness(vi.fn().mockResolvedValue(session('initial-token')))
-    const controller = acquireLifecycleController(key, () => harness.controller)
+    const controller = acquireLifecycleController(key, null, () => harness.controller)
     await controller.start()
     controller.getSnapshot().document?.getMap('test').set('title', 'Before logout')
 
@@ -1178,46 +1189,57 @@ describe('collaboration document lifecycle', () => {
   })
 
   it('reuses a released pending controller and removes it after the acked remount', async () => {
-    const key = 'workspace-1:registry-remount:g2'
-    const harness = createHarness(vi.fn().mockResolvedValue(session('initial-token')))
-    const controller = acquireLifecycleController(key, () => harness.controller)
-    await controller.start()
-    controller.getSnapshot().document?.getMap('test').set('title', 'Retained')
-    harness.runTimer(COLLABORATION_UPDATE_BATCH_MS)
-    await Promise.resolve()
-    await Promise.resolve()
+    vi.useFakeTimers()
+    try {
+      const key = 'workspace-1:registry-remount:g2'
+      const harness = createHarness(vi.fn().mockResolvedValue(session('initial-token')))
+      const controller = acquireLifecycleController(key, null, () => harness.controller)
+      await controller.start()
+      controller.getSnapshot().document?.getMap('test').set('title', 'Retained')
+      harness.runTimer(COLLABORATION_UPDATE_BATCH_MS)
+      await Promise.resolve()
+      await Promise.resolve()
 
-    releaseLifecycleController(key, controller)
-    expect(harness.destroy).not.toHaveBeenCalled()
-    const remounted = acquireLifecycleController(key, () => {
-      throw new Error('pending lifecycle entry should be reused')
-    })
-    expect(remounted).toBe(controller)
+      releaseLifecycleController(key, controller)
+      expect(harness.destroy).not.toHaveBeenCalled()
+      const remounted = acquireLifecycleController(key, null, () => {
+        throw new Error('pending lifecycle entry should be reused')
+      })
+      expect(remounted).toBe(controller)
 
-    harness.getProviderOptions()?.events.onStateless(JSON.stringify({
-      hash: 'local-update-hash',
-      sequence: 5,
-      type: 'durable_ack',
-    }))
-    expect(harness.destroy).not.toHaveBeenCalled()
-    releaseLifecycleController(key, remounted)
-    expect(harness.destroy).toHaveBeenCalledOnce()
+      harness.getProviderOptions()?.events.onStateless(JSON.stringify({
+        hash: 'local-update-hash',
+        sequence: 5,
+        type: 'durable_ack',
+      }))
+      expect(harness.destroy).not.toHaveBeenCalled()
+      releaseLifecycleController(key, remounted)
+      // The settled controller lingers with its live session; the real
+      // teardown happens only after the linger window elapses.
+      expect(harness.destroy).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(LIFECYCLE_LINGER_MS)
+      expect(harness.destroy).toHaveBeenCalledOnce()
 
-    const replacementHarness = createHarness(
-      vi.fn().mockResolvedValue(session('replacement-token')),
-    )
-    const replacement = acquireLifecycleController(
-      key,
-      () => replacementHarness.controller,
-    )
-    expect(replacement).toBe(replacementHarness.controller)
-    releaseLifecycleController(key, replacement)
+      const replacementHarness = createHarness(
+        vi.fn().mockResolvedValue(session('replacement-token')),
+      )
+      const replacement = acquireLifecycleController(
+        key,
+        null,
+        () => replacementHarness.controller,
+      )
+      expect(replacement).toBe(replacementHarness.controller)
+      releaseLifecycleController(key, replacement)
+      vi.advanceTimersByTime(LIFECYCLE_LINGER_MS)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('disposes an exact retired lifecycle after its recovery snapshot is captured', async () => {
     const key = 'workspace-1:document-1:g2'
     const harness = createHarness(vi.fn().mockResolvedValue(session('initial-token')))
-    const controller = acquireLifecycleController(key, () => harness.controller)
+    const controller = acquireLifecycleController(key, null, () => harness.controller)
     await controller.start()
     controller.getSnapshot().document?.getMap('test').set('title', 'Unconfirmed')
     expect(collaborationDocumentLifecycleHasUnconfirmedChanges({
@@ -1243,6 +1265,7 @@ describe('collaboration document lifecycle', () => {
     )
     const replacement = acquireLifecycleController(
       key,
+      null,
       () => replacementHarness.controller,
     )
     expect(replacement).toBe(replacementHarness.controller)
@@ -1250,14 +1273,18 @@ describe('collaboration document lifecycle', () => {
   })
 
   it('retains a timed-out controller for recovery and cleans the registry after ack', async () => {
+    vi.useFakeTimers()
     const key = 'workspace-1:registry-timeout:g2'
     const harness = createHarness(vi.fn().mockResolvedValue(session('initial-token')))
-    const controller = acquireLifecycleController(key, () => harness.controller)
+    const controller = acquireLifecycleController(key, null, () => harness.controller)
     await controller.start()
     controller.getSnapshot().document?.getMap('test').set('title', 'Unconfirmed')
 
     releaseLifecycleController(key, controller)
     expect(harness.transportUpdates).toHaveLength(1)
+    // The pending update rides out the linger window on the live session;
+    // only then does release() start its durability timeout.
+    vi.advanceTimersByTime(LIFECYCLE_LINGER_MS)
     harness.runTimer(60_000)
 
     expect(harness.destroy).not.toHaveBeenCalled()
@@ -1272,6 +1299,7 @@ describe('collaboration document lifecycle', () => {
     )
     const remounted = acquireLifecycleController(
       key,
+      null,
       () => {
         throw new Error('the retained controller must be reused')
       },
@@ -1289,11 +1317,197 @@ describe('collaboration document lifecycle', () => {
       durabilityStatus: 'saved',
     })
     releaseLifecycleController(key, remounted)
+    vi.advanceTimersByTime(LIFECYCLE_LINGER_MS)
     expect(harness.destroy).toHaveBeenCalledOnce()
 
-    const replacement = acquireLifecycleController(key, () => replacementHarness.controller)
+    const replacement = acquireLifecycleController(key, null, () => replacementHarness.controller)
     expect(replacement).toBe(replacementHarness.controller)
     releaseLifecycleController(key, replacement)
+    vi.advanceTimersByTime(LIFECYCLE_LINGER_MS)
+    vi.useRealTimers()
+  })
+
+  it('re-entering within the linger window retains the live session without a new open', async () => {
+    vi.useFakeTimers()
+    try {
+      const key = 'workspace-1:linger-warm-reentry:g2'
+      const requestSession = vi.fn().mockResolvedValue(session('initial-token'))
+      const harness = createHarness(requestSession)
+      const controller = acquireLifecycleController(key, null, () => harness.controller)
+      await controller.start()
+      expect(requestSession).toHaveBeenCalledOnce()
+
+      releaseLifecycleController(key, controller)
+      expect(harness.destroy).not.toHaveBeenCalled()
+      expect(harness.disconnect).not.toHaveBeenCalled()
+
+      const remounted = acquireLifecycleController(key, null, () => {
+        throw new Error('the lingering session must be retained, not rebuilt')
+      })
+      expect(remounted).toBe(controller)
+      // The remount effect always calls start(); on a retained lifecycle it
+      // must be a no-op — the lease budget sees exactly ONE open.
+      await remounted.start()
+      expect(requestSession).toHaveBeenCalledOnce()
+      expect(harness.connect).toHaveBeenCalledOnce()
+      expect(remounted.getSnapshot()).toMatchObject({
+        connectionStatus: 'connected',
+        synced: true,
+      })
+      releaseLifecycleController(key, remounted)
+      vi.advanceTimersByTime(LIFECYCLE_LINGER_MS)
+      expect(harness.destroy).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('caps lingering lifecycles and tears down the oldest first', async () => {
+    vi.useFakeTimers()
+    try {
+      const count = MAX_LINGERING_LIFECYCLES + 1
+      const harnesses = Array.from({ length: count }, () => (
+        createHarness(vi.fn().mockResolvedValue(session('initial-token')))
+      ))
+      for (const [index, harness] of harnesses.entries()) {
+        const key = `workspace-1:linger-cap-${index}:g2`
+        const controller = acquireLifecycleController(key, null, () => harness.controller)
+        await controller.start()
+        releaseLifecycleController(key, controller)
+        // Distinct release instants so the LRU ordering is deterministic.
+        vi.advanceTimersByTime(1)
+      }
+      expect(harnesses[0]!.destroy).toHaveBeenCalledOnce()
+      for (const harness of harnesses.slice(1)) {
+        expect(harness.destroy).not.toHaveBeenCalled()
+      }
+      vi.advanceTimersByTime(LIFECYCLE_LINGER_MS)
+      for (const harness of harnesses) {
+        expect(harness.destroy).toHaveBeenCalledOnce()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('replaces a lingering lifecycle when the request identity changes', async () => {
+    vi.useFakeTimers()
+    try {
+      const key = 'workspace-1:linger-identity:g2'
+      const staleHarness = createHarness(vi.fn().mockResolvedValue(session('initial-token')))
+      const stale = acquireLifecycleController(key, 'api-key-a', () => staleHarness.controller)
+      await stale.start()
+      releaseLifecycleController(key, stale)
+      expect(staleHarness.destroy).not.toHaveBeenCalled()
+
+      const freshHarness = createHarness(vi.fn().mockResolvedValue(session('fresh-token')))
+      const fresh = acquireLifecycleController(key, 'api-key-b', () => freshHarness.controller)
+      expect(fresh).toBe(freshHarness.controller)
+      expect(staleHarness.destroy).toHaveBeenCalledOnce()
+      releaseLifecycleController(key, fresh)
+      vi.advanceTimersByTime(LIFECYCLE_LINGER_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not linger a terminally failed lifecycle', async () => {
+    vi.useFakeTimers()
+    try {
+      const key = 'workspace-1:linger-terminal:g2'
+      const harness = createHarness(vi.fn().mockResolvedValue(session('initial-token')))
+      const controller = acquireLifecycleController(key, null, () => harness.controller)
+      await controller.start()
+      controller.getSnapshot().document?.getMap('test').set('title', 'Draft')
+      harness.runTimer(COLLABORATION_UPDATE_BATCH_MS)
+      await Promise.resolve()
+      await Promise.resolve()
+      harness.getProviderOptions()?.events.onStateless(JSON.stringify({
+        code: 'too_large',
+        hash: 'local-update-hash',
+        type: 'durable_rejection',
+      }))
+      expect(controller.getSnapshot().connectionStatus).toBe('error')
+
+      releaseLifecycleController(key, controller)
+      // Without any timer advance the failed release must already have been
+      // recorded — a linger here would hide the failure for three minutes.
+      expect(consumeLifecycleFailure(key)).toContain('rejected')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('sweeps a superseded generation when the next one is acquired', async () => {
+    vi.useFakeTimers()
+    try {
+      const staleHarness = createHarness(vi.fn().mockResolvedValue(session('initial-token')))
+      const stale = acquireLifecycleController(
+        'workspace-1:linger-generation:g2',
+        null,
+        () => staleHarness.controller,
+      )
+      await stale.start()
+      releaseLifecycleController('workspace-1:linger-generation:g2', stale)
+      expect(staleHarness.destroy).not.toHaveBeenCalled()
+
+      const freshHarness = createHarness(vi.fn().mockResolvedValue(session('fresh-token')))
+      const fresh = acquireLifecycleController(
+        'workspace-1:linger-generation:g3',
+        null,
+        () => freshHarness.controller,
+      )
+      expect(staleHarness.destroy).toHaveBeenCalledOnce()
+      releaseLifecycleController('workspace-1:linger-generation:g3', fresh)
+      vi.advanceTimersByTime(LIFECYCLE_LINGER_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('enters the reconnect ladder when the initial open is rate limited', async () => {
+    const limited = Object.assign(new Error('Zu viele Kollaborationssitzungen.'), {
+      detail: { reason: 'session_limit' },
+      status: 429,
+    })
+    const requestSession = vi.fn()
+      .mockRejectedValueOnce(limited)
+      .mockResolvedValueOnce(session('recovered-token'))
+    const harness = createHarness(requestSession)
+
+    await harness.controller.start()
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      connectionStatus: 'reconnecting',
+      nextReconnectAt: NOW_MS + 1_000,
+      reconnectAttempt: 1,
+      recoverability: 'retry',
+    })
+
+    harness.runTimer(1_000)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(requestSession).toHaveBeenCalledTimes(2)
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      connectionStatus: 'connected',
+      synced: true,
+    })
+  })
+
+  it('keeps a malformed initial open terminal', async () => {
+    const malformed = Object.assign(new Error('invalid payload'), { status: 400 })
+    const harness = createHarness(vi.fn().mockRejectedValue(malformed))
+
+    await harness.controller.start()
+
+    expect(harness.controller.getSnapshot()).toMatchObject({
+      connectionStatus: 'error',
+      nextReconnectAt: null,
+      recoverability: 'retry',
+    })
+    expect(harness.scheduledDelays()).toEqual([])
   })
 
   it('mirrors exact provider-origin updates without tracking them as local durability', async () => {

@@ -3460,6 +3460,7 @@ export function EditorTopBar({
           />
           {collaborationActive ? (
             <EditorCollaborationStatus
+              collaborationExpected
               model={collaborationStatus}
               onLogin={onCollaborationLogin}
               onReconnect={onCollaborationReconnect}

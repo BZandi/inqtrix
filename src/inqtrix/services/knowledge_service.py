@@ -18,6 +18,7 @@ the indistinct :class:`CollectionNotFound`/:class:`DocumentNotFound`
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -31,6 +32,7 @@ from inqtrix.auth.permissions import AccessMode, ResourceAccess, SharePermission
 from inqtrix.embedding_cards import resolve_embedding_card
 from inqtrix.knowledge.chunking import ChunkSlice, chunk_text_slices
 from inqtrix.knowledge.contextualize import ContextualizationBatchCheckpoint
+from inqtrix.knowledge.embedding_batches import embed_in_slices
 from inqtrix.knowledge.page_mapping import extract_pdf_page_texts, infer_chunk_pages
 from inqtrix.knowledge.source_cleanup import SourceCleanupPlan
 from inqtrix.quota.models import estimate_tokens
@@ -728,6 +730,8 @@ class KnowledgeService:
         context_checkpoints: list[ContextualizationBatchCheckpoint] | None = None,
         cancel_check: Callable[[], None] | None = None,
         on_embedding_started: Callable[[], None] | None = None,
+        on_embedding_batch: Callable[[int, int], None] | None = None,
+        on_embedding_wait: Callable[[int, int], None] | None = None,
         contextualize: bool = True,
         authority_check: Callable[[], None] | None = None,
     ) -> KnowledgeDocument:
@@ -741,6 +745,8 @@ class KnowledgeService:
             context_checkpoints=context_checkpoints,
             cancel_check=cancel_check,
             on_embedding_started=on_embedding_started,
+            on_embedding_batch=on_embedding_batch,
+            on_embedding_wait=on_embedding_wait,
             contextualize=contextualize,
             authority_check=authority_check,
         )
@@ -763,6 +769,8 @@ class KnowledgeService:
         context_checkpoints: list[ContextualizationBatchCheckpoint] | None = None,
         cancel_check: Callable[[], None] | None = None,
         on_embedding_started: Callable[[], None] | None = None,
+        on_embedding_batch: Callable[[int, int], None] | None = None,
+        on_embedding_wait: Callable[[int, int], None] | None = None,
         contextualize: bool = True,
         authority_check: Callable[[], None] | None = None,
     ) -> PreparedDocumentRevision:
@@ -798,6 +806,8 @@ class KnowledgeService:
             context_checkpoints=context_checkpoints,
             cancel_check=cancel_check,
             on_embedding_started=on_embedding_started,
+            on_embedding_batch=on_embedding_batch,
+            on_embedding_wait=on_embedding_wait,
             contextualize=contextualize,
         )
         if authority_check is not None:
@@ -891,6 +901,8 @@ class KnowledgeService:
         context_checkpoints: list[ContextualizationBatchCheckpoint] | None = None,
         cancel_check: Callable[[], None] | None = None,
         on_embedding_started: Callable[[], None] | None = None,
+        on_embedding_batch: Callable[[int, int], None] | None = None,
+        on_embedding_wait: Callable[[int, int], None] | None = None,
         contextualize: bool = True,
     ) -> EmbeddedDocument:
         """Chunk, optionally contextualize, and embed one document body.
@@ -931,10 +943,19 @@ class KnowledgeService:
             on_embedding_started()
         if cancel_check is not None:
             cancel_check()
-        embeddings = await asyncio.to_thread(
-            self._knowledge.embeddings.embed_documents,
+        # Sliced under a character budget so one huge document can never
+        # demand more than a provider's per-minute quota in a single
+        # request; each slice runs off the event loop via the shared
+        # tracing wrapper (one span per slice).
+        embeddings = await embed_in_slices(
             embedding_texts,
-            model=embedding_model,
+            embed_fn=functools.partial(
+                self._knowledge.embeddings.embed_documents,
+                model=embedding_model,
+            ),
+            cancel_check=cancel_check,
+            on_batch=on_embedding_batch,
+            on_wait=on_embedding_wait,
         )
         if cancel_check is not None:
             # A provider call itself may be non-interruptible. Cancellation
@@ -965,6 +986,8 @@ class KnowledgeService:
         context_checkpoints: list[ContextualizationBatchCheckpoint] | None = None,
         cancel_check: Callable[[], None] | None = None,
         on_embedding_started: Callable[[], None] | None = None,
+        on_embedding_batch: Callable[[int, int], None] | None = None,
+        on_embedding_wait: Callable[[int, int], None] | None = None,
         authority_check: Callable[[], None] | None = None,
         actor_user_id: uuid.UUID | None = None,
         contextualize: bool = True,
@@ -998,6 +1021,8 @@ class KnowledgeService:
             context_checkpoints=context_checkpoints,
             cancel_check=cancel_check,
             on_embedding_started=on_embedding_started,
+            on_embedding_batch=on_embedding_batch,
+            on_embedding_wait=on_embedding_wait,
             contextualize=contextualize,
         )
         if authority_check is not None:

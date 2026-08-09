@@ -656,13 +656,15 @@ def _sdk_error_code(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def _sdk_retry_after(exc: BaseException) -> str | None:
+def sdk_retry_after(exc: BaseException) -> str | None:
     """Extract the ``Retry-After`` header from an OpenAI-SDK exception.
 
     The SDK's ``APIStatusError``/``RateLimitError`` carry the HTTP
     ``response``; its headers hold the server's back-off hint. Returned
     verbatim so :func:`_retry_delay_seconds` can honour it (and fall
-    back to exponential backoff on absent/non-numeric values).
+    back to exponential backoff on absent/non-numeric values). Public
+    because the knowledge embedding batcher reads the same hint from a
+    wrapped provider failure.
     """
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
@@ -734,7 +736,7 @@ def _call_openai_chat_completion_with_retries(
                 if attempt >= max_attempts:
                     raise
                 delay = _retry_delay_seconds(
-                    attempt - 1, _sdk_retry_after(exc)
+                    attempt - 1, sdk_retry_after(exc)
                 )
             else:
                 max_attempts = _SDK_MAX_RETRIES + 1

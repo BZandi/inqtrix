@@ -27,6 +27,23 @@ No released artefacts yet. The repository is marked experimental (see the discla
 
 ### Changed
 
+- **Large-document indexing survives provider rate limits.** One document
+  historically reached the embedding provider as a single request carrying
+  every chunk; documents beyond a per-minute quota (hundreds of chunks,
+  ~200k tokens) could therefore never index, no matter how often the job
+  resumed. Embedding requests are now sliced under a character budget
+  (documents up to roughly fifty default chunks keep going out as one
+  request, exactly as before), and when the provider rejects a slice with a
+  rate limit the job waits visibly — honouring `Retry-After`, capped, at
+  most three wait phases per document, cancellable throughout — before
+  resubmitting that same slice. The file badge shows real slice progress
+  ("Embedding 6/9") and names the wait ("Waiting for provider") instead of
+  hiding it, and a paused job's status band now carries real batch numbers.
+  Ordering is pinned by new offline contract tests: a deterministic
+  text-to-vector fake asserts `vectors[i]` belongs to `texts[i]` for every
+  input shape, and the provider's index-sort and count guard — previously
+  untested — are covered against shuffled SDK responses.
+
 - **Dependency and build hygiene.** Mermaid moves to 11.16.1, closing the five
   advisories that reach the browser: CSS injection into sibling elements,
   prototype pollution through the configuration and architecture-diagram paths,

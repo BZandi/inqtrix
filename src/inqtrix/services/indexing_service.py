@@ -256,6 +256,16 @@ def _run_document_revision_steps(
                 context_checkpoints=context_checkpoints,
                 cancel_check=_cancel_check,
                 on_embedding_started=lambda: _phase("embedding"),
+                on_embedding_batch=lambda current, total: _phase(
+                    "embedding",
+                    current_batch=current,
+                    total_batches=total,
+                ),
+                on_embedding_wait=lambda current, total: _phase(
+                    "embedding_wait",
+                    current_batch=current,
+                    total_batches=total,
+                ),
                 contextualize=not bool(getattr(handle, "raw_by_user_choice", False)),
                 authority_check=authority_check,
             ),
@@ -679,6 +689,16 @@ def execute_reindex_job(
                         context_checkpoints=context_checkpoints,
                         cancel_check=_cancel_check,
                         on_embedding_started=lambda: _document_phase("embedding"),
+                        on_embedding_batch=lambda current, total: _document_phase(
+                            "embedding",
+                            current_batch=current,
+                            total_batches=total,
+                        ),
+                        on_embedding_wait=lambda current, total: _document_phase(
+                            "embedding_wait",
+                            current_batch=current,
+                            total_batches=total,
+                        ),
                         authority_check=authority_check,
                         actor_user_id=actor_user_id,
                         contextualize=not raw_by_user_choice,

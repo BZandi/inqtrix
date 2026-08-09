@@ -221,42 +221,50 @@ function ChunkCell({
   }
   if (!liveProgress && jobProgress) {
     const contextualizing = jobProgress.phase === 'contextualization'
-    const hasBatchProgress =
-      contextualizing
-      && (jobProgress.currentBatch ?? 0) > 0
-      && (jobProgress.totalBatches ?? 0) > 0
+    const embeddingWaiting = jobProgress.phase === 'embedding_wait'
+    const currentBatch = jobProgress.currentBatch ?? 0
+    const totalBatches = jobProgress.totalBatches ?? 0
+    const batchNumbersKnown = currentBatch > 0 && totalBatches > 0
+    const hasBatchProgress = contextualizing && batchNumbersKnown
+    const hasEmbeddingBatch =
+      jobProgress.phase === 'embedding' && batchNumbersKnown
     const detail = jobProgress.status === 'cancelling'
       ? t.vectorIndex.memberCancelling
       : hasBatchProgress
-        ? t.vectorIndex.memberContextBatch(
-            jobProgress.currentBatch ?? 0,
-            jobProgress.totalBatches ?? 0,
-          )
+        ? t.vectorIndex.memberContextBatch(currentBatch, totalBatches)
         : contextualizing
           ? t.vectorIndex.memberContext
-          : jobProgress.phase === 'embedding'
-            ? t.vectorIndex.memberEmbedding
-            : jobProgress.phase === 'validating'
-              ? t.vectorIndex.memberValidating
-              : jobProgress.phase === 'publishing'
-                ? t.vectorIndex.memberPublishing
-                : t.vectorIndex.memberPreparing
+          : embeddingWaiting
+            ? t.vectorIndex.memberEmbeddingWait
+            : hasEmbeddingBatch
+              ? t.vectorIndex.memberEmbeddingBatch(currentBatch, totalBatches)
+              : jobProgress.phase === 'embedding'
+                ? t.vectorIndex.memberEmbedding
+                : jobProgress.phase === 'validating'
+                  ? t.vectorIndex.memberValidating
+                  : jobProgress.phase === 'publishing'
+                    ? t.vectorIndex.memberPublishing
+                    : t.vectorIndex.memberPreparing
     const tooltip = jobProgress.status === 'cancelling'
       ? t.vectorIndex.memberCancellingTooltip
       : hasBatchProgress
-        ? t.vectorIndex.memberContextBatchTooltip(
-          jobProgress.currentBatch ?? 0,
-          jobProgress.totalBatches ?? 0,
-        )
+        ? t.vectorIndex.memberContextBatchTooltip(currentBatch, totalBatches)
       : contextualizing
         ? t.vectorIndex.memberContextTooltip
-        : jobProgress.phase === 'embedding'
-          ? t.vectorIndex.memberEmbeddingTooltip
-          : jobProgress.phase === 'validating'
-            ? t.vectorIndex.memberValidatingTooltip
-            : jobProgress.phase === 'publishing'
-              ? t.vectorIndex.memberPublishingTooltip
-              : t.vectorIndex.memberPreparingTooltip
+        : embeddingWaiting
+          ? t.vectorIndex.memberEmbeddingWaitTooltip
+          : hasEmbeddingBatch
+            ? t.vectorIndex.memberEmbeddingBatchTooltip(
+              currentBatch,
+              totalBatches,
+            )
+            : jobProgress.phase === 'embedding'
+              ? t.vectorIndex.memberEmbeddingTooltip
+              : jobProgress.phase === 'validating'
+                ? t.vectorIndex.memberValidatingTooltip
+                : jobProgress.phase === 'publishing'
+                  ? t.vectorIndex.memberPublishingTooltip
+                  : t.vectorIndex.memberPreparingTooltip
     return (
       <span className="flex min-w-0 items-center gap-1.5">
         <Tooltip>

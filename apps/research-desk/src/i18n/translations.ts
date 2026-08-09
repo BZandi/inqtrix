@@ -1172,6 +1172,13 @@ export const translations = {
         `Kontextualisierung · Batch ${current} von ${total}`,
       memberEmbedding: 'Einbettung',
       memberEmbeddingTooltip: 'Aus den vorbereiteten Chunks werden Vektoren erzeugt',
+      memberEmbeddingBatch: (current: number, total: number) =>
+        `Einbettung ${current}/${total}`,
+      memberEmbeddingBatchTooltip: (current: number, total: number) =>
+        `Einbettung · Teilanfrage ${current} von ${total}`,
+      memberEmbeddingWait: 'Wartet auf Anbieter',
+      memberEmbeddingWaitTooltip:
+        'Das Kontingent des Embedding-Anbieters ist kurzzeitig erschöpft; die Indexierung wartet die vom Anbieter genannte Zeit ab und fährt dann fort',
       memberValidating: 'Prüfung',
       memberValidatingTooltip: 'Die neue Dokumentrevision wird geprüft',
       memberPublishing: 'Veröffentlichen',
@@ -3536,6 +3543,13 @@ export const translations = {
         `Contextualization · batch ${current} of ${total}`,
       memberEmbedding: 'Embedding',
       memberEmbeddingTooltip: 'Creating vectors from the prepared chunks',
+      memberEmbeddingBatch: (current: number, total: number) =>
+        `Embedding ${current}/${total}`,
+      memberEmbeddingBatchTooltip: (current: number, total: number) =>
+        `Embedding · request ${current} of ${total}`,
+      memberEmbeddingWait: 'Waiting for provider',
+      memberEmbeddingWaitTooltip:
+        'The embedding provider rate limit is briefly exhausted; indexing waits out the provider window and then continues',
       memberValidating: 'Validating',
       memberValidatingTooltip: 'Validating the new document revision',
       memberPublishing: 'Publishing',

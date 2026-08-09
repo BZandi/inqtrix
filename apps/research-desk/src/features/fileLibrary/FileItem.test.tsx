@@ -114,4 +114,29 @@ describe('FileItem indexing progress', () => {
     expect(html).not.toContain('>Läuft<')
     expect(html).not.toContain('inqtrix-running-dot')
   })
+
+  it('renders embedding slice progress once batch numbers are known', () => {
+    const html = progressMarkup({
+      currentBatch: 6,
+      phase: 'embedding',
+      status: 'running',
+      totalBatches: 9,
+    })
+
+    expect(html).toContain('Einbettung 6/9')
+    expect(html).toContain('inqtrix-running-dot')
+  })
+
+  it('names a provider wait instead of hiding it behind a generic label', () => {
+    const html = progressMarkup({
+      currentBatch: 7,
+      phase: 'embedding_wait',
+      status: 'running',
+      totalBatches: 9,
+    })
+
+    expect(html).toContain('Wartet auf Anbieter')
+    expect(html).not.toContain('Vorbereitung')
+    expect(html).toContain('inqtrix-running-dot')
+  })
 })

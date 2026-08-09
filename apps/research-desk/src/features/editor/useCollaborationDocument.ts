@@ -144,8 +144,22 @@ type ConfiguredCollaborationSession = EditorCollaborationSession & {
 
 type LifecycleRegistryEntry = {
   controller: CollaborationDocumentController
+  identity: string | null
+  lingerSince: number | null
+  lingerTimer: ReturnType<typeof setTimeout> | null
   references: number
 }
+
+/** How long a fully released lifecycle keeps its live session before the
+ * real teardown. Re-entering the editor within this window retains the same
+ * controller — no session POST, no websocket rebuild, no resync — which is
+ * what keeps view switching from burning the server's per-user-per-document
+ * lease budget (5 active leases, 60s TTL). The rotation timer keeps the lease
+ * fresh for the whole window because release() is deferred, not softened. */
+export const LIFECYCLE_LINGER_MS = 180_000
+/** Upper bound on lingering documents; each holds a Y.Doc and an open
+ * websocket, so the oldest is torn down when a fourth starts lingering. */
+export const MAX_LINGERING_LIFECYCLES = 3
 
 const lifecycleRegistry = new Map<string, LifecycleRegistryEntry>()
 const lifecycleFailures = new Map<string, { error: string; expiresAt: number }>()
@@ -394,6 +408,14 @@ export class CollaborationDocumentController {
     })
     this.refreshInFlight = refresh
     return refresh
+  }
+
+  /** Push any batched local edits to the transport without releasing. The
+   * linger path calls this at view exit so navigation never sits on a
+   * half-batched update while the deferred teardown window runs. */
+  flushPendingLocalUpdates(): void {
+    if (this.destroyed) return
+    this.flushScheduledBatch()
   }
 
   release(
@@ -943,6 +965,17 @@ export class CollaborationDocumentController {
       this.enterReconnect('The collaboration lease could not be refreshed; reconnecting read-only.')
       return
     }
+    // Transient initial-open failures (429 lease budget, network, 5xx) enter
+    // the same backoff ladder rotations already use — an initial open that
+    // fails on a rate limit self-heals within the lease TTL instead of
+    // parking in a terminal error. Every other 4xx is a client defect and
+    // stays loud and terminal.
+    const transientOpenFailure =
+      status === undefined || status === 429 || status >= 500
+    if (transientOpenFailure) {
+      this.enterReconnect(messageFromError(error))
+      return
+    }
     this.clearRefreshTimer()
     this.disconnectTransport()
     this.publish({
@@ -981,7 +1014,14 @@ export class CollaborationDocumentController {
     this.reconnectTimer = this.dependencies.scheduleTimer(() => {
       this.reconnectTimer = null
       this.publish({ nextReconnectAt: null })
-      void this.refreshLease('reconnect')
+      if (this.leaseToken) {
+        void this.refreshLease('reconnect')
+        return
+      }
+      // The ladder can also carry a failed INITIAL open (no lease yet):
+      // refreshLease would bail without a token, so re-run the open itself.
+      this.started = false
+      void this.start()
     }, delayMs)
   }
 
@@ -1351,17 +1391,32 @@ function classifySuggestionUpdate(update: Uint8Array): {
 
 export function acquireLifecycleController(
   key: string,
+  identity: string | null,
   create: () => CollaborationDocumentController,
 ): CollaborationDocumentController {
   const existing = lifecycleRegistry.get(key)
-  if (existing) {
+  if (existing && (existing.references > 0 || existing.identity === identity)) {
     lifecycleFailures.delete(key)
+    clearLinger(existing)
     existing.references += 1
     existing.controller.retain()
     return existing.controller
   }
+  if (existing) {
+    // A lingering controller whose request identity went stale (api key
+    // changed under the same registry key) would keep signing rotations with
+    // the old closure. Tear it down and start fresh.
+    finalizeEntryRelease(key, existing)
+  }
   const controller = create()
-  lifecycleRegistry.set(key, { controller, references: 1 })
+  lifecycleRegistry.set(key, {
+    controller,
+    identity,
+    lingerSince: null,
+    lingerTimer: null,
+    references: 1,
+  })
+  releaseSupersededGenerations(key)
   return controller
 }
 
@@ -1376,7 +1431,67 @@ export function releaseLifecycleController(
   }
   entry.references = Math.max(0, entry.references - 1)
   if (entry.references > 0) return
-  controller.release(
+  if (!controllerCanLinger(controller)) {
+    finalizeEntryRelease(key, entry)
+    return
+  }
+  controller.flushPendingLocalUpdates()
+  entry.lingerSince = Date.now()
+  const timer = setTimeout(() => {
+    entry.lingerTimer = null
+    finalizeEntryRelease(key, entry)
+  }, LIFECYCLE_LINGER_MS)
+  // In node (tests) a pending linger timer must not pin the process open.
+  if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+  entry.lingerTimer = timer
+  enforceLingerCap()
+}
+
+/** Immediately tear down every lifecycle that is only lingering (no mounted
+ * surface). An identity boundary that does not hard-reload the document must
+ * not keep rotating leases for the previous identity; the test suite uses it
+ * to keep the module-level registry hermetic between cases. */
+export function destroyLingeringCollaborationLifecycles(): void {
+  for (const [key, entry] of [...lifecycleRegistry.entries()]) {
+    if (entry.references > 0 || entry.lingerTimer === null) continue
+    finalizeEntryRelease(key, entry)
+  }
+}
+
+/** Linger only sessions that are healthy or already self-healing. Terminal
+ * states (revoked, incompatible, hard error) must NOT be preserved across a
+ * re-entry: a fresh session request is the only path that can observe a
+ * re-grant or a fixed deployment. */
+function controllerCanLinger(
+  controller: CollaborationDocumentController,
+): boolean {
+  const snapshot = controller.getSnapshot()
+  return (
+    snapshot.blockingFailure === null
+    && snapshot.durabilityStatus !== 'error'
+    && snapshot.connectionStatus !== 'access_revoked'
+    && snapshot.connectionStatus !== 'error'
+    && snapshot.connectionStatus !== 'incompatible'
+    && snapshot.connectionStatus !== 'origin_rejected'
+  )
+}
+
+function clearLinger(entry: LifecycleRegistryEntry): void {
+  if (entry.lingerTimer !== null) clearTimeout(entry.lingerTimer)
+  entry.lingerTimer = null
+  entry.lingerSince = null
+}
+
+/** The pre-linger release path: hand the controller to release(), which
+ * destroys immediately when durability is settled and otherwise waits for
+ * the acknowledgement (the entry stays registered so a remount can still
+ * retain it during that wait). */
+function finalizeEntryRelease(
+  key: string,
+  entry: LifecycleRegistryEntry,
+): void {
+  clearLinger(entry)
+  entry.controller.release(
     () => {
       const current = lifecycleRegistry.get(key)
       if (current === entry && current.references === 0) {
@@ -1386,6 +1501,34 @@ export function releaseLifecycleController(
     },
     (error) => recordLifecycleFailure(key, error),
   )
+}
+
+function enforceLingerCap(): void {
+  const lingering = [...lifecycleRegistry.entries()]
+    .filter(([, entry]) => entry.references === 0 && entry.lingerTimer !== null)
+  if (lingering.length <= MAX_LINGERING_LIFECYCLES) return
+  lingering.sort(
+    (a, b) => (a[1].lingerSince ?? 0) - (b[1].lingerSince ?? 0),
+  )
+  for (const [key, entry] of lingering
+    .slice(0, lingering.length - MAX_LINGERING_LIFECYCLES)) {
+    finalizeEntryRelease(key, entry)
+  }
+}
+
+/** A new generation supersedes every lingering lifecycle of the same
+ * document: their leases and rooms belong to a rebuilt history and can only
+ * rot into incompatibility. Mounted surfaces (references > 0) are left to
+ * the recovery flow. */
+function releaseSupersededGenerations(key: string): void {
+  const marker = key.lastIndexOf(':g')
+  if (marker === -1) return
+  const prefix = key.slice(0, marker + 2)
+  for (const [candidateKey, entry] of [...lifecycleRegistry.entries()]) {
+    if (candidateKey === key || !candidateKey.startsWith(prefix)) continue
+    if (entry.references > 0) continue
+    finalizeEntryRelease(candidateKey, entry)
+  }
 }
 
 export function retireCollaborationDocumentLifecycle({
@@ -1400,6 +1543,7 @@ export function retireCollaborationDocumentLifecycle({
   const key = `${workspaceId}:${documentId}:g${generation}`
   const entry = lifecycleRegistry.get(key)
   if (!entry) return false
+  clearLinger(entry)
   lifecycleRegistry.delete(key)
   lifecycleFailures.delete(key)
   entry.controller.discardAfterRecoveryCapture()
@@ -1477,6 +1621,7 @@ export function useCollaborationDocument({
     const lifecycleRegistryKey = `${workspaceId}:${documentId}:g${generation}`
     const controller = acquireLifecycleController(
       lifecycleRegistryKey,
+      apiKey ?? null,
       () => new CollaborationDocumentController({
         documentId,
         generation,
@@ -1565,6 +1710,7 @@ export function useGuestCollaborationDocument({
     )
     const controller = acquireLifecycleController(
       lifecycleRegistryKey,
+      null,
       () => new CollaborationDocumentController({
         documentId,
         generation,

@@ -7,6 +7,7 @@ import {
   useState,
 } from 'react'
 import { useReducedMotion } from 'motion/react'
+import { ViewEntry } from '@/motion/ViewEntry'
 import {
   uploadServerFile,
   reserveServerFileUpload,
@@ -3497,6 +3498,10 @@ export function ResearchDesk({
           }
         />
         <div className="min-h-0 min-w-0 flex-1">
+          {/* One entry vocabulary for every workspace: re-keying on the view
+              plays the same fade+rise the report panel made familiar. No
+              exit leg — switching stays instant. */}
+          <ViewEntry viewKey={state.ui.activeView}>
           {state.ui.activeView === 'research' ? (
             <ResearchWorkspace
               activeFilter={state.ui.activeFilter}
@@ -3940,6 +3945,7 @@ export function ResearchDesk({
               stackOptions={effectiveStackOptions}
             />
           )}
+          </ViewEntry>
         </div>
       </div>
       {sharingEnabled && shareTarget && (

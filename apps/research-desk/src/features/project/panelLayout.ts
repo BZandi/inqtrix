@@ -16,7 +16,11 @@ export const PANEL_LAYOUT_LIMITS: Record<ProjectPanelLayoutKey, PanelLayoutLimit
   agentSessions: { defaultSize: 24, max: 42, min: 18 },
   agentCanvas: { defaultSize: 46, max: 62, min: 30 },
   editorTree: { defaultSize: 22, max: 34, min: 16 },
-  editorComments: { defaultSize: 26, max: 38, min: 20 },
+  // 28% of the REMAINING row (the tree already took its 22% of the full
+  // width), which lands at pixel parity with the tree: 0.28 * 78 = 21.8% of
+  // the full row. The bases are nested — never compare these two numbers
+  // directly. Pinned by panelLayout.test.ts.
+  editorComments: { defaultSize: 28, max: 38, min: 20 },
 }
 
 export const DEFAULT_PANEL_LAYOUT: ProjectPanelLayoutState = {

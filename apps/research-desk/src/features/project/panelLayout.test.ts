@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_PANEL_LAYOUT,
+  PANEL_LAYOUT_LIMITS,
   clampPanelLayoutSize,
   normalizePanelLayout,
 } from './panelLayout'
@@ -40,5 +41,29 @@ describe('panel layout state', () => {
       editorTree: DEFAULT_PANEL_LAYOUT.editorTree,
       editorComments: DEFAULT_PANEL_LAYOUT.editorComments,
     })
+  })
+})
+
+describe('editor panel default widths', () => {
+  it('gives the comments panel pixel parity with the document tree', () => {
+    // The two defaults are percentages of NESTED bases: the tree takes its
+    // share of the FULL row, the comments panel only of what remains next to
+    // it. A naive "26 > 22" therefore rendered the right panel ~30px
+    // NARROWER than the left one. This contract pins the effective full-row
+    // share of the comments panel to the tree's share, so nobody re-tunes
+    // one number against the wrong base again.
+    const tree = PANEL_LAYOUT_LIMITS.editorTree.defaultSize
+    const comments = PANEL_LAYOUT_LIMITS.editorComments.defaultSize
+    const effectiveCommentsShare = (comments * (100 - tree)) / 100
+    expect(Math.abs(effectiveCommentsShare - tree)).toBeLessThanOrEqual(1)
+  })
+
+  it('keeps every remembered size untouched by the default change', () => {
+    // The width memory writes user values through the clamp; the default
+    // only seeds layouts that were never touched. Values across the band
+    // must pass through unchanged.
+    for (const value of [20, 26, 31.5, 38]) {
+      expect(clampPanelLayoutSize('editorComments', value)).toBe(value)
+    }
   })
 })

@@ -548,6 +548,33 @@ export function restoredAgentSessionId(
   return latestId
 }
 
+/**
+ * What the desk's center column shows. Pure so the anti-flash contract is
+ * pinnable offline: once the sessions are KNOWN (first listing settled for
+ * this hydration identity — a view switch does not reset that), an empty
+ * desk is a real welcome state and never the loading skeleton. The skeleton
+ * remains for the genuine unknowns: the first listing of a fresh identity,
+ * and a selected session whose runs are still paging in.
+ */
+export function agentCenterScreen({
+  hasRuns,
+  hasSelectedSession,
+  runsHydrated,
+  serverEnabled,
+  sessionsKnown,
+}: {
+  hasRuns: boolean
+  hasSelectedSession: boolean
+  runsHydrated: boolean
+  serverEnabled: boolean
+  sessionsKnown: boolean
+}): 'skeleton' | 'transcript' | 'welcome' {
+  if (hasRuns) return 'transcript'
+  if (!serverEnabled) return 'welcome'
+  if (!sessionsKnown || (hasSelectedSession && !runsHydrated)) return 'skeleton'
+  return 'welcome'
+}
+
 // --- Wire -> record converters (pure) ---------------------------------------
 
 export function agentPlanFromWire(wire: AgentPlanWire): AgentPlanRecord {

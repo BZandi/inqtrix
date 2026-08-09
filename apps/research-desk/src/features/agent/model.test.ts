@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   agentArtifactFromWire,
+  agentCenterScreen,
   agentSessionHistoryTimeIso,
   canEditAgentRun,
   isActiveAgentRun,
@@ -205,5 +206,50 @@ describe('agentSessionHistoryTimeIso', () => {
     expect(agentSessionHistoryTimeIso(session, {})).toBe(
       '2026-07-01T10:00:00.000Z',
     )
+  })
+})
+
+describe('agentCenterScreen', () => {
+  const base = {
+    hasRuns: false,
+    hasSelectedSession: false,
+    runsHydrated: true,
+    serverEnabled: true,
+    sessionsKnown: true,
+  }
+
+  it('never shows the skeleton once the sessions are known (the view-switch flash)', () => {
+    // The regression this pins: a view switch remounted the desk, reset a
+    // component-local settled flag and re-armed the skeleton over data the
+    // store still held. Known + empty is a real welcome, not a loading state.
+    expect(agentCenterScreen({ ...base })).toBe('welcome')
+  })
+
+  it('shows the skeleton for a genuinely unknown first listing', () => {
+    expect(agentCenterScreen({ ...base, sessionsKnown: false })).toBe('skeleton')
+  })
+
+  it('keeps the skeleton while a selected session pages its runs in', () => {
+    expect(agentCenterScreen({
+      ...base,
+      hasSelectedSession: true,
+      runsHydrated: false,
+    })).toBe('skeleton')
+  })
+
+  it('renders the transcript as soon as runs exist, even mid-listing', () => {
+    expect(agentCenterScreen({
+      ...base,
+      hasRuns: true,
+      sessionsKnown: false,
+    })).toBe('transcript')
+  })
+
+  it('never shows the skeleton without a server (demo mode)', () => {
+    expect(agentCenterScreen({
+      ...base,
+      serverEnabled: false,
+      sessionsKnown: false,
+    })).toBe('welcome')
   })
 })

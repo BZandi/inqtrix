@@ -20,6 +20,7 @@ import {
   participantPreview,
   partitionEditorDocumentsByAccess,
   type InspectorChange,
+  startupPresentation,
 } from './model'
 
 const participants = [
@@ -340,5 +341,39 @@ describe('editor overlay policy', () => {
       selectedSuggestionIds: ['delete-a', 'insert-a', 'modify-a'],
       visibleSuggestionIds: ['delete-a', 'insert-a', 'modify-a'],
     })
+  })
+})
+
+describe('startupPresentation', () => {
+  it('presents both startup transients as one calm syncing state', () => {
+    expect(startupPresentation('inactive', 100, true)).toEqual({ calm: true, kind: 'syncing' })
+    expect(startupPresentation('syncing', 100, true)).toEqual({ calm: true, kind: 'syncing' })
+  })
+
+  it('lets a persisting transient earn its real color after the grace window', () => {
+    expect(startupPresentation('syncing', 1_500, true)).toEqual({ calm: false, kind: 'syncing' })
+    expect(startupPresentation('inactive', 1_500, true)).toEqual({ calm: false, kind: 'inactive' })
+  })
+
+  it('never calms an exceptional state, not even at t=0', () => {
+    // The grace exists for expected transients only. An error, a revocation
+    // or a forced update must be loud immediately — calming those would be
+    // the silent fallback the project forbids.
+    for (const kind of ['error', 'access_revoked', 'update_required', 'origin_rejected', 'read_only'] as const) {
+      expect(startupPresentation(kind, 0, true)).toEqual({ calm: false, kind })
+    }
+  })
+
+  it('leaves the settled states untouched', () => {
+    expect(startupPresentation('saved', 0, true)).toEqual({ calm: false, kind: 'saved' })
+    expect(startupPresentation('saving', 0, true)).toEqual({ calm: false, kind: 'saving' })
+  })
+
+  it('never dresses a local document up as syncing', () => {
+    // A pure markdown document is FINAL `inactive` ("Lokal"): no session is
+    // coming, so the grace must not show 1.2s of "syncing" and then swap the
+    // label — that was itself a startup flash (found in the header review).
+    expect(startupPresentation('inactive', 0, false)).toEqual({ calm: false, kind: 'inactive' })
+    expect(startupPresentation('inactive', 100, false)).toEqual({ calm: false, kind: 'inactive' })
   })
 })

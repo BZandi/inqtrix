@@ -104,10 +104,15 @@ export type AgentTimelineActions = {
  */
 export function AgentRunTurn({
   actions,
+  animateEntry = true,
   run,
   transportDegraded = false,
 }: {
   actions: AgentTimelineActions
+  /** False for runs that already existed when the workspace mounted: a
+   * remounted history renders in place instead of replaying its entry
+   * animation over the view-level entry. */
+  animateEntry?: boolean
   run: AgentRunRecord
   /** Live updates are on the polling fallback — shown as
    * a visible hint, never a silent behavior change. */
@@ -152,7 +157,7 @@ export function AgentRunTurn({
     <motion.div
       animate={{ opacity: 1, y: 0 }}
       className="space-y-2"
-      initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+      initial={reduceMotion || !animateEntry ? false : { opacity: 0, y: 6 }}
       transition={appMotion.card}
     >
       {/* The question follows the chat mode's user-message pattern to

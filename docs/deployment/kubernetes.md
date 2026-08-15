@@ -333,6 +333,28 @@ local object store instead:
 Production keeps state in a managed/external PostgreSQL and exposes the app over
 an Ingress with TLS. Provide secrets through a Kubernetes Secret you own.
 
+0. **Prepare the database.** Before any Kubernetes object exists, a database
+   administrator creates the three roles once with `psql` and hands you two
+   credentials: an unprivileged runtime login and a separate migration login.
+   The bundled demo database (scenarios A and B) does this implicitly; an
+   external database does not, and the Secret in step 1 has nothing to carry
+   until it is done. Follow
+   [Bootstrap SQL for an external database](database-migrations.md#bootstrap-sql-for-an-external-database).
+
+   Decide the RLS mode in the same step, because it depends on what your
+   provider grants. Managed services frequently withhold `BYPASSRLS` (it
+   requires superuser), which makes `owner` the applicable mode. Check on the
+   intended migration login:
+
+   ```sql
+   SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user;
+   ```
+
+   Both `false` means `migrations.rlsMode=owner`. A dedicated `NOSUPERUSER`
+   role with `rolbypassrls = true` allows `migrations.rlsMode=bypass`, which
+   avoids the owner-mode maintenance requirements described in
+   [Database migrations](database-migrations.md).
+
 1. Create the namespace and the Secret (replace every `<...>`; generate the two
    random secrets with `openssl rand -hex 32`):
 
@@ -347,6 +369,12 @@ an Ingress with TLS. Provide secrets through a Kubernetes Secret you own.
    kubectl -n inqtrix create secret generic inqtrix-migration-database \
        --from-literal=INQTRIX_MIGRATION_DATABASE_URL='postgresql+asyncpg://<MIGRATION-USER>:<PASS>@<DB-HOST>:5432/<DB-NAME>'
    ```
+
+   `<USER>` is the runtime login and `<MIGRATION-USER>` the migration login
+   from step 0 — same host, same port, same database, different roles. The
+   scheme must be `postgresql+asyncpg`, the password must be percent-encoded,
+   and TLS is selected with `?ssl=require` (asyncpg does not accept libpq's
+   `sslmode`).
 
    The runtime Secret holds only application/provider secrets. The second
    Secret is available only to the migration Job and must use a direct database
@@ -363,7 +391,7 @@ an Ingress with TLS. Provide secrets through a Kubernetes Secret you own.
        --set image.web.digest=sha256:<WEB-DIGEST> \
        --set secret.existingSecret=inqtrix-secrets \
        --set migrations.databaseSecret.name=inqtrix-migration-database \
-       --set migrations.rlsMode=bypass \
+       --set migrations.rlsMode=owner \
        --set config.INQTRIX_AUTH_MODE=local \
        --set config.INQTRIX_LLM_PROVIDER=azure \
        --set config.AZURE_OPENAI_ENDPOINT=https://<AZURE-OPENAI-RESOURCE>.openai.azure.com/ \
@@ -415,6 +443,9 @@ Same as scenario C, with three differences:
   before taking schema locks. No PostgreSQL extensions are required —
   pgvector-enabled images work, the extension stays unused (see
   [Database migrations](database-migrations.md)).
+- Because the database is always external here, scenario C's **step 0 applies
+  unchanged**: run the one-time role bootstrap and pick the RLS mode before the
+  commands below.
 
 ```bash
 oc new-project inqtrix
@@ -439,7 +470,7 @@ helm install inqtrix deploy/helm/inqtrix \
     --set image.web.digest=sha256:<WEB-DIGEST> \
     --set secret.existingSecret=inqtrix-secrets \
     --set migrations.databaseSecret.name=inqtrix-migration-database \
-    --set migrations.rlsMode=bypass \
+    --set migrations.rlsMode=owner \
     --set config.INQTRIX_AUTH_MODE=oidc \
     --set config.INQTRIX_LLM_PROVIDER=azure \
     --set config.AZURE_OPENAI_ENDPOINT=https://<AZURE-OPENAI-RESOURCE>.openai.azure.com/ \
@@ -648,6 +679,8 @@ reference. The knobs you will reach for most:
 | `api.replicaCount`, `api.autoscaling.*` | `1`, off | Scale the API (see scaling note). |
 | `persistence.enabled`, `persistence.size` | `false`, `5Gi` | PVC for the local object store. |
 | `postgres.enabled`, `qdrant.enabled`, `valkey.enabled`, `s3.enabled` | `false` | Bundle a demo backing service in-cluster (`s3.enabled` = MinIO object store). Each enabled service requires an explicit credential; no `change-me` fallback is rendered. qdrant/valkey/s3 are OpenShift-capable; postgres is vanilla-k8s only. |
+| `postgres.enabled` (side effect) | `false` | Also **derives** `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY`: `true` renders `bundled_legacy` (the image's superuser login), `false` renders `restricted` (your own unprivileged login). With an external database, `postgres.auth.*` is ignored entirely. See [Bundled versus external databases](database-migrations.md#bundled-versus-external-databases). |
+| `postgres.auth.username`, `postgres.auth.database` | `inqtrix` | Bundled demo database only. The username becomes the image's `POSTGRES_USER`, which PostgreSQL creates as a superuser owning every object; the chart builds `INQTRIX_DATABASE_URL` from it. No Inqtrix role name is fixed — external deployments choose their own. |
 
 ## Object store
 
@@ -805,6 +838,12 @@ preserve the stop -> one-shot job -> readiness -> start ordering. Manual
 | `helm install` hangs on the migrate hook | The database is unreachable from the cluster | Check `kubectl -n inqtrix logs job/inqtrix-migrate`; fix connectivity/credentials. |
 | Migration fails with SQLSTATE `28000` / `inqtrix.tenant_id is not set` | A normal managed-PostgreSQL role touched a forced-RLS table, or the custom chart reused the runtime credential | Configure the migration-only Secret and explicit `bypass`/`owner` mode; do not set a tenant env variable. See [Database migrations](database-migrations.md). |
 | `/readyz` says database unavailable and product routes return `database_not_ready` | New runtime image is running against an old schema, cannot `SET ROLE`, or the effective role is privileged | Inspect the failed migration Job and role grants. Do not bypass readiness or start workers until the contract passes. |
+| `runtime session login must be LOGIN NOSUPERUSER NOBYPASSRLS …` | `INQTRIX_DATABASE_URL` uses the external database's admin account | Create the unprivileged runtime login from [step 0](#step-2-scenario-c-production-with-an-external-database-vanilla-kubernetes). Do **not** set `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=bundled_legacy` to silence it — that runs the app as a database superuser. |
+| Migration Job: `migration role requires USAGE and CREATE on the active schema` | The Job is using the runtime login (migration Secret missing, misnamed, or a custom chart reused the runtime Secret) | Check `migrations.databaseSecret.name`; it must differ from the runtime Secret and carry the migration login. |
+| Migration Job: `fresh installation requires ADMIN OPTION on the pre-created inqtrix_app role` | The application role exists but was not granted to the migration login with `ADMIN OPTION` | `GRANT inqtrix_app TO <migration-login> WITH ADMIN OPTION;` as an administrator. |
+| Migration Job: `migration role does not own or inherit ownership of tenant tables` | Objects still belong to a previous owner (moved database, or schema created by another account) | `REASSIGN OWNED BY <previous-owner> TO <migration-login>;` as an administrator. |
+| Migration Job: `found N other database client session(s)` | Workloads or an external pooler still hold connections | Scale API, worker and Collaboration to zero, drain operator-managed poolers, then rerun. The chart automates this with `migrations.maintenanceConfirmed=true`. |
+| Migration Job: `installed schema uses FORCE ROW LEVEL SECURITY but the migration role is neither SUPERUSER nor BYPASSRLS` | `migrations.rlsMode=auto` against a managed database | Set `migrations.rlsMode=owner` (plus `maintenanceConfirmed=true`), or supply a dedicated `BYPASSRLS` login and use `bypass`. |
 | Turnkey install with bundled Postgres hangs when `--wait` is added | Helm can wait for normal resources before the post-install migration hook has run | Install scenario A without `--wait`, then run `kubectl wait` as shown above. |
 | Bundled services are enabled but a Secret key is missing | `secret.existingSecret` was set, so the chart cannot render derived values into the selected Secret | Add the app connection value and matching backing-service credential listed above (`INQTRIX_BUNDLED_POSTGRES_PASSWORD`, `INQTRIX_BUNDLED_VALKEY_PASSWORD`, Qdrant key, or S3 key pair), or use the chart-managed Secret for the demo. |
 | S3 uploads fail against `http://seaweedfs:8333` | That hostname is the Compose stack's SeaweedFS; the chart's bundled store is MinIO under a different Service name | Bundle the store with `s3.enabled=true` (auto-wires `INQTRIX_S3_ENDPOINT_URL`), or set `INQTRIX_S3_ENDPOINT_URL` to your external endpoint. |

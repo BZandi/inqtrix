@@ -446,11 +446,28 @@ serviceAccount:
 # official image's initdb needs the UID in /etc/passwd, so it keeps a fixed UID and
 # runs on VANILLA Kubernetes only -- on OpenShift use an external/managed database
 # (set INQTRIX_DATABASE_URL).
+#
+# postgres.enabled ALSO DERIVES the runtime login policy (see configmap.yaml):
+#   enabled=true  -> INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=bundled_legacy
+#   enabled=false -> INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=restricted
+# Reason: the official Postgres image creates POSTGRES_USER as a SUPERUSER that
+# owns every object, and the chart builds INQTRIX_DATABASE_URL from exactly that
+# user -- so the bundled runtime login is privileged by construction and only
+# bundled_legacy accepts it. With an EXTERNAL database (enabled=false) the auth
+# block below is IGNORED, and your INQTRIX_DATABASE_URL login must be an
+# unprivileged role that can SET ROLE to INQTRIX_DATABASE_APP_ROLE. Create the
+# three roles once as described in docs/deployment/database-migrations.md.
+# Do NOT override the policy back to bundled_legacy to silence a managed-database
+# role error: that runs the whole application as a database superuser.
 postgres:
   enabled: false
   image: docker.io/library/postgres:18.4-trixie@sha256:8ff36f3c66371cba71d20ceedccfc3de9669a68737607888c4ef0af93abe8e39
   imagePullPolicy: IfNotPresent
   auth:
+    # Bundled database ONLY (ignored when enabled=false). Becomes the image's
+    # POSTGRES_USER, which Postgres creates as a superuser owning every object.
+    # No Inqtrix role name is fixed by this -- external deployments name their
+    # own roles and carry the app role in INQTRIX_DATABASE_APP_ROLE.
     username: inqtrix
     # Embedded verbatim into INQTRIX_DATABASE_URL, so use only URL-unreserved
     # characters [A-Za-z0-9._~-] (the chart fails the render otherwise). For an

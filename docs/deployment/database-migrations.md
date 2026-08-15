@@ -21,16 +21,20 @@ pgvector-flavoured image such as pgvector 0.5.1 on Postgres 15 is PostgreSQL
 15 and therefore satisfies the requirement; the extension simply remains
 unused.
 
-## The two-role rule
+## The three-identity rule
 
-Use two database identities in production:
+Production uses three database identities. Two of them are logins; the third
+never logs in at all.
 
 | Identity | Where it is available | Required properties |
 |---|---|---|
-| Runtime login | API and worker only | Can `SET ROLE inqtrix_app`; the effective `inqtrix_app` role is `NOLOGIN NOSUPERUSER NOBYPASSRLS`, has schema `USAGE` without database/schema `CREATE`, cannot own, inherit or assume an object-owner/BYPASS role, and is always tenant-scoped. |
-| Migration login | One-shot migration job only | A direct PostgreSQL connection and either the `bypass` or `owner` authority described below. Never expose it through API/worker env, Collaboration, PgBouncer transaction pooling, or the browser. |
+| Application role (`inqtrix_app`) | Nowhere — entered with `SET LOCAL ROLE` | `NOLOGIN NOSUPERUSER NOBYPASSRLS`, schema `USAGE` without database/schema `CREATE`, cannot own, inherit or assume an object-owner/BYPASS role, always tenant-scoped. |
+| Runtime login (`inqtrix_runtime`) | API and worker only | `LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`, can `SET ROLE` to the application role, holds no schema `CREATE`, owns no RLS table and can assume no owner/BYPASS role. |
+| Migration login (`inqtrix_migrate`) | One-shot migration job only | A direct PostgreSQL connection, `USAGE` **and** `CREATE` on the active schema, ownership (direct or inherited) of every managed table, the tenant-policy function and both identity sequences, and `ADMIN OPTION` on the application role. Either the `bypass` or `owner` authority described below. Never expose it through API/worker env, Collaboration, PgBouncer transaction pooling, or the browser. |
 
-This two-login split is mandatory for managed/external production databases.
+The runtime login and the migration login are never members of each other in
+either direction. This three-identity split is mandatory for managed/external
+production databases.
 The official bundled PostgreSQL service retains its documented
 `bundled_legacy` compatibility identity, but the one-shot migration still uses
 a direct `postgres:5432` DSN and never the optional PgBouncer runtime target.
@@ -41,27 +45,126 @@ Compose/Helm installations deliberately provide a direct database value on
 that path. A managed production database must always supply the separate
 migration Secret.
 
+### Bootstrap SQL for an external database
+
 `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=restricted` is the managed-production
-default. A representative role split, executed by the database administrator,
-is:
+default. Run the following once, as a database administrator (`postgres` on a
+self-managed server, or the provider's admin role such as `azure_pg_admin`,
+`rds_superuser` or `cloudsqlsuperuser`). Inqtrix itself never needs that
+account again afterwards: no superuser runs `inqtrix-migrate`.
 
 ```sql
+-- 1. Application role: the SET LOCAL ROLE target. Never a login.
 CREATE ROLE inqtrix_app NOLOGIN NOSUPERUSER NOBYPASSRLS
   NOCREATEDB NOCREATEROLE NOREPLICATION;
+
+-- 2. Runtime login for API and worker.
 CREATE ROLE inqtrix_runtime LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS
-  NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '<managed-secret>';
+  NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '<runtime-secret>';
 GRANT inqtrix_app TO inqtrix_runtime;
-REVOKE CREATE ON DATABASE inqtrix FROM inqtrix_runtime;
+
+-- 3. Migration login: no superuser, no BYPASSRLS, no CREATEROLE.
+--    Revision 0001 grants the application role to this login, so it needs
+--    ADMIN OPTION on that role.
+CREATE ROLE inqtrix_migrate LOGIN NOSUPERUSER NOBYPASSRLS
+  NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '<migration-secret>';
+GRANT inqtrix_app TO inqtrix_migrate WITH ADMIN OPTION;
+
+-- 4. Database and schema ownership.
+CREATE DATABASE inqtrix OWNER inqtrix_migrate;
+\connect inqtrix
+ALTER SCHEMA public OWNER TO inqtrix_migrate;
+REVOKE ALL ON DATABASE inqtrix FROM PUBLIC;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT CONNECT ON DATABASE inqtrix TO inqtrix_runtime, inqtrix_migrate;
 GRANT USAGE ON SCHEMA public TO inqtrix_app;
+GRANT USAGE, CREATE ON SCHEMA public TO inqtrix_migrate;
 ```
+
+No table, function or sequence grants are made by hand: the migrations issue the
+exact least-privilege contract for `inqtrix_app` themselves.
+
+`inqtrix_runtime` deliberately receives no schema `USAGE` of its own and is never
+a member of `inqtrix_migrate`. `NOINHERIT` plus `SET ROLE inqtrix_app` is the
+isolation boundary; membership in the owning role makes readiness fail with
+*"must not assume an RLS table-owner role"*.
+
+PostgreSQL 16 split role membership into separate `INHERIT` and `SET` options.
+`GRANT` enables `SET` by default, so the statements above are correct as
+written, but automation that grants `WITH SET FALSE` leaves a runtime login that
+cannot enter the application role. The readiness probe evaluates the same
+distinction (`SET` on PostgreSQL 16+, `MEMBER` on PostgreSQL 15), so state the
+option explicitly when a platform's role automation is not under your control.
+
+When moving an **existing** database onto this split, its objects still belong
+to the previous owner. Reassign them as an administrator before the first
+migration, otherwise the preflight rejects the run:
+
+```sql
+REASSIGN OWNED BY <previous-owner> TO inqtrix_migrate;
+```
+
+This covers the tables, `inqtrix_current_tenant_id()`, `audit_log_id_seq` and
+`user_events_id_seq` — all of which the preflight checks individually.
+
+### Naming: what is fixed and what is yours
+
+None of these names is imposed by Inqtrix. The runtime contract verifies role
+*properties*, never role names.
+
+| Name | Where you declare it | Free to choose |
+|---|---|---|
+| Database | inside both connection URLs | yes |
+| Runtime login | inside `INQTRIX_DATABASE_URL` | yes |
+| Migration login | inside `INQTRIX_MIGRATION_DATABASE_URL` | yes |
+| Application role | `INQTRIX_DATABASE_APP_ROLE` (default `inqtrix_app`) | yes, but the variable must be set to match |
+
+The application role is the one that needs attention: it appears in no URL,
+because it is entered with `SET LOCAL ROLE`. A different name therefore has to
+be carried in `INQTRIX_DATABASE_APP_ROLE` on API and worker.
+
+The `inqtrix` role name seen in bundled deployments is the `POSTGRES_USER` of
+the official PostgreSQL image (`postgres.auth.username` in the Helm chart), not
+a requirement. See
+[Bundled versus external databases](#bundled-versus-external-databases) for why
+that identity behaves differently.
+
+### Connection URL format
+
+Both URLs use the same anatomy. The scheme is not interchangeable: the migrator
+rejects anything but a direct `postgresql+asyncpg` URL.
+
+```text
+postgresql+asyncpg://<ROLE>:<PASSWORD>@<HOST>:<PORT>/<DATABASE>
+```
+
+```dotenv
+# Runtime — API and worker
+INQTRIX_DATABASE_URL=postgresql+asyncpg://inqtrix_runtime:s3cr3t@db.example.com:5432/inqtrix
+
+# Migration — the one-shot job only
+INQTRIX_MIGRATION_DATABASE_URL=postgresql+asyncpg://inqtrix_migrate:0th3r@db.example.com:5432/inqtrix
+```
+
+Four rules that cost the most time when missed:
+
+- **Percent-encode the password.** It sits in the userinfo part of a URL, so
+  `@`, `/`, `:`, `?`, `#` and `%` must be escaped (`p@ss` becomes `p%40ss`).
+- **TLS is `ssl`, not `sslmode`.** Query parameters are passed straight through
+  to asyncpg, which knows `ssl` and not libpq's `sslmode`. Use
+  `?ssl=require` (or `verify-full`); `?sslmode=require` fails with
+  `TypeError: connect() got an unexpected keyword argument 'sslmode'`.
+- **The migration URL must be direct.** Never point it at PgBouncer or any
+  other transaction pooler — migrations hold session-level locks across
+  statements.
+- **The two URLs differ only in the role and its password.** Same host, same
+  port, same database.
 
 The migration identity owns every Inqtrix schema object that migrations alter
 (`alembic_version`, application tables, tenant-policy functions and identity
-sequences), or has `BYPASSRLS` plus equivalent object authority. It is also
-allowed to grant/use `inqtrix_app`; the runtime login is never a member of that
-migration identity. Use a dedicated database before revoking `public` schema
-creation if other applications currently share it. The migrations grant the
+sequences), or has `BYPASSRLS` plus equivalent object authority. Use a dedicated
+database before revoking `public` schema creation if other applications
+currently share it. The migrations grant the
 exact table DML contract, explicit tenant-policy function execution,
 `SELECT`-only revision visibility and `USAGE`-only identity-sequence access to
 `inqtrix_app`. They never grant table `TRUNCATE`, `REFERENCES`, `TRIGGER`,
@@ -83,6 +186,87 @@ is active. It also documents that `row_security=off` raises an error rather
 than bypassing a policy. Inqtrix therefore never treats `row_security=off` or a
 special tenant value as migration authority. See [PostgreSQL row security](https://www.postgresql.org/docs/current/ddl-rowsecurity.html)
 and [`ALTER TABLE ... NO FORCE ROW LEVEL SECURITY`](https://www.postgresql.org/docs/current/sql-altertable.html).
+
+### Bundled versus external databases
+
+The bundled demo database looks like it breaks every rule above, and
+understanding why prevents the most common external-database mistake.
+
+The official PostgreSQL image creates its `POSTGRES_USER` as a **superuser** that
+owns every object in the database. The Helm chart sets that user from
+`postgres.auth.username` (default `inqtrix`) and builds `INQTRIX_DATABASE_URL`
+from it, so the bundled runtime login is privileged by construction. To keep
+that working, the chart derives the login policy from whether the database is
+bundled at all:
+
+| `postgres.enabled` | derived `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY` | what the runtime login must be |
+|---|---|---|
+| `true` (bundled demo) | `bundled_legacy` | the image's `LOGIN` superuser owning every RLS table |
+| `false` (external) | `restricted` | an unprivileged `LOGIN` that can only `SET ROLE` to the application role |
+
+Two consequences for anyone writing their own values file or chart:
+
+- With an external database, `postgres.auth.*` is **ignored**. The chart reads
+  it only when `postgres.enabled=true`; changing the username there does not
+  rename anything in your managed database.
+- If readiness reports *"PostgreSQL runtime session login must be LOGIN
+  NOSUPERUSER NOBYPASSRLS …"*, the fix is a restricted runtime login — **not**
+  setting `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=bundled_legacy`. That override
+  does take effect (explicit config wins over the derived value) and it accepts
+  a session login with full database authority. Tenant isolation still holds
+  while every statement runs inside the application-role switch, but the
+  privilege is one `RESET ROLE` away instead of absent from the credential.
+  `bundled_legacy` exists only for the identity the bundled image creates; the
+  runtime probe verifies that exact shape and never treats it as a general
+  compatibility switch.
+
+## Which setup needs which command
+
+Not every deployment needs the bootstrap above. Find your row first.
+
+| Setup | Create roles by hand? | Where migrations run |
+|---|---|---|
+| Bundled Postgres (Compose `postgres` service, Helm `postgres.enabled=true`) | No. The image's superuser already owns everything and `bundled_legacy` accepts it. | Automatically: the `migrate` Compose service, or the chart's migration hook Job. |
+| External database, supplied Helm chart | **Yes**, once — the bootstrap SQL above. | The chart's migration hook Job, pointed at `migrations.databaseSecret`. |
+| External database, your own chart or manifests | **Yes**, once — the bootstrap SQL above. | A one-shot Job you own, from the Inqtrix **API** image. See [Custom charts](#custom-charts). |
+| Local development (`INQTRIX_STORAGE_BACKEND=memory`) | No. | Not applicable — there is no schema. |
+
+### Where each command runs
+
+The bootstrap and the migration are different tools in different places. This
+trips people up because both are "database work".
+
+| Task | Tool | Runs where |
+|---|---|---|
+| Create roles, grant ownership | `psql` | Inside the bundled Postgres pod/container, or from a bastion against the managed endpoint. With an external database there is no Inqtrix-managed database pod. |
+| Apply the schema | `inqtrix-migrate` | Only from the Inqtrix **API image**, as a separate one-shot Job or Pod. |
+
+`inqtrix-migrate` is a console script from the Inqtrix Python package. It does
+**not** exist inside the PostgreSQL container, and running it there fails with
+`command not found`.
+
+It also cannot be run inside a live API pod, for three independent reasons:
+
+1. The chart deliberately blanks `INQTRIX_MIGRATION_DATABASE_URL` in API and
+   worker containers, so the command would fall back to the runtime login.
+2. The runtime login holds no schema `CREATE`; the preflight stops with
+   *"migration role requires USAGE and CREATE on the active schema"*.
+3. An installed-schema migration refuses to start while any other client
+   session is connected — including that pod's own connection pool.
+
+Since a schema change requires the API to be scaled to zero anyway, there is no
+API pod left to enter. A separate one-shot Job is the only shape that works.
+
+For a break-glass run, every value can be passed as a flag instead of an
+environment variable:
+
+```bash
+inqtrix-migrate --migration-database-url postgresql+asyncpg://inqtrix_migrate:0th3r@db.example.com:5432/inqtrix --rls-mode owner --confirm-services-quiesced
+```
+
+Drop `--confirm-services-quiesced` on a **fresh, empty** database: an install
+into an empty schema needs no maintenance window. Every later revision change
+requires it.
 
 ## RLS modes
 
@@ -362,7 +546,10 @@ Concretely, a bring-your-own-manifests deployment needs three mechanics:
 
 The PostgreSQL requirements are unchanged from the top of this page:
 version 15+, no extensions (a pgvector-enabled image is fine, the extension
-stays unused), and the two-role split.
+stays unused), and the three-identity split. A bring-your-own-manifests
+deployment against an external database also owns the one-time role bootstrap;
+run [Bootstrap SQL for an external database](#bootstrap-sql-for-an-external-database)
+before the first Job.
 
 ## Data-moving integrity contracts
 

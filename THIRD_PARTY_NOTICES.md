@@ -141,7 +141,7 @@ and the canonical npm `package-lock.json`.
 | python-dev | `pytest` | 9.0.2 | MIT | python package metadata: License-Expression |
 | python-dev | `pytest-asyncio` | 1.3.0 | Apache-2.0 | python package metadata: License-Expression |
 | python-dev | `pytest-recording` | 0.13.4 | MIT | python package metadata: License-Expression |
-| python-dev | `qdrant-client` | 1.18.0 | Apache Software License | python package metadata: classifiers |
+| python-dev | `qdrant-client` | 1.19.0 | Apache Software License | python package metadata: classifiers |
 | python-dev | `redis` | 8.0.0 | MIT | python package metadata: License-Expression |
 | python-dev | `ruff` | 0.16.0 | MIT | python package metadata: License-Expression |
 | python-dev | `sortedcontainers` | 2.4.0 | Apache Software License | python package metadata: classifiers |

@@ -152,6 +152,48 @@ See [Database migrations](database-migrations.md). A direct command is allowed
 only inside the documented maintenance window after a verified backup and full
 database-client drain.
 
+### Upgrading the bundled Qdrant
+
+A Qdrant **minor** version bump is not a plain image swap. Two upstream rules
+govern it, and neither is enforced by the stack:
+
+1. **One minor version at a time.** Storage compatibility is guaranteed for a
+   single minor step only (1.18.x to 1.19.x). Crossing more than one requires
+   landing on each intermediate minor first.
+2. **The storage migration is not reversible.** The first 1.19 start rewrites
+   the storage directory in place. Reverting the pinned tag afterwards does
+   **not** undo it — the older server cannot read the migrated directory.
+
+So a rollback plan means a copy of the volume, taken before the new image
+starts, not a second image reference:
+
+```bash
+# Before the upgrade, with the stack stopped
+podman volume export inqtrix_qdrant_storage > qdrant-storage-pre-upgrade.tar
+```
+
+Upstream also recommends upgrading the client SDK before the server; the
+packaged `qdrant-client` floor tracks the bundled server minor, so a normal
+image rebuild already satisfies that ordering.
+
+**The fallback when no volume copy exists.** Qdrant here is a *derived* index:
+Postgres holds the canonical documents, revisions, chunk text and exact source
+spans (see [Data architecture](../architecture/data-architecture.md)). A
+collection whose vectors are lost can therefore be rebuilt rather than
+recovered:
+
+```bash
+curl -X POST "$BASE/v1/knowledge/collections/kc_.../reindex" \
+    -H "Authorization: Bearer $TOKEN"
+```
+
+That costs a full re-embedding of every chunk, billed by the embedding
+provider and taking as long as the original ingest, so it is a recovery route
+rather than a routine one. Note the ordering: wiping the Qdrant volume while
+Postgres still points at an active generation leaves the two stores
+disagreeing, which surfaces as `chunks_pending_reconciliation` retrieval
+warnings until a reindex publishes a new generation.
+
 ## Rotate the bundled PostgreSQL password
 
 Changing `INQTRIX_PG_PASSWORD` in a file does not alter an initialized

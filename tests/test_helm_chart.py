@@ -1112,7 +1112,7 @@ def test_byo_service_account_creates_none_and_requires_explicit_name() -> None:
 
 def test_chart_version_tracks_chart_contract_changes() -> None:
     chart = yaml.safe_load((_CHART / "Chart.yaml").read_text(encoding="utf-8"))
-    assert chart["version"] == "0.1.14"
+    assert chart["version"] == "0.1.15"
 
 
 def test_observability_tracing_env_renders_for_api_and_worker() -> None:

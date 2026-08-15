@@ -527,7 +527,7 @@ pgbouncer:
 
 qdrant:
   enabled: false
-  image: docker.io/qdrant/qdrant:v1.18.2@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
+  image: docker.io/qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
   imagePullPolicy: IfNotPresent
   # The chart runs the upstream image as a fixed non-root UID on vanilla
   # Kubernetes. The template therefore routes every mutable Qdrant path

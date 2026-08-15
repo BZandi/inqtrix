@@ -412,7 +412,7 @@ services:
     # INQTRIX_KNOWLEDGE_ENABLED=true, INQTRIX_VECTOR_BACKEND=qdrant,
     # INQTRIX_QDRANT_URL=http://qdrant:6333 in deploy/.env.stack and a
     # non-placeholder INQTRIX_QDRANT_API_KEY in the paired secrets file.
-    image: docker.io/qdrant/qdrant:v1.18.2@sha256:75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c
+    image: docker.io/qdrant/qdrant:v1.19.0@sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc
     profiles: ["knowledge"]
     environment:
       QDRANT__SERVICE__API_KEY: ${INQTRIX_QDRANT_API_KEY:-}

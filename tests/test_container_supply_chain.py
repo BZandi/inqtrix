@@ -97,3 +97,75 @@ def test_production_container_references_are_qualified_and_immutable() -> None:
         assert "/" in repository
         assert tag not in {"latest", "stable"}
         assert re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+
+
+def _compose_service_images() -> dict[str, str]:
+    """Compose service images with operator overrides resolved to defaults."""
+    compose = yaml.safe_load(
+        (_ROOT / "deploy" / "compose" / "compose.stack.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    images: dict[str, str] = {}
+    for name, service in compose["services"].items():
+        image = service.get("image")
+        if image is None:
+            continue
+        override = _COMPOSE_OVERRIDE.match(image)
+        images[name] = override.group("default") if override else image
+    return images
+
+
+def _helm_component_images() -> dict[str, str]:
+    values = yaml.safe_load(
+        (_ROOT / "deploy" / "helm" / "inqtrix" / "values.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    return {
+        component: values[component]["image"]
+        for component in ("postgres", "pgbouncer", "qdrant", "valkey", "s3")
+    }
+
+
+# Bundled services that must run the SAME build on both deployment paths.
+# Compose service name -> Helm component key.
+_SHARED_BUNDLED_IMAGES = {
+    "postgres": "postgres",
+    "pgbouncer": "pgbouncer",
+    "qdrant": "qdrant",
+    "valkey": "valkey",
+}
+
+
+def test_bundled_service_images_match_between_compose_and_helm() -> None:
+    """Docker and Kubernetes cannot silently drift onto different builds.
+
+    Nothing structural ties the two pins together, so a version bump applied
+    to one file and forgotten in the other produces a version skew that only
+    shows up as behaviour differing per deployment path.
+    """
+    compose_images = _compose_service_images()
+    helm_images = _helm_component_images()
+
+    for service, component in _SHARED_BUNDLED_IMAGES.items():
+        assert compose_images[service] == helm_images[component], (
+            f"{service}: compose pins {compose_images[service]!r} but Helm "
+            f"pins {helm_images[component]!r}; bump both or neither"
+        )
+
+
+def test_object_store_image_divergence_stays_deliberate() -> None:
+    """The object store is the one bundled service that is NOT the same image.
+
+    Compose bundles SeaweedFS while the chart bundles MinIO. That is a real
+    product difference, not drift, so parity is deliberately not asserted for
+    it above. This test pins the divergence so that unifying the two later is
+    a conscious edit here rather than a silently weakened contract.
+    """
+    compose_images = _compose_service_images()
+    helm_images = _helm_component_images()
+
+    assert compose_images["seaweedfs"].startswith("docker.io/chrislusf/seaweedfs:")
+    assert helm_images["s3"].startswith("docker.io/minio/minio:")
+    assert "s3" not in _SHARED_BUNDLED_IMAGES.values()

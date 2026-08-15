@@ -959,7 +959,7 @@
       "license": "Apache Software License",
       "metadata_source": "python package metadata: classifiers",
       "name": "qdrant-client",
-      "version": "1.18.0"
+      "version": "1.19.0"
     },
     {
       "dependency_surface": "python-dev",

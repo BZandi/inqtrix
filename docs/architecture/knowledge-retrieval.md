@@ -6,17 +6,136 @@
 
 This page is the architecture view of the knowledge engine: the internal data flow of `mode=knowledge` from a raw document to a cited answer. It covers ingestion and contextualization, the Postgres-canonical / Qdrant-derived storage topology, the end-to-end retrieval pipeline (hybrid search, RRF fusion, optional rerank, the sufficiency gate, and grounding), and how that pipeline relates to the web-research graph.
 
+It opens with two sections that do not describe Inqtrix internals at all: [The retrieval model in one pass](#the-retrieval-model-in-one-pass) explains what each kind of retrieval machinery does and why more than one of them is needed, and [Which engine owns which stage](#which-engine-owns-which-stage) maps every stage to the class of engine that runs it. Read those first if the terms below are unfamiliar; skip to [Two engines, one serialization](#two-engines-one-serialization) if they are not.
+
 It does **not** cover operating the engine — collections, the ingestion API, the Wissen workspace, and the evaluation tiers live in [Knowledge engine](../knowledge/overview.md); the per-request stage matrix lives in [Retrieval profiles](../configuration/knowledge-profiles.md); every `INQTRIX_KNOWLEDGE_*` / `INQTRIX_EMBEDDING_*` / `INQTRIX_RERANKER_*` variable lives in [Settings and environment](../configuration/settings-and-env.md).
 
-Knowledge retrieval is off by default. The hybrid, contextualization, and rerank stages described here engage only with the qdrant backend and the matching flags:
+Knowledge retrieval is off by default. The hybrid, contextualization, and rerank stages described here engage only with the qdrant backend and the matching flags. Every line below except the first differs from its default, so this block is a deliberate opt-in, not a description of an out-of-the-box deployment:
 
 ```dotenv
-INQTRIX_KNOWLEDGE_ENABLED=true
-INQTRIX_VECTOR_BACKEND=qdrant          # hybrid retrieval; memory backend is dense-only
-INQTRIX_KNOWLEDGE_SPARSE=bm25_german   # the BM25 lexical branch (an algorithm, no hosted model)
-INQTRIX_KNOWLEDGE_CONTEXTUALIZE=on     # situating prefix per chunk at ingestion (optional)
-INQTRIX_RERANKER_PROVIDER=cohere       # rerank stage; "none" (default) skips it visibly
+INQTRIX_KNOWLEDGE_ENABLED=true         # default false: no routes, no embedding provider
+INQTRIX_VECTOR_BACKEND=qdrant          # default memory (dense-only); qdrant adds hybrid retrieval
+INQTRIX_KNOWLEDGE_SPARSE=bm25_german   # default: the BM25 lexical branch (an algorithm, no hosted model)
+INQTRIX_KNOWLEDGE_CONTEXTUALIZE=on     # default off: situating prefix per chunk at ingestion
+INQTRIX_RERANKER_PROVIDER=cohere       # default none: the rerank stage is skipped visibly
 ```
+
+## The retrieval model in one pass
+
+Five things happen between a question and a cited answer, and they are five different *kinds* of machinery. Confusing them is the most common way to misread the rest of this page.
+
+| Step | What it is | What it is not |
+|---|---|---|
+| Dense retrieval | A learned model maps text to a vector; nearby vectors mean related meaning. | Not a keyword search — it will not reliably find `CVE-2026-12345`. |
+| Sparse retrieval (BM25) | A weighted term index: rare terms count more, long chunks less. | Not a model — no synonyms, no cross-language matching. |
+| RRF | Arithmetic over the two result *lists*. | Not a model and not an embedding — it never reads the text. |
+| Reranking | A model that scores question and passage *together*. | Not a retriever — it only reorders what retrieval already found. |
+| The answer LLM | Writes the answer from the selected original passages. | Not a search step — it sees only what the stages above admitted. |
+
+### Why two searches instead of one
+
+Dense and sparse retrieval fail in *opposite* directions. That is the whole reason both run.
+
+A dense embedding (`list[float]`, one vector per chunk) is a lossy compression of meaning into a fixed number of dimensions. That is what lets "Wie lange bleiben Datensicherungen erhalten?" retrieve a chunk that says "Sicherungskopien sind 90 Tage aufzubewahren" — the two share no word, but their vectors point in a similar direction. The same property is why an exact identifier can disappear: `DB-PROD-037`, `Artikel 17 Absatz 4`, or `AES-256-GCM` carry almost no distributional signal, so the compression discards them. Semantic proximity is also not the same as answering the question: a passage on why backups matter sits close to a question about retention periods without containing "90 Tage" anywhere.
+
+BM25 has the mirror-image profile. It scores a chunk from how often the query's terms occur in it, how rare each term is across the corpus, and how long the chunk is, with saturation so that a hundred repetitions do not count a hundred times. A rare token like `DB-PROD-037` therefore dominates the score while a frequent one like "Daten" barely moves it. The cost is that BM25 has no notion of meaning: "Datensicherung" and "Backup" are unrelated tokens to it, and so are "Verschlüsselung" and "encryption".
+
+Running both and fusing them is not redundancy. It is covering each branch's blind spot with the other's strength.
+
+| Query characteristic | Dense | BM25 |
+|---|---|---|
+| Synonym or paraphrase of the document wording | strong | weak |
+| Query and corpus in different languages | strong (the embedding models are multilingual) | structurally impossible except for shared tokens |
+| Exact identifier, article number, product code | can miss | strong |
+| Rare technical term appearing verbatim | varies | strong |
+| Broad topical similarity | strong | only on word overlap |
+
+**"Sparse embedding" is a slightly misleading name.** The sparse branch is stored as a vector, but it is not a second neural model. `Qdrant/bm25` through `fastembed` is a tokenizer plus a weighting formula: it emits one weight per token that actually occurs and zero for every other position in the vocabulary. That is what "sparse" means — a handful of non-zero entries in a very large space, against a dense vector where nearly every position carries a value. Qdrant applies the rarity (IDF) part of the weighting server-side, so it is computed against the collection actually being searched.
+
+### What RRF does with the two rankings
+
+The two branches return scores that cannot be compared. A dense cosine similarity of `0.84` and a BM25 score of `14.7` are not on one scale, and no fixed weighting makes them one: BM25 scores grow with corpus statistics and query length, cosine similarity does not.
+
+Reciprocal Rank Fusion sidesteps this by discarding the scores and keeping only the *positions*. It scores a chunk by the sum of its reciprocal ranks across the branches:
+
+```text
+score(d) = Σ_i  1 / (k + rank_i(d))
+```
+
+where `rank_i(d)` is `d`'s position in branch `i` and `k` is a smoothing constant. Fusing by **rank** rather than by raw score is the point: it prevents one branch's score magnitude from drowning the other, and both branches contribute regardless of scale.
+
+The consequence is that a chunk both branches rank highly beats one that only a single branch ranks first:
+
+| Chunk | Dense rank | BM25 rank | Outcome |
+|---|---|---|---|
+| A — "90 Tage aufzubewahren" | 2 | 1 | strong in both; fused to the top |
+| B — general text about backups | 1 | 7 | dense-only; loses to A |
+| C — unrelated text containing "90" | 8 | 2 | lexical-only; loses to A |
+
+RRF reads no text, understands no question, and produces no vector. It is a voting rule over two lists — which is exactly why it is safe to apply across branches whose scores mean different things.
+
+### Why a reranker is still worth it after retrieval
+
+Dense retrieval has a structural limitation that no amount of embedding quality removes: a chunk's vector is computed at ingestion, *before* any question exists. It must compress everything the chunk might ever be asked about into one point, and the question is compared against that point.
+
+```text
+question ──► one vector ┐
+                        ├──► distance between two independently computed points
+chunk    ──► one vector ┘     (the chunk's point was fixed at ingestion)
+```
+
+A cross-encoder reranker instead sees the question and the passage together, in one forward pass, and scores the pair:
+
+```text
+"Welche Aufbewahrungsfrist gilt für Backups?" + "Sicherungskopien müssen 90 Tage …"
+                         ──► one relevance score
+```
+
+That is why it can separate "topically about backups" from "answers this question about backups" — a distinction the ingestion-time vector could not have encoded, because the question did not exist yet. It is also why it cannot replace retrieval: scoring every chunk this way would mean one model call per chunk per question. The two stages are complementary rather than alternatives. Retrieval buys recall cheaply over the whole collection; reranking buys precision expensively over a small pool.
+
+The pool is small on purpose. With the defaults the reranker sees `INQTRIX_RERANK_CANDIDATE_DEPTH` (40) candidates and the answer receives `final_k` (8).
+
+### What contextualization changes, and what it must never change
+
+A chunk is retrieved alone but was written in context. Split at a paragraph boundary, a passage can lose the referent that made it meaningful:
+
+```text
+Sie sind 90 Tage aufzubewahren.
+Danach sind sie unverzüglich zu löschen.
+```
+
+Nothing here says what "sie" refers to, so no query about backup retention matches it well in either branch. With `INQTRIX_KNOWLEDGE_CONTEXTUALIZE=on` (**default `off`**), a fast-tier LLM call generates one or two situating sentences per chunk at ingestion, and the *index* text becomes the situating prefix followed by the original body. Both the dense vector and the BM25 weights are computed from that combined text.
+
+The boundary that matters: the generated prefix is persisted separately as `retrieval_context`, and the untouched body stays `source_text`. **Only `source_text` reaches the answer prompt, the citation, the document viewer, and the quote verification.** Model-generated text is allowed to help *find* a chunk; it is never allowed to become evidence. A quote of the situating prefix therefore does not verify as source content.
+
+This split is also why the measured gain is a *retrieval* gain. The committed configuration note reports recall@1 moving from 0.9375 to 0.9688 on the EU-AI-Act hard evaluation set, on top of hybrid plus rerank ([`.env.example`](../../.env.example)) — a retrieval metric, because the answer never sees the generated text.
+
+## Which engine owns which stage
+
+Every stage below runs on exactly one class of engine, and they are not all models. This table answers "what would I have to configure, and what would it cost me?" for each stage in isolation; the per-profile view of which stages run together is in [Retrieval profiles](../configuration/knowledge-profiles.md).
+
+| Stage | Engine class | Defined in | Cost per question | Runs when |
+|---|---|---|---|---|
+| Chunk contextualization | LLM, **fast** tier (`knowledge_contextualize`) | `contextualize.py` | none — runs at **ingestion**, `ceil(chunks / effective batch size)` calls per document | `INQTRIX_KNOWLEDGE_CONTEXTUALIZE=on` (default `off`) |
+| Dense indexing and query embedding | Embedding model, pinned immutably per collection | `providers/embeddings.py` | one embedding call per embedding-model group in scope | always |
+| Sparse indexing and query encoding | **No model** — BM25 tokenizer plus weighting (`Qdrant/bm25` via `fastembed`), IDF applied server-side | `stores/qdrant_store.py` | none (local computation) | `INQTRIX_KNOWLEDGE_SPARSE=bm25_german` on the qdrant backend |
+| RRF fusion | **No model** — arithmetic over ranks, executed inside Qdrant | `stores/qdrant_store.py` | none | the hybrid path |
+| Reranking | Cross-encoder API (`cohere`) **or** LLM, fast tier (`knowledge_rerank`) | `providers/rerankers.py` | one rerank call; `llm` is roughly an order of magnitude costlier and hard-capped at 20 candidates | `INQTRIX_RERANKER_PROVIDER` is not `none` (default `none`) **and** the profile enables rerank |
+| Follow-up rewrite | LLM, **fast** tier (`knowledge_contextualize`) | `algorithm.py` | one call | the request carries prior `messages`/`history` |
+| Query decomposition | LLM, **fast** tier (`knowledge_decompose`) | `decompose.py` | one call | `tief` only |
+| Sufficiency gate | LLM, **fast** tier (`knowledge_gate`) | `gate.py` | one call per round | the gate is on and the profile grants rounds |
+| Answer | LLM, **high** tier (`knowledge_answer`) — the only knowledge stage that also resolves a reasoning effort | `algorithm.py` | one call, plus at most one regeneration | always |
+| Quote verification (grounding) | **No model** — deterministic normalized substring check | `grounding.py` | none | `INQTRIX_KNOWLEDGE_GROUNDING=on` (default) |
+
+Read down the middle column. Five stages are always LLM calls — chunk contextualization, follow-up rewrite, decomposition, gate, answer — and exactly one of them, the answer, sits on the high tier; the other four are fast-tier. Reranking is a sixth, conditional LLM call: only the `llm` provider routes it through the deployment's own model, while `cohere` calls a dedicated cross-encoder endpoint instead.
+
+Three consequences worth reading off this table:
+
+- **Everything that decides *which* evidence the answer sees** — dense retrieval, the lexical branch, fusion, reranking — runs either on a model that is not an LLM or on no model at all. Swapping the answer model changes how the answer is written, not what it is written from.
+- **The check that decides whether an answer may be published is plain code.** Evidence integrity depends on a model nowhere in this pipeline.
+- **The fast tier carries more weight than its name suggests.** With contextualization enabled it is also the ingestion model, called once per chunk batch for every document, so `TIER_FAST_MODEL` drives indexing cost far more than it drives answer quality.
+
+All LLM call sites resolve their model and effort through the one central router (`model_routing.py`); per-call-site detail, the three tiers, and the resolution order are in [LLM calls, model tiers, and reasoning effort](llm-calls.md). There are no `KNOWLEDGE_*_MODEL` per-node environment variables — these nodes are reachable through the tier layer (`TIER_FAST_MODEL` / `TIER_HIGH_MODEL`) or a per-run `model_tier` override only.
 
 ## Two engines, one serialization
 
@@ -79,7 +198,7 @@ Key transitions:
 - **Parse** converts PDF/DOCX/PPTX/XLSX/HTML/Markdown to Markdown via MarkItDown; a file that yields no text (a scanned PDF without a text layer) fails loudly with HTTP 422 rather than producing a silently empty document.
 - **Reserve** creates a stable logical document, a monotonically ordered desired revision, and the job identity in server-owned state before any contextualization or embedding call. Repeating the same `(collection, source, content hash)` request is idempotent. A later desired revision wins even when an older worker finishes last; the older job becomes `superseded` and never deletes or replaces the newer result.
 - **Chunk** (`chunk_text_slices`) splits on blank-line paragraph boundaries, packs greedily up to `INQTRIX_KNOWLEDGE_CHUNK_MAX_CHARS` (default 2000 chars, ~500 tokens), and hard-splits oversize paragraphs on sentence boundaries. Every chunk carries an exact character span while it is processed and an exact UTF-8 byte span when persisted; repeated boilerplate is never rediscovered by prefix search.
-- **Contextualize** (`contextualize.py`, `INQTRIX_KNOWLEDGE_CONTEXTUALIZE=on`) generates a short situating context for each chunk. `25` is only the maximum call width. The planner grows a contiguous batch while the complete rendered prompt, the model-card context window, guaranteed JSON response space, and safety reserve fit; every resulting document window contains the entire source span of its batch. The number of calls is therefore `ceil(chunks / effective dynamic batch size)`, not one call per document.
+- **Contextualize** (`contextualize.py`, `INQTRIX_KNOWLEDGE_CONTEXTUALIZE`, **default `off`**) generates a short situating context for each chunk; what it is for and where its output may and may not appear is in [What contextualization changes](#what-contextualization-changes-and-what-it-must-never-change). A deployment that has not set this flag indexes the plain chunk body, and the `Ctx` branch below is simply not taken. `25` is only the maximum call width. The planner grows a contiguous batch while the complete rendered prompt, the model-card context window, guaranteed JSON response space, and safety reserve fit; every resulting document window contains the entire source span of its batch. The number of calls is therefore `ceil(chunks / effective dynamic batch size)`, not one call per document.
 - Up to three contextualization batches execute concurrently, bounded further by the provider's declared LLM-concurrency capability and by one process-wide gate on the shared contextualizer. Every validated batch is checkpointed independently with model and prompt hashes, including when calls finish out of order. The first dependency or validation failure stops new dispatch; already-running successful batches may still checkpoint, but no incomplete revision is published. Resume validates the stored set and starts only missing batches. The UI can retry, cancel, or explicitly request a separate raw-text build. That explicit choice is recorded as `ready_raw_by_user_choice`; there is no automatic raw fallback.
 - Transient dependency failures open a circuit keyed by tenant, LLM provider, and resolved contextualization model. In PostgreSQL deployments this state is shared by API and worker replicas; it is not a process-local hint. During the configured cooldown, new calls stop before reaching the provider and their jobs pause with a typed reason. When the cooldown expires, a row-locked lease grants exactly one half-open probe. A matching probe token closes the circuit after recovery; a failed probe reopens it, and an expired lease can be reclaimed after a worker crash. Provider retry/backoff loops receive the indexing cancellation probe in the actual executor thread, so cancellation does not wait for the remaining retry ladder. Cooldown and probe lease are recovery coordination, never document deadlines or silent fallback criteria.
 - **Embedding text is not evidence.** `retrieval_context` is stored separately from the immutable `source_text`. Their concatenation exists only as the input to dense embedding and sparse indexing. Answer prompts, citations, Document Find, Canvas evidence, previews, and exports receive the common `KnowledgeEvidenceHit.excerpt`, which is verified against the canonical document span.
@@ -197,11 +316,37 @@ Key transitions:
 - **Evidence budget** renders the candidates as `[K1] Title (Abschnitt N)` entries up to a context-window-derived character budget. Truncation happens once, here, and emits `inqtrix.knowledge.evidence.truncated` — the reference list and the prompt always describe the same set.
 - **Sufficiency gate** (`evaluate_evidence`, `gate.py`) is one fast-tier call returning a three-way coverage verdict. `full` answers normally; `partial` answers with the gaps named explicitly (a binary verdict was observed refusing answerable multi-aspect questions wholesale); `none` yields the honest no-evidence answer instead of a fabrication. An unparseable gate response fails *open* to sufficient with `_knowledge_gate_fallback`; clients must render that marker as a degraded judgement in the visible run ledger.
 - **The agentic loop**: while the gate is not satisfied, proposes a rewritten query, and the profile's round budget (capped by `INQTRIX_KNOWLEDGE_GATE_MAX_ROUNDS`) has rounds left, `run()` retrieves the rewritten query, merges it into the candidate pool (`merge_candidates`, original ranking authoritative), re-renders, and re-gates.
-- **Grounding** (`check_grounding`, `grounding.py`) verifies the answer's `ZITATE:` block of verbatim `[K#]` quotes WITHOUT another LLM call: a formatting-tolerant (whitespace, Unicode/typography, case) verbatim-substring check against the specifically labelled chunk's `source_text` (the pre-contextualization body — a quote of the situating prefix must not verify as source content). Every quote is checked against two surfaces of its assigned evidence entry: the raw text, and the text with `\x0c`-anchored page-break sequences removed (`strip_page_break_artifacts`) — PDF extraction writes the printed page number plus a form feed INTO sentences that span a page break, and a faithful quote naturally omits that artifact. The form-feed anchor keeps the tolerance content-safe: a number without a form feed (an article number, a year) is never touched. Tolerance covers only encoding/typography and this one anchored artifact class, never paraphrase. A single deterministic repair may accept Markdown heading markers around both section headers; it never changes quote or answer text. Only a completely parsed response whose every quote verifies is publishable. One unverifiable quote triggers at most ONE visible answer regeneration (`inqtrix.knowledge.answer.retry`, additive usage, both attempts recorded in `knowledge_grounding.attempts`); if the second attempt still fails — or the output is malformed, which never retries — the run ends in the typed terminal failure, preserves consumed usage and bounded audit counts, and exposes only a safe explanation to Knowledge, chat, and Agent callers.
+- **Grounding** (`check_grounding`, `grounding.py`) verifies the answer's `ZITATE:` block of verbatim `[K#]` quotes WITHOUT another LLM call: a formatting-tolerant (whitespace, Unicode/typography, case) verbatim-substring check against the specifically labelled chunk's `source_text` (the pre-contextualization body — a quote of the situating prefix must not verify as source content). Every quote is checked against two surfaces of its assigned evidence entry: the raw text, and the text with `\x0c`-anchored page-break sequences removed (`strip_page_break_artifacts`) — PDF extraction writes the printed page number plus a form feed INTO sentences that span a page break, and a faithful quote naturally omits that artifact. The form-feed anchor keeps the tolerance content-safe: a number without a form feed (an article number, a year) is never touched. Tolerance covers only encoding/typography and this one anchored artifact class, never paraphrase. A single deterministic repair may accept Markdown heading markers around both section headers; it never changes quote or answer text. Only a completely parsed response whose every quote verifies is publishable. Failure splits by cause, and only one of the two causes is retried: a parsed response with an unverifiable quote (`QUOTE_UNVERIFIED`) triggers at most ONE visible answer regeneration (`inqtrix.knowledge.answer.retry`, additive usage, both attempts recorded in `knowledge_grounding.attempts`), while a response that could not be parsed at all (`FORMAT_INVALID`) terminates immediately with no second attempt — regenerating a model that ignored the output contract is not a repair. If the retried attempt still fails, the run ends in the typed terminal failure, preserves consumed usage and bounded audit counts, and exposes only a safe explanation to Knowledge, chat, and Agent callers.
+
+### The width funnel
+
+Six numbers control how much evidence survives each step. Following one `standard` request through them, on defaults:
+
+```text
+question                     1
+  ├─ dense branch      ─┐
+  ├─ BM25 branch       ─┴─ each prefetches over a geometrically widened pool
+  ├─ RRF fusion         → one fused candidate list
+  ├─ reranker           → 40 candidates in (when one is configured)
+  └─ answer prompt      → final_k = 8 entries, labelled [K1] … [K8]
+```
+
+None of these widths scale with corpus size, which is what keeps per-question cost bounded no matter how large a collection grows:
+
+| Width | Default | Bound | Set by |
+|---|---|---|---|
+| `top_k` — per-(sub-)query retrieval width | 8 | 1–50 | `INQTRIX_KNOWLEDGE_TOP_K`, per request `knowledge_filters.top_k` |
+| Rerank candidate pool | 40 | `int(depth × profile factor)`, hard ceiling 200 | `INQTRIX_RERANK_CANDIDATE_DEPTH` × the profile's factor |
+| `final_k` — evidence entries reaching the answer | 8 | 1–`EVIDENCE_K_MAX` (40) | `min(top_k × profile.final_k_factor, EVIDENCE_K_MAX)`, or pinned by `knowledge_filters.final_k` |
+| Gate rewrite rounds | 1 | 1–5 | the profile, capped by `INQTRIX_KNOWLEDGE_GATE_MAX_ROUNDS` (3) |
+| Evidence character budget | derived | `max(8_000, (context_window − 4_000) × 3)` | the answer model's context window |
+| Decomposition sub-queries | none | 2–4, `tief` only | the profile |
+
+The character budget is the last gate and the only one that can drop an already-selected candidate. Truncation happens once, there, and emits `inqtrix.knowledge.evidence.truncated`, so the reference list and the prompt always describe the same set.
 
 ## Hybrid search and RRF
 
-This diagram answers: "How do the dense and BM25 branches combine into one ranking?" It zooms into a single `retrieve()` call from the pipeline above (`stores/qdrant_store.py`).
+This diagram answers: "How do the dense and BM25 branches combine into one ranking?" It zooms into a single `retrieve()` call from the pipeline above (`stores/qdrant_store.py`). The conceptual argument for the two branches and for rank-based fusion is in [Why two searches instead of one](#why-two-searches-instead-of-one); this section is the implementation.
 
 ```mermaid
 flowchart LR
@@ -226,14 +371,9 @@ flowchart LR
 
 Key transitions:
 
-- **Two branches, one Qdrant call.** `_sync_hybrid_search` issues a single `query_points` with two `Prefetch` branches — dense (the query embedding, `using="dense"`) and sparse (the BM25-german `SparseVector`, `using="sparse"`) — each fetching `prefetch_depth = max(top_k * 4, 20)` candidates under the same collection-scope filter.
-- **Reciprocal Rank Fusion (RRF)** combines the two rankings server-side via `models.FusionQuery(fusion=models.Fusion.RRF)`. RRF scores a document by the sum of its reciprocal ranks across the branches:
-
-  ```text
-  score(d) = Σ_i  1 / (k + rank_i(d))
-  ```
-
-  where `rank_i(d)` is `d`'s position in branch `i` and `k` is a smoothing constant. It is rank-based on purpose: dense cosine scores and BM25 IDF scores live on incommensurable scales, so fusing by **rank** rather than by raw score avoids one branch's score magnitude drowning the other. Both branches contribute regardless of scale.
+- **Two branches, one Qdrant call.** `_sync_hybrid_search` issues a single `query_points` with two `Prefetch` branches — dense (the query embedding, `using="dense"`) and sparse (the BM25-german `SparseVector`, `using="sparse"`) — both under the same collection/revision/generation scope filter. Neither branch can see a different slice of the corpus than the other.
+- **Two widening layers, not one.** Each branch fetches `prefetch_depth = max(top_k * 4, 20)` candidates — but the `top_k` that function receives is already a widened pool, not the requested evidence width. The store first over-fetches geometrically (`VECTOR_OVERFETCH_FACTOR = 8`, floored at `MIN_VECTOR_CANDIDATES = 64` and capped at `MAX_VECTOR_CANDIDATES = 512`, `stores/retrieval_contract.py`) so that candidates dropped during canonical hydration — stale generations, unverified source spans, duplicate documents collapsed by content hash — do not silently shrink the result. Reaching either bound is reported rather than absorbed: `vector_overfetch_cap` and `vector_candidate_stalled` travel on as typed degradation reasons.
+- **Reciprocal Rank Fusion (RRF)** combines the two rankings server-side via `models.FusionQuery(fusion=models.Fusion.RRF)` — Qdrant computes the fusion, Inqtrix does not post-process the scores. The formula and why rank-based fusion is the right choice here are in [What RRF does with the two rankings](#what-rrf-does-with-the-two-rankings).
 - **Reranker** (optional, `INQTRIX_RERANKER_PROVIDER`) re-scores a deeper candidate pool (`INQTRIX_RERANK_CANDIDATE_DEPTH`, default 40) down to the requested `top_k` (default 8). `cohere` calls a Cohere-rerank-schema endpoint (native or Azure serverless); `llm` is a listwise fallback through the deployment's own LLM, hard-capped at 20 candidates and roughly an order of magnitude costlier. The default is `none` — a visible capability flag, never a silent downgrade; hybrid without a reranker is warned about at startup because plain RRF can degrade top-1 precision on paraphrase queries.
 
 ## Cross-lingual retrieval (query and corpus in different languages)
@@ -250,5 +390,5 @@ A common case is a German question against English documents (or the reverse). T
 
 - [Knowledge engine](../knowledge/overview.md) — operating the engine: collections, ingestion API, the Wissen workspace, and the evaluation tiers.
 - [Retrieval profiles](../configuration/knowledge-profiles.md) — the per-profile stage matrix, operator ceiling, and transport contract that select within this pipeline.
+- [LLM calls, model tiers, and reasoning effort](llm-calls.md) — what every `knowledge_*` call site does and which tier resolves it.
 - [Evidence pipeline](evidence-pipeline.md) — the parallel evidence/citation flow on the web-research side (`[E#]` instead of `[K#]`).
-- [Answer composition](answer-composition.md) — the section-by-section web answer composer, contrasted with the single quote-then-answer prompt here.

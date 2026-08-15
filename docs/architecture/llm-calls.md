@@ -1,9 +1,16 @@
 # LLM calls, model tiers, and reasoning effort
 
+## Scope
+
 This page is the single source of truth for **which LLM call happens where in
 the algorithm, what each call does, and how a model and reasoning effort are
 chosen for it**. It is written so you can decide, per call site, which model
 tier is appropriate.
+
+It covers only calls to a language model. Retrieval stages that run on an
+embedding model, on a rerank API, or on no model at all are outside it; the
+end-to-end mapping of knowledge stages to engine classes is in
+[Knowledge retrieval](knowledge-retrieval.md#which-engine-owns-which-stage).
 
 Every call site resolves its model and reasoning effort through one central
 router, [`inqtrix.model_routing`](../../src/inqtrix/model_routing.py). There are
@@ -25,8 +32,10 @@ English.
 | **answer** (per section) | Writes one markdown section of the final report with `[E*]` citations; iterates over 3-6 sections, each seeing the running report. | `build_answer_section_system_prompt(...)` + `build_answer_section_user_prompt(...)`; full system prompt with style/safety/citation rules. | `question`, the **full evidence overview** + allowed citations + label map, source/claim metrics, `required`/`uncovered_aspects`, `competing_events`, conversation `history`, completed headings, report-so-far summary, used evidence labels, the section spec. | Free markdown (`##`/`###`, `[E12]`). Normalisation + markdown repair + incompleteness detection. | 3-6× per run |
 | **claim_extract** | Extracts checkable single claims per search hit (`claim_text`, `evidence_snippet`, `claim_type`, `polarity`, `needs_primary`, `provider_refs`, `published_date`). | `build_claim_extraction_prompt(max_claims)`. | `question`, the **search hit full text** (capped ~16k chars), normalised citations, source-ref map, `max_claims`. | JSON schema via `complete_structured` (with a JSON fallback). Reasoning follows the **fast** tier's effort (`tier_fast_effort`; unset/`none` by default → no reasoning). | 1× per search hit (5-50+) |
 | **direct_chat** | Answers directly without research when classify returns DIRECT (the conversational path). | `_DIRECT_CHAT_SYSTEM_PROMPT` + a formatted prompt in [`graph.py`](../../src/inqtrix/graph.py). | `question`, conversation `history`. | Free text. | 1× per run (DIRECT only) |
-| **knowledge_contextualize** | Rewrites a Knowledge Ask follow-up into a standalone retrieval query. | `build_knowledge_followup_context_prompt(question, history)`. | Current user question plus formatted conversation history; history is context only, not evidence. | Strict JSON object with `question`; provider/parse failures fall back loudly to the original question with `_knowledge_query_context_fallback`. | 0-1× per `mode=knowledge` run |
+| **knowledge_contextualize** (ingestion) | Generates the situating prefix for each chunk of a document being indexed (`retrieval_context`). Enriches the *index* text only; the prefix never reaches an answer or a citation. | `build_chunk_context_prompt(...)`. | Document head, the target chunk span, and bounded neighbouring text; every batch window contains the full source span of the chunks it describes. | Strict JSON via `complete_structured` (`complete_with_metadata` otherwise); a validated batch checkpoints independently. A dependency failure pauses the job (`paused_dependency`), malformed output pauses it (`paused_validation`) — never a silent raw build. | `ceil(chunks / effective batch size)` **per document at ingestion** (≤25 chunks per call, ≤3 batches concurrent); 0 when `INQTRIX_KNOWLEDGE_CONTEXTUALIZE=off`, the default |
+| **knowledge_contextualize** (per request) | Rewrites a Knowledge Ask follow-up into a standalone retrieval query. Same node id and tier as the ingestion call above, different call site. | `build_knowledge_followup_context_prompt(question, history)`. | Current user question plus formatted conversation history; history is context only, not evidence. | Strict JSON object with `question`; provider/parse failures fall back loudly to the original question with `_knowledge_query_context_fallback`. | 0-1× per `mode=knowledge` run |
 | **knowledge_decompose** | Splits a deep-profile knowledge retrieval query into independent sub-queries. | `build_knowledge_decompose_prompt(question)`. | Standalone retrieval query. | Strict JSON array; parse failure degrades to no split with a visible marker. | 0-1× per `mode=knowledge` run |
+| **knowledge_rerank** | Listwise reordering of retrieved candidates when no rerank API is configured. Produces an order, not a calibrated relevance score. | `build_knowledge_rerank_prompt(query, documents)`. | Retrieval query plus at most 20 candidate texts, each truncated to 800 characters; the cap is enforced with a visible log line. | Strict JSON object with `ranking` (1-based), parsed by `_parse_ranking`. Unparseable JSON, out-of-range, duplicate, or incomplete indices raise `RerankerError` — a broken stage fails loudly, exactly like a broken rerank API. | 0-1× per retrieval call, only when `INQTRIX_RERANKER_PROVIDER=llm` |
 | **knowledge_gate** | Judges whether retrieved `[K#]` evidence is sufficient and may propose a rewritten query. | `build_knowledge_gate_prompt(...)`. | Standalone retrieval query and rendered evidence block. | Strict JSON object; parse failure fails open with `_knowledge_gate_fallback`. | 0-N× per `mode=knowledge` run |
 | **knowledge_answer** | Synthesises the cited Knowledge answer. | `build_knowledge_answer_prompt(...)`. | Original user question, optional conversation history, and current `[K#]` evidence excerpts. | Markdown answer, optionally preceded by a quote block verified by `grounding.py`. | 0-1× per `mode=knowledge` run |
 
@@ -58,8 +67,9 @@ A node is mapped to a tier by the hard-coded
 | **classify** | **fast** | none | Classification + decomposition; small models are reliable here; 1× per run. |
 | **claim_extract** | **fast** | none | Highest volume (1× per hit) — the biggest cost lever; strict-schema extraction where reasoning hurts. |
 | **direct_chat** | **mid** (request-selectable) | none | Single conversational call; mid balances quality and latency. Selectable per request via `model_tier`. |
-| **knowledge_contextualize** | **fast** | none | Cheap query rewrite for follow-up resolution; the answer still relies on retrieved evidence. |
+| **knowledge_contextualize** | **fast** | none | Two call sites share this node: the per-document ingestion prefix (highest knowledge volume — one call per chunk batch, so the tier choice dominates indexing cost) and the cheap follow-up query rewrite. Neither produces evidence; the answer still relies on retrieved `source_text`. |
 | **knowledge_decompose** | **fast** | none | Small structured rewrite task; deep-profile only. |
+| **knowledge_rerank** | **fast** | none | Listwise ordering over a capped candidate list. Roughly an order of magnitude costlier and slower than a cross-encoder rerank API, which is why it is the fallback rather than the recommended path. |
 | **knowledge_gate** | **fast** | none | Repeated structured sufficiency checks; cost-sensitive and prompt-scaffolded. |
 | **knowledge_answer** | **high** | reasoning **on** | Final cited synthesis over retrieved evidence, largest quality lever in Knowledge mode. |
 | **agent_intake** / **agent_sufficiency** / **agent_critic** | **fast** | none | Workspace-agent assembly-line checks: assignment profile, coverage verdict, memo critique against precomputed facts. |
@@ -94,7 +104,7 @@ fallbacks).
 
 **Layer 1 — one model for everything** (unchanged historical default):
 
-```
+```dotenv
 REASONING_MODEL=claude-sonnet-4-6
 ```
 
@@ -131,7 +141,7 @@ AnthropicLLM(
 
 **Server mode (env):**
 
-```
+```dotenv
 TIER_HIGH_MODEL=claude-opus-4-7
 TIER_HIGH_EFFORT=medium
 TIER_MID_MODEL=claude-sonnet-4-6
@@ -142,7 +152,7 @@ ANSWER_MODEL=claude-opus-4-7
 
 ### Resolution order
 
-```
+```text
 model(node):  <node>_model  ->  tier_<requested_tier OR default_tier>_model  ->  reasoning_model
 effort(node): tier_<requested_tier OR default_tier>_effort  ->  "" (inherit provider default)
 ```
@@ -252,3 +262,12 @@ responses, and the streaming path emits a metadata chunk with the same
 `inqtrix.model_resolution` before answer tokens. The OpenAI-compatible top-level
 `model` field remains `research-agent`; consumers that need the real provider
 model should read the additive `inqtrix` block.
+
+---
+
+## Related docs
+
+- [Knowledge retrieval](knowledge-retrieval.md#which-engine-owns-which-stage) — every knowledge stage mapped to its engine class, including the stages that are not LLM calls.
+- [Nodes](nodes.md) — what each research-graph node does around its LLM call.
+- [Model cards](../configuration/model-cards.md) — context windows and pricing the tier router resolves against.
+- [Settings and environment](../configuration/settings-and-env.md) — every `TIER_*`, `*_MODEL`, and effort variable under its exact name.

@@ -11,7 +11,7 @@ gate, vocabulary-bridge rewrite, query decomposition, report-form
 synthesis) are bundled behind it. The architecture and data flow of those stages are in [Knowledge retrieval](../architecture/knowledge-retrieval.md). A request without a profile behaves
 exactly like the pre-profile pipeline (`standard`).
 
-```
+```text
 Question
   │  (profile "auto": zero-cost heuristic picks schnell/standard/gruendlich)
   ▼
@@ -32,27 +32,81 @@ Resolve plan  =  requested profile ∩ operator ceiling (env)
 
 ## The profile matrix
 
-| Stage | `schnell` | `standard` (default) | `gruendlich` | `tief` |
-|---|---|---|---|---|
-| Rerank | off | on (if configured) | on, candidate depth ×1.5 | on, ×2.0 |
-| Gate rewrite rounds | 0 (no gate call) | 1 | up to 2 | up to `INQTRIX_KNOWLEDGE_GATE_MAX_ROUNDS` |
-| Vocabulary bridge | – | off | ON | ON |
-| Query decomposition | – | – | – | ON (one fast-tier call) |
-| Answer form | compact | compact | compact | sectioned report |
-| Grounding (quote check) | ON | ON | ON | ON |
-| Typical LLM calls | 1 | 2 | 2–4 | 4–7 |
+Resolved values assume the shipped defaults (`INQTRIX_RERANK_CANDIDATE_DEPTH`
+40, `INQTRIX_KNOWLEDGE_TOP_K` 8, `INQTRIX_KNOWLEDGE_GATE_MAX_ROUNDS` 3).
+
+| Stage | `schnell` | `standard` (API default) | `gruendlich` | `tief` (UI default) | Effect of enabling it |
+|---|---|---|---|---|---|
+| Rerank | off | on (if configured) | on, depth ×1.5 (**60**) | on, depth ×2.0 (**80**) | Reorders a deeper candidate pool with a model that sees question and passage together, so it can tell "about this topic" from "answers this question". Buys top-1 precision on paraphrase queries; costs one rerank roundtrip that grows with depth. Hard ceiling 200. Inert when `INQTRIX_RERANKER_PROVIDER=none`. |
+| Gate rewrite rounds | 0 (no gate call) | 1 | up to 2 | up to `INQTRIX_KNOWLEDGE_GATE_MAX_ROUNDS` (**3**) | Each round is one fast-tier judgement plus, when it proposes a rewrite, one more retrieval pass. Buys a second chance when the first query missed the corpus vocabulary; costs latency even when the first pass was already sufficient. Exits early when a rewrite returns no new chunks. |
+| Vocabulary bridge | – | off | ON | ON | Switches the rewrite prompt to translate everyday phrasing into the documents' technical/official vocabulary. **No extra call** — it is a variant of the gate rewrite that already runs, so it is free wherever the gate runs at all. |
+| Query decomposition | – | – | – | ON (one fast-tier call) | Splits a multi-aspect question into 2–4 self-contained sub-queries, each retrieved separately and merged round-robin. Buys coverage on "X, Y and Z?" questions where one strong aspect would otherwise crowd the others out of the top-k; costs one call plus one retrieval per sub-query. |
+| Evidence width (`final_k_factor`) | ×1.0 | ×1.0 | ×1.0 | **×2.0** | `tief` is the only profile that widens the evidence reaching the answer instead of collapsing its decompose/gate fan-out back to `top_k`. Capped by `EVIDENCE_K_MAX` (40). |
+| Answer form | compact | compact | compact | sectioned report | `tief` pins the skeleton `## Kurzfazit` / `## Kernaussagen` / `## Detailanalyse` / `## Quellenlage`; every other profile lets the model structure longer answers freely. |
+| Grounding (quote check) | ON | ON | ON | ON | Never a profile switch — see below. |
+| Typical LLM calls | 1 | 2 | 2–4 | 4–7 | Exactly one of them is high-tier (the answer) in every profile; the rest are fast-tier. |
 
 Grounding stays on everywhere: verification is deterministic (no extra LLM
-call) and fail-closed. A malformed quote block or one unverifiable labelled
-quote terminates the answer with a typed, visible cause; it never becomes a
+call) and fail-closed, so it costs nothing per question and only the operator
+can remove it. A malformed quote block or one unverifiable labelled quote
+terminates the answer with a typed, visible cause; it never becomes a
 plain-answer fallback. `schnell` saves the gate call, the rerank roundtrip,
 and any second retrieval pass — that is the entire latency win.
 
-`auto` routes per question with zero-cost heuristics (strong
-enumeration markers, multiple question marks, length) and NEVER picks
-`tief`; the chosen profile and the reason travel in the
+`auto` routes per question with zero-cost heuristics and NEVER picks `tief`.
+The rules are pure length and regex arithmetic evaluated without a provider
+call, and the first match wins:
+
+| Order | Test | Result | Reason string |
+|---|---|---|---|
+| 1 | A strong enumeration marker: `sowie`, `jeweils`, `bzw`, `ausserdem`/`außerdem`, `sowohl`, `vergleich…`, `unterschied…` | `gruendlich` | `strong_enumeration_marker` |
+| 2 | Two or more `?` | `gruendlich` | `multiple_questions` |
+| 3 | More than 240 characters | `gruendlich` | `long_question` |
+| 4 | Two or more standalone `und` | `gruendlich` | `repeated_und` |
+| 5 | Under 80 characters **and** at most one `?` | `schnell` | `short_simple` |
+| 6 | Anything else | `standard` | `default` |
+
+A plain `und` is deliberately not a marker on its own: ordinary German
+compounds ("Sicherheits- und Risikomanagement") would otherwise route nearly
+every question to `gruendlich`, which is why repeated `und` is counted
+separately in rule 4. Because the widening rules run first, a short question
+carrying two question marks resolves to `gruendlich`, not `schnell`.
+
+The chosen profile and the reason string travel in the
 `inqtrix.knowledge.profile.resolved` event as the telemetry on which a
 later LLM-escalation decision will be grounded.
+
+## Choosing a profile
+
+| Situation | Profile | Why |
+|---|---|---|
+| A lookup phrased in the corpus's own wording ("Was steht in Artikel 17?") | `schnell` | Retrieval alone is usually already right and the gate would only confirm it. One LLM call. |
+| Everyday phrasing against a corpus that uses the same everyday vocabulary | `standard` | One gate round catches the case where the first retrieval missed, without paying for a bridge or a fan-out. |
+| Everyday phrasing against legal, regulatory, or technical documents | `gruendlich` | The vocabulary bridge targets exactly this failure: the user writes "wie lange behalten", the document says "Aufbewahrungsfrist". |
+| One question covering several aspects, or a structured result is wanted | `tief` | Decomposition stops one aspect from crowding out the rest, and it is the only profile that both doubles the evidence width and structures the answer. |
+| Mixed traffic where cost matters | `auto` | Picks between `schnell` / `standard` / `gruendlich` from question shape alone — no LLM call and no added latency. Never picks `tief`. |
+
+**Two defaults, deliberately.** A request that names no profile runs
+`standard`, and `/v1/capabilities` publishes `default_profile: "standard"`
+accordingly. The Research Desk profile picker pre-selects **`tief`** whenever
+the deployment offers it, so an interactive user starts at the deepest profile
+while an API caller starts at the cheapest. Operators sizing token budgets
+should assume `tief` for browser traffic and `standard` for integrations.
+
+**Reading the cost.** Only ingestion scales with corpus size. Every
+per-question stage is bounded: `top_k` per (sub-)query, `final_k` evidence
+entries (ceiling `EVIDENCE_K_MAX` = 40), a rerank pool bounded by
+`INQTRIX_RERANK_CANDIDATE_DEPTH` × the profile factor (ceiling 200), and gate
+rounds bounded by `INQTRIX_KNOWLEDGE_GATE_MAX_ROUNDS`. The worst case a single
+request can reach is `tief` at the operator cap: one decompose call, three gate
+calls, one answer call, and at most one answer regeneration — five fast-tier
+calls and one high-tier call. Which engine class runs each stage, including the
+stages that are not model calls at all, is in
+[Knowledge retrieval](../architecture/knowledge-retrieval.md#which-engine-owns-which-stage).
+
+Per-stage token attribution is **not** available in the run result: `usage` is
+a flat sum across contextualization, gate, decomposition, and answer, so a
+per-stage breakdown has to come from traces rather than from the response.
 
 ## The two-level rule
 
@@ -133,9 +187,9 @@ at `final_k` directly (so `top_k` only governs per-sub-query width).
   ranking through the deployment's own LLM for installations without
   a rerank API contract. Roughly an order of magnitude costlier and
   slower than a cross-encoder; candidates are hard-capped at 20 per
-  query (visibly logged). A fallback, not a Cohere replacement. New
-  routing nodes: `knowledge_rerank`, `knowledge_decompose` (both
-  fast tier).
+  query (visibly logged). A fallback, not a Cohere replacement. It
+  resolves through the `knowledge_rerank` routing node, which sits on
+  the fast tier alongside `knowledge_decompose`.
 
 ## Evaluation
 
@@ -159,3 +213,10 @@ Baselines are keyed `(model, tier, profile)`; tiers without
 `no_evidence` queries report `abstention_rate: null` and skip that
 floor. The `dora_holdout` tier is never tuned against and runs only as
 a held-out overfitting-regression gate.
+
+## Related docs
+
+- [Knowledge retrieval](../architecture/knowledge-retrieval.md) — what each stage does, why the pipeline has this shape, and which class of engine runs each step.
+- [Knowledge engine](../knowledge/overview.md) — operating the engine: collections, ingestion, the Wissen workspace, and the evaluation tiers.
+- [Settings and environment](settings-and-env.md) — every `INQTRIX_KNOWLEDGE_*` / `INQTRIX_EMBEDDING_*` / `INQTRIX_RERANKER_*` variable that forms the operator ceiling.
+- [LLM calls, model tiers, and reasoning effort](../architecture/llm-calls.md) — which tier resolves each `knowledge_*` call site.

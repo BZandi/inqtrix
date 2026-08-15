@@ -133,7 +133,8 @@ In the Research Desk ([First research run](first-research-run.md)), the Datenban
 
 ## Next steps
 
-- [Retrieval profiles](../configuration/knowledge-profiles.md) — what each profile does and how operator ceilings clamp it.
+- [Knowledge retrieval](../architecture/knowledge-retrieval.md#the-retrieval-model-in-one-pass) — what actually happened between your question and the cited answer: why two searches run, what fuses them, and which stage runs on which kind of engine.
+- [Retrieval profiles](../configuration/knowledge-profiles.md) — what each profile does, when to pick which, and how operator ceilings clamp it.
 - [Full stack](full-stack.md) — Qdrant persistence, durable runs, workers.
 - [Run events](../observability/run-events.md) — the complete SSE event contract.
 

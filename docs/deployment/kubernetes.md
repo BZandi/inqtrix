@@ -679,8 +679,92 @@ reference. The knobs you will reach for most:
 | `api.replicaCount`, `api.autoscaling.*` | `1`, off | Scale the API (see scaling note). |
 | `persistence.enabled`, `persistence.size` | `false`, `5Gi` | PVC for the local object store. |
 | `postgres.enabled`, `qdrant.enabled`, `valkey.enabled`, `s3.enabled` | `false` | Bundle a demo backing service in-cluster (`s3.enabled` = MinIO object store). Each enabled service requires an explicit credential; no `change-me` fallback is rendered. qdrant/valkey/s3 are OpenShift-capable; postgres is vanilla-k8s only. |
+| `valkey.engine` | `valkey` | Engine of the bundled broker (`valkey` or `redis`); selects the server/CLI binaries. A foreign engine must bring its own pinned `valkey.image`. See [Queue broker](#queue-broker). |
 | `postgres.enabled` (side effect) | `false` | Also **derives** `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY`: `true` renders `bundled_legacy` (the image's superuser login), `false` renders `restricted` (your own unprivileged login). With an external database, `postgres.auth.*` is ignored entirely. See [Bundled versus external databases](database-migrations.md#bundled-versus-external-databases). |
 | `postgres.auth.username`, `postgres.auth.database` | `inqtrix` | Bundled demo database only. The username becomes the image's `POSTGRES_USER`, which PostgreSQL creates as a superuser owning every object; the chart builds `INQTRIX_DATABASE_URL` from it. No Inqtrix role name is fixed — external deployments choose their own. |
+
+## Queue broker
+
+Durable run dispatch (`config.INQTRIX_QUEUE_BACKEND=valkey` plus
+`worker.enabled=true`) needs a broker that speaks the Redis protocol. Inqtrix
+uses Streams, `EVAL` and key expiry only, so **any RESP server from Redis 6.2
+onwards satisfies the contract** (`XAUTOCLAIM` is the newest command used). Two
+options:
+
+- **Bundled** (`--set valkey.enabled=true`): a single-replica Valkey StatefulSet
+  that auto-wires `INQTRIX_VALKEY_URL`. Works on vanilla Kubernetes **and**
+  OpenShift. Demo/dev only — one replica, no failover. `valkey.password` is
+  required (no `change-me` fallback) and must use only URL-unreserved characters
+  `[A-Za-z0-9._~-]`, because it is embedded verbatim into the derived URL.
+- **External** (managed or self-operated): set
+  `config.INQTRIX_QUEUE_BACKEND=valkey` and put your own `INQTRIX_VALKEY_URL`
+  in the Secret; leave `valkey.enabled=false`. An explicit
+  `secret.data.INQTRIX_VALKEY_URL` always wins over the derived bundled URL, so
+  this is also the route for a password outside the character set above (you own
+  the URL-encoding).
+
+For production prefer external. Managed Valkey and managed Redis both work
+(AWS ElastiCache, Azure Cache, Google Memorystore), as does any self-operated
+server meeting the version floor.
+
+The broker also backs the guest-link rate limit
+(`INQTRIX_EDITOR_GUEST_LINKS_ENABLED`). The optional Langfuse trace backend runs
+its **own** separate broker and is deliberately not coupled to this one.
+
+### Choosing an engine
+
+The bundled default is Valkey, the BSD-licensed Linux Foundation fork of Redis.
+Inqtrix is indifferent to the choice — every engine below serves the same command
+set. Where it matters is licensing:
+
+| Image | License | Notes |
+|---|---|---|
+| `valkey/valkey:9.x` | BSD-3-Clause | Chart default, digest-pinned and updated here. |
+| `redis:8-alpine` | AGPLv3 **or** RSALv2 **or** SSPLv1 | Current Redis line; elect AGPLv3 for an OSI-approved option. |
+| `redis:7.2-alpine` | BSD-3-Clause | Feature-frozen since March 2024, still receiving security patches (7.2.15, July 2026). The end of that window is set by Redis Ltd., not by you. |
+| `redis:7-alpine` | RSALv2 / SSPLv1 | **Avoid** — the tag resolves to 7.4.x, the only line with no open-source option. |
+
+### Running the bundled service on Redis
+
+Set the engine **and** an image of that engine, always together:
+
+```bash
+helm upgrade --install inqtrix deploy/helm/inqtrix -n inqtrix \
+    --set valkey.enabled=true \
+    --set valkey.engine=redis \
+    --set valkey.image=docker.io/library/redis:8-alpine@sha256:<DIGEST> \
+    --set valkey.password=<URL-SAFE-PASSWORD> \
+    --set worker.enabled=true
+```
+
+`valkey.engine` accepts `valkey` (default) and `redis`; it selects
+`valkey-server`/`valkey-cli` or `redis-server`/`redis-cli`. Every server flag the
+chart passes (`--requirepass`, `--appendonly`, `--appendfsync`, `--dir`) and the
+`REDISCLI_AUTH` variable used by the probes are identical on both. Any other
+engine value fails the render.
+
+The chart does not cross-check the image against the engine, because the two
+mistakes are not symmetric. A Redis image carries no `valkey-*` binaries, so
+changing only the image and leaving the default engine fails immediately and
+legibly at container start (`executable file "valkey-server" not found in
+$PATH`). The reverse is harmless: the Valkey image ships `redis-server` and
+`redis-cli` compatibility symlinks, so `engine=redis` against it just mislabels
+a running Valkey.
+
+**Only `valkey/valkey` is digest-pinned and updated by this project.** Selecting
+another engine makes the image yours to pin and to patch.
+
+> **Switching engines discards the queue.** Valkey and Redis write incompatible
+> RDB/AOF files, so a swap needs a fresh volume. Drain first — let running runs
+> reach a terminal state, then delete the StatefulSet's PVC before the upgrade.
+> Nothing durable is lost, because the stream carries only dispatch messages and
+> the Postgres run row stays the source of truth, but in-flight messages are, and
+> their runs would only come back through the worker reconciler.
+
+On Docker Compose the same choice is made with `INQTRIX_BROKER_ENGINE` and
+`INQTRIX_BROKER_IMAGE` in `deploy/.env.stack` (both also apply to the Langfuse
+broker); the bundled `workers` profile still requires `INQTRIX_VALKEY_URL` to
+target `redis://valkey:6379`.
 
 ## Object store
 
@@ -788,7 +872,8 @@ the durable backends — all of which Inqtrix already supports:
 - `config.INQTRIX_STORAGE_BACKEND=postgres` with `INQTRIX_DATABASE_URL` — the run
   state lives in the database, not in one pod's memory.
 - `config.INQTRIX_QUEUE_BACKEND=valkey` + `INQTRIX_VALKEY_URL` and
-  `worker.enabled=true` — runs are dispatched to worker pods.
+  `worker.enabled=true` — runs are dispatched to worker pods. Bundled or
+  external, and either engine: see [Queue broker](#queue-broker).
 - `config.INQTRIX_OBJECT_STORE_BACKEND=s3` with the S3 credentials, or the bundled
   `s3.enabled=true` (MinIO) — a local PVC is `ReadWriteOnce` and is **not** shared
   across nodes, so multi-pod or `worker.enabled` setups need shared object storage.

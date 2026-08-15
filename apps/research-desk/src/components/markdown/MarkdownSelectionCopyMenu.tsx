@@ -10,6 +10,7 @@ import { createPortal } from 'react-dom'
 import { Check, Code2, Copy } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { AI_PRODUCER } from '@/lib/aiDisclosure'
 import { cn } from '@/lib/utils'
 import { markdownForVisibleSelection } from './selectionCopy'
 
@@ -23,9 +24,16 @@ type CopiedMode = 'markdown' | 'plain' | null
 
 type MarkdownSelectionCopyMenuProps = ComponentPropsWithoutRef<'div'> & {
   markdown: string
+  /** Mark the wrapped body as model-generated. Emits `data-ai-generated` /
+   * `data-ai-producer` so a script, an extension, or an archiving tool can
+   * identify generated text without parsing prose. Passed explicitly rather
+   * than hard-coded here, because this component also wraps bodies that are
+   * not model output. */
+  aiGenerated?: boolean
 }
 
 export function MarkdownSelectionCopyMenu({
+  aiGenerated,
   children,
   className,
   markdown,
@@ -112,7 +120,13 @@ export function MarkdownSelectionCopyMenu({
   }
 
   return (
-    <div {...props} className={className} ref={rootRef}>
+    <div
+      {...props}
+      className={className}
+      data-ai-generated={aiGenerated ? 'true' : undefined}
+      data-ai-producer={aiGenerated ? AI_PRODUCER : undefined}
+      ref={rootRef}
+    >
       {children}
       {menu && createPortal(
         <div

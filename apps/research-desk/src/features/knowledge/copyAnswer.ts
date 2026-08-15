@@ -1,4 +1,5 @@
 import type { KnowledgeAnswerRecord, KnowledgeReferenceRecord } from '@/features/project/types'
+import { withAiDisclosure } from '@/lib/aiDisclosure'
 import { collapseWhitespace } from './citations'
 
 /**
@@ -25,6 +26,9 @@ export type AnswerCopyLabels = {
   pageLabel: string
   /** Marker appended when a citation's answer span was verbatim-verified, e.g. "belegt". */
   verifiedLabel: string
+  /** AI-generation disclosure appended to the copied answer, e.g. "Dieser Text
+   * wurde von einem KI-System erzeugt (Inqtrix)." */
+  aiDisclosure: string
 }
 
 /** The citation URL only when it is a real web link; internal document refs
@@ -70,6 +74,10 @@ function referenceHeadline(
  * line maps 1:1 to an inline marker — the reader can paste the answer elsewhere
  * and still resolve every citation. A refusal / no-reference answer copies the
  * bare answer text in every mode (no empty source heading).
+ *
+ * Every mode ends with the AI-generation disclosure, including the refusal
+ * path: the text leaves the app on the clipboard and carries no other context
+ * once it is pasted.
  */
 export function formatAnswerForCopy(
   answer: KnowledgeAnswerRecord,
@@ -77,7 +85,9 @@ export function formatAnswerForCopy(
   labels: AnswerCopyLabels,
 ): string {
   const body = answer.answerMarkdown.trim()
-  if (mode === 'answer' || answer.references.length === 0) return body
+  if (mode === 'answer' || answer.references.length === 0) {
+    return withAiDisclosure(body, labels.aiDisclosure)
+  }
 
   const verifiedByLabel = new Map(answer.quotes.map((quote) => [quote.label, quote.verified]))
   const heading = mode === 'evidence' ? labels.evidenceHeading : labels.sourcesHeading
@@ -93,5 +103,8 @@ export function formatAnswerForCopy(
   })
 
   const separator = mode === 'evidence' ? '\n\n' : '\n'
-  return `${body}\n\n## ${heading}\n${lines.join(separator)}`
+  return withAiDisclosure(
+    `${body}\n\n## ${heading}\n${lines.join(separator)}`,
+    labels.aiDisclosure,
+  )
 }

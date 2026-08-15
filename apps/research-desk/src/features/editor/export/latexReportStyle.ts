@@ -181,8 +181,16 @@ export const latexReportNumbering: INumberingOptions = {
  *
  * Args:
  *   children: the already-built body content (title block + walked markdown).
+ *   footerNotice: optional line placed above the page number on every page.
+ *     Used for the AI-generation disclosure on exports of model-generated
+ *     content. Repeating it per page keeps the marker attached when a single
+ *     page is printed or lifted out of the document. Omitted for documents
+ *     the user wrote themselves.
  */
-export function latexReportSection(children: ISectionOptions['children']): ISectionOptions {
+export function latexReportSection(
+  children: ISectionOptions['children'],
+  footerNotice?: string,
+): ISectionOptions {
   return {
     properties: {
       page: {
@@ -201,6 +209,18 @@ export function latexReportSection(children: ISectionOptions['children']): ISect
     footers: {
       default: new Footer({
         children: [
+          ...(footerNotice?.trim()
+            ? [new Paragraph({
+              alignment: AlignmentType.CENTER,
+              indent: { firstLine: 0 },
+              children: [new TextRun({
+                font: SERIF_FONT,
+                size: 14,
+                color: '666666',
+                text: footerNotice.trim(),
+              })],
+            })]
+            : []),
           new Paragraph({
             alignment: AlignmentType.CENTER,
             indent: { firstLine: 0 },

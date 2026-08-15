@@ -12,7 +12,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from inqtrix.core.constants import MODEL_NAME
-from inqtrix.legal import legal_metadata
+from inqtrix.legal import ai_disclosure_metadata, legal_metadata
 from inqtrix.model_cards import build_models_catalog
 from inqtrix.model_routing import (
     describe_chat_model_options,
@@ -193,6 +193,7 @@ class HealthService:
             "auth_required": self._auth_provider.mode != "none",
             "auth_mode": self._auth_provider.mode,
             "legal": legal_metadata(),
+            "ai_disclosure": ai_disclosure_metadata(),
         }
         return status_code, payload
 

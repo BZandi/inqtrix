@@ -73,6 +73,17 @@ export type InqtrixHealth = {
     source_url: string
     warranty_notice?: string
   }
+  /** AI-transparency metadata; absent on older servers. `marker` and
+   * `producer` are locale-neutral machine tokens and are the values the
+   * client writes into `data-ai-*` attributes and exported document
+   * properties. The two disclosure sentences are English-only: user-facing
+   * surfaces render the localized `t.aiTransparency.*` wording instead. */
+  ai_disclosure?: {
+    marker: string
+    producer: string
+    system_disclosure: string
+    content_disclosure: string
+  }
   llm: {
     provider: string
     status: 'ready' | 'unavailable'

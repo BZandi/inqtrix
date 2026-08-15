@@ -80,6 +80,7 @@ import {
   type AgentExecutionSnapshot,
   type AgentSourcePolicy,
 } from './executionPolicy'
+import { ComposerDisclosureHint } from '@/features/composer/ComposerDisclosureHint'
 
 export type AgentCollectionOption = { id: string; title: string }
 
@@ -1126,6 +1127,7 @@ export function AgentComposer({
           </div>
         </div>
       </div>
+      <ComposerDisclosureHint />
     </form>
   )
 }

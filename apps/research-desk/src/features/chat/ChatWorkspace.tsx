@@ -112,6 +112,7 @@ import {
 } from '@/features/researchRuns/modelLabels'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { formatMessageTimestamp } from '@/lib/time'
+import { withAiDisclosure } from '@/lib/aiDisclosure'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 import {
@@ -141,6 +142,7 @@ import {
 import { useScrollRestoration } from '@/features/scroll/useScrollRestoration'
 import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
 import type { ChatRetryMode, ChatRetryOptions } from './retry'
+import { ComposerDisclosureHint } from '@/features/composer/ComposerDisclosureHint'
 
 export function shouldClearAcceptedChatDraft(
   accepted: boolean,
@@ -1063,7 +1065,7 @@ export default function ChatWorkspace({
               </div>
             </ScrollArea>
 
-          <div className="z-10 shrink-0 px-3 pb-4 pt-2 md:px-6">
+          <div className="z-10 shrink-0 px-3 pb-2 pt-2 md:px-6">
             <form
               className="mx-auto max-w-5xl"
               onSubmit={handleSendMessage}
@@ -1473,6 +1475,7 @@ export default function ChatWorkspace({
                   )}
                 </div>
               )}
+              <ComposerDisclosureHint />
             </form>
           </div>
         </section>
@@ -1786,7 +1789,11 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
   async function copyMessage() {
     if (!canCopy) return
     try {
-      await navigator.clipboard.writeText(message.contentMarkdown)
+      // Assistant answers carry the AI disclosure; the user's own message
+      // must round-trip byte-exact, and this handler serves both roles.
+      await navigator.clipboard.writeText(isUser
+        ? message.contentMarkdown
+        : withAiDisclosure(message.contentMarkdown, t.aiTransparency.exportNotice))
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1200)
     } catch (error) {
@@ -1821,6 +1828,7 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
             )}
             {message.contentMarkdown ? (
               <MarkdownSelectionCopyMenu
+                aiGenerated
                 className={cn(
                   'chat-markdown max-w-4xl text-sm leading-snug text-foreground',
                   isStreaming && !reduceMotion && 'animate-in fade-in-0 duration-200',

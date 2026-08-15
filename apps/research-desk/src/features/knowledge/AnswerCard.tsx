@@ -80,6 +80,7 @@ export function AnswerCard({
   }, [])
 
   const copyLabels = {
+    aiDisclosure: t.aiTransparency.exportNotice,
     evidenceHeading: t.knowledge.copyEvidenceHeading,
     pageLabel: t.knowledge.citationPage,
     sectionLabel: t.knowledge.viewerSection,
@@ -235,6 +236,7 @@ export function AnswerCard({
              (mouseleave/blur) schedules its dismissal. mouseleave fires ONCE on
              real exit (not per child), so hovering prose never flickers it. */
           <MarkdownSelectionCopyMenu
+            aiGenerated
             className="chat-markdown text-sm leading-snug text-foreground"
             markdown={answer.answerMarkdown}
             onBlur={scheduleHide}

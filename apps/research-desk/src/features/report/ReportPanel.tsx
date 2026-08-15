@@ -28,9 +28,11 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { withFrontmatter } from '@/features/project/markdown'
 import type { ResearchRunRecord } from '@/features/project/types'
 import { useRunningDuration } from '@/features/researchRuns/useRunningDuration'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { aiDisclosureFrontmatter, withAiDisclosure } from '@/lib/aiDisclosure'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 import {
@@ -335,7 +337,9 @@ function ReportPreview({
     }
 
     try {
-      await copyTextToClipboard(markdown)
+      // Whole-answer copy carries the disclosure; selections and code/table
+      // copies stay byte-exact (see lib/aiDisclosure).
+      await copyTextToClipboard(withAiDisclosure(markdown, t.aiTransparency.exportNotice))
       setCopyFeedback('copied')
       copyResetRef.current = window.setTimeout(() => {
         setCopyFeedback('idle')
@@ -978,8 +982,13 @@ function ReportExport({
   function handleExportMarkdown() {
     if (!markdown) return
 
+    // The file leaves the app, so it carries both channels: front matter for
+    // machines, a trailing blockquote for whoever opens it.
     downloadMarkdownFile(
-      `${markdown.trimEnd()}\n`,
+      withFrontmatter(
+        aiDisclosureFrontmatter(t.aiTransparency.exportNotice),
+        withAiDisclosure(markdown, t.aiTransparency.exportNotice),
+      ),
       reportMarkdownFileName(run),
     )
   }
@@ -991,7 +1000,9 @@ function ReportExport({
     try {
       // Reuse the editor's markdown->docx export (code-split, browser-only).
       const { exportMarkdownToDocx } = await import('@/features/editor/export/docxExport')
-      await exportMarkdownToDocx(markdown.trimEnd(), run.summary.title)
+      await exportMarkdownToDocx(markdown.trimEnd(), run.summary.title, {
+        notice: t.aiTransparency.exportNotice,
+      })
     } catch (error) {
       setWordFailed(true)
       console.error('Inqtrix report Word export failed.', error)

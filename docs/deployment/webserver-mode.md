@@ -27,7 +27,7 @@ server/routers/*          thin, one module per surface (chat, runs, knowledge, f
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/health` | GET | Liveness, active providers/models, `auth_required` + `auth_mode`, legal block. |
+| `/health` | GET | Liveness, active providers/models, `auth_required` + `auth_mode`, `legal` block, `ai_disclosure` block (see [AI transparency](../reference/ai-transparency.md)). |
 | `/readyz` | GET | Readiness for load balancers: 503 while the database or queue is unreachable (bounded 2s probes), 200 `degraded` when only the vector store is down (knowledge fails per-request, everything else serves). Memory backends answer `ready`/`skipped`. The Helm chart keys its `readinessProbe` on this; liveness stays on `/health`. |
 | `/v1/models` | GET | OpenAI-style model discovery (`research-agent`). |
 | `/v1/capabilities` | GET | Feature manifest — see [the feature-gating contract](#v1capabilities-the-feature-gating-contract). |
@@ -363,4 +363,5 @@ A missing or wrong Bearer header returns 401 with `WWW-Authenticate: Bearer`. `I
 - [Examples README](../../examples/webserver_stacks/README.md) — per-stack env tables and run commands.
 - [React UI](react-ui.md) — the bundled frontend.
 - [Security hardening](security-hardening.md) — TLS, Bearer, CORS, startup banner.
+- [AI transparency](../reference/ai-transparency.md) — the `ai_disclosure` block and how generated output is marked.
 - [Local infrastructure](../development/local-infrastructure.md) — the dev compose stack.

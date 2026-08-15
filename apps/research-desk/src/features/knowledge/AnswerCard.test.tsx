@@ -199,3 +199,34 @@ describe('AnswerCard retrieval degradation', () => {
     }
   })
 })
+
+describe('AnswerCard AI marking', () => {
+  it('marks the generated answer body machine-readably', () => {
+    const markup = renderToStaticMarkup(
+      <LocaleProvider>
+        <TooltipProvider>
+          <AnswerCard
+            answer={{
+              answerMarkdown: 'Belegte Teilantwort.',
+              degradedStages: [],
+              quotes: [],
+              references: [],
+              refusal: false,
+              retrievalDegradations: [],
+            }}
+            collectionCount={1}
+            onOpenReference={vi.fn()}
+          />
+        </TooltipProvider>
+      </LocaleProvider>,
+    )
+
+    expect(markup).toContain('data-ai-generated="true"')
+    expect(markup).toContain('data-ai-producer="Inqtrix"')
+    // Anchor the probe: the marker sits on the body that carries the answer,
+    // not on some unrelated wrapper that happens to render first.
+    const bodyIndex = markup.indexOf('Belegte Teilantwort.')
+    const markerIndex = markup.lastIndexOf('data-ai-generated="true"', bodyIndex)
+    expect(markerIndex).toBeGreaterThan(-1)
+  })
+})

@@ -31,6 +31,7 @@ import {
   UnderlineType,
   WidthType,
 } from 'docx'
+import type { IPropertiesOptions } from 'docx'
 import type * as md from 'mdast'
 import remarkGfm from 'remark-gfm'
 import remarkParse from 'remark-parse'
@@ -46,8 +47,17 @@ import {
   MONO_FONT,
   ORDERED_LIST_REF,
 } from './latexReportStyle'
+import { aiDisclosureDocumentProperties } from '@/lib/aiDisclosure'
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+
+/** AI-generation disclosure for an export of model-generated content. The
+ * sentence is passed in already localized: this module never imports the
+ * i18n dictionary, so it stays in its own lazily loaded chunk. */
+export type AiExportDisclosure = {
+  notice: string
+  model?: string
+}
 
 /**
  * Strip paired math delimiters so formulas survive as readable LaTeX source
@@ -361,19 +371,57 @@ function downloadDocxBlob(blob: Blob, fileName: string): void {
 }
 
 /**
+ * Build the full `Document` options for an export. Pure and DOM-free so the
+ * metadata can be asserted in a unit test without running `Packer`.
+ *
+ * Args:
+ *   markdown: the document's canonical markdown source.
+ *   title: the document title, used for the title block.
+ *   disclosure: AI-generation disclosure for model-generated content. When
+ *     given, the notice goes into the page footer, into the core properties
+ *     a reader sees in Word and Explorer, and into `docProps/custom.xml` as
+ *     machine-readable custom properties. Omitted for documents the user
+ *     wrote themselves — the editor performs assistive editing on the
+ *     user's own text, so stamping their document as machine-generated
+ *     would be inaccurate.
+ */
+export function docxDocumentOptions(
+  markdown: string,
+  title: string,
+  disclosure?: AiExportDisclosure,
+): IPropertiesOptions {
+  const properties = disclosure
+    ? aiDisclosureDocumentProperties(disclosure.notice, disclosure.model)
+    : undefined
+  return {
+    title: title.trim() || undefined,
+    ...properties?.core,
+    ...(properties ? { customProperties: properties.custom } : {}),
+    styles: latexReportStyles,
+    numbering: latexReportNumbering,
+    sections: [latexReportSection(
+      [...buildTitleBlock(title), ...markdownToDocxBlocks(markdown)],
+      disclosure?.notice,
+    )],
+  }
+}
+
+/**
  * Convert the document markdown to a styled .docx and trigger a browser
  * download. Rejects (never swallows) on failure so the caller can surface it.
  *
  * Args:
  *   markdown: the document's canonical markdown source.
  *   title: the document title, used for the title block and the filename.
+ *   disclosure: see {@link docxDocumentOptions}. The caller supplies the
+ *     already-localized sentence.
  */
-export async function exportMarkdownToDocx(markdown: string, title: string): Promise<void> {
-  const document_ = new Document({
-    styles: latexReportStyles,
-    numbering: latexReportNumbering,
-    sections: [latexReportSection([...buildTitleBlock(title), ...markdownToDocxBlocks(markdown)])],
-  })
+export async function exportMarkdownToDocx(
+  markdown: string,
+  title: string,
+  disclosure?: AiExportDisclosure,
+): Promise<void> {
+  const document_ = new Document(docxDocumentOptions(markdown, title, disclosure))
   const generated = await Packer.toBlob(document_)
   downloadDocxBlob(new Blob([generated], { type: DOCX_MIME }), docxFileName(title, new Date()))
 }

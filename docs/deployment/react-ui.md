@@ -841,6 +841,15 @@ copyright notice, attribution notice, and no-warranty notice; otherwise it
 falls back to the bundled Inqtrix project metadata. The unlock gate also shows
 a static no-warranty usage notice before authentication.
 
+`/health` carries a second, independent `ai_disclosure` block beside `legal`,
+holding the machine tokens `marker` and `producer` plus two English disclosure
+sentences. The app uses the machine tokens (they are the same values it writes
+into `data-ai-*` attributes and exported document properties) but renders its
+own localized wording for anything a user reads, so a German session never
+shows the English server strings. See
+[AI transparency](../reference/ai-transparency.md) for the full set of markers
+and for what is deliberately left unmarked.
+
 The unlock gate is a UX guard, not the security boundary. The backend Bearer
 dependency remains authoritative. Any non-local deployment that uses Bearer
 tokens must run behind HTTPS/TLS, use an explicit CORS origin allow-list, and

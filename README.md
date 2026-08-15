@@ -37,11 +37,11 @@
 <p></p>
 
 > [!WARNING]
->This >repository is an experimental codebase and integration foundation for self-hosted or locally operated deployments. It does **not** provide a complete production-ready security configuration, hardened deployment profile, or any assurance that it is suitable for direct use in internet-facing, multi-user, regulated, or otherwise high-risk environments.
+>This repository is an experimental codebase and integration foundation for self-hosted or locally operated deployments. It does **not** provide a complete production-ready security configuration, hardened deployment profile, or any assurance that it is suitable for direct use in internet-facing, multi-user, regulated, or otherwise high-risk environments.
 >
 >Configurations, defaults, example values, example scripts, and helper paths included here may be useful for development, testing, or integration work, but must not be assumed to be secure, complete, or appropriate for production use without independent review and adaptation.
 >
->Secure configuration, hardening, deployment architecture, access control, secret handling, logging, monitoring, compliance, and day-to-day operation remain the sole responsibility of the operator. The current test suite covers substantial internal logic, interface behavior, and regression scenarios, but is **not** evidence of production readiness or fully validated live >integrations. Perform your own technical and security review before using this >project in integration, staging, test, or production environments. See [Security hardening](docs/deployment/security-hardening.md).
+>Secure configuration, hardening, deployment architecture, access control, secret handling, logging, monitoring, compliance, and day-to-day operation remain the sole responsibility of the operator. The current test suite covers substantial internal logic, interface behavior, and regression scenarios, but is **not** evidence of production readiness or fully validated live integrations. Perform your own technical and security review before using this project in integration, staging, test, or production environments. See [Security hardening](docs/deployment/security-hardening.md).
 
 </details>
 
@@ -863,6 +863,8 @@ Copyright (c) 2026 Babak Zandi. Licensed under the [GNU Affero General Public Li
 Inqtrix - Copyright (c) 2026 Babak Zandi - https://github.com/BZandi/inqtrix
 ```
 
+**AI disclosure.** Parts of this project's code and documentation were drafted with generative AI assistance ([Claude Code](https://www.anthropic.com/), [GitHub Copilot](https://github.com/features/copilot), [ChatGPT](https://openai.com/chatgpt)). This notice states how the project is written; it creates no guarantee, warranty, or additional liability, and the terms of the AGPL-3.0-only license apply unchanged. Inqtrix also marks its own generated output, and operators running it carry transparency duties of their own; see [AI transparency](docs/reference/ai-transparency.md).
+
 Contributions are welcome. Start with [Contributing](docs/development/contributing.md) and [Coding standards](docs/development/coding-standards.md).
 
 <details>
@@ -873,8 +875,6 @@ Contributions are welcome. Start with [Contributing](docs/development/contributi
 Built on open-source Python and React libraries. The complete generated dependency inventory is in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), with a machine-readable view in [`THIRD_PARTY_NOTICES.json`](THIRD_PARTY_NOTICES.json). Major direct runtime libraries include FastAPI (MIT), Uvicorn (BSD-3-Clause), the OpenAI Python SDK (Apache-2.0), LangGraph (MIT), Pydantic (MIT), and cachetools (MIT).
 
 **Third-party services &amp; output notice.** When configured to use external model, search, or API providers, this project may transmit prompts, context, and search queries to those services, governed by their respective terms and privacy policies. Operators are solely responsible for legal, security, and data-protection compliance. Generated outputs are informational only and do not constitute professional advice; independent verification remains the user's responsibility.
-
-**AI disclosure.** Developed with assistance from [Claude Code](https://www.anthropic.com/) (Anthropic), [GitHub Copilot](https://github.com/features/copilot) (GitHub / Microsoft), and [ChatGPT](https://openai.com/chatgpt) (OpenAI). Provided for transparency; use remains subject to the AGPL-3.0-only terms.
 
 </details>
 

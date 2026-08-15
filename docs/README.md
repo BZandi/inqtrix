@@ -43,6 +43,7 @@ Start here when you know what you want to do but not which page owns it. The roo
 | Add a custom provider or strategy | [Writing a custom provider](providers/writing-a-custom-provider.md), [Strategies](architecture/strategies.md) |
 | Plug in a custom auth provider or storage backend | [Custom auth provider](how-to/writing-a-custom-auth-provider.md), [Custom storage backend](how-to/writing-a-custom-storage.md) |
 | Work on tests, replay cassettes, or releases | [Running tests](development/running-tests.md), [Testing strategy](development/testing-strategy.md), [Release process](development/release-process.md) |
+| See how AI-generated content is marked, and what that means for operators | [AI transparency](reference/ai-transparency.md) |
 
 ## Paths by audience
 
@@ -70,7 +71,7 @@ Start here when you know what you want to do but not which page owns it. The roo
 | `scoring-and-stopping/` | Claim quality, aspect coverage, confidence, falsification, source tiering, stop criteria. |
 | `observability/` | Logs, progress events, iteration logs, timeouts, debugging workflows. |
 | `development/` | Contribution rules, docs maintenance, tests, parity tooling, releases. |
-| `reference/` | FAQ, troubleshooting, glossary, worked example, research foundations, changelog. |
+| `reference/` | FAQ, troubleshooting, glossary, worked example, research foundations, AI transparency, changelog. |
 
 ## Related docs
 
@@ -80,4 +81,5 @@ Start here when you know what you want to do but not which page owns it. The roo
 - [Evidence pipeline](architecture/evidence-pipeline.md)
 - [Knowledge retrieval](architecture/knowledge-retrieval.md)
 - [Agent platform](architecture/agent-platform.md)
+- [AI transparency](reference/ai-transparency.md)
 - [Troubleshooting](reference/troubleshooting.md)

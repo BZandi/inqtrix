@@ -1013,7 +1013,7 @@ export function KnowledgeWorkspace({
           <div ref={threadEndRef} />
         </div>
       </ScrollArea>
-      <div className="z-10 shrink-0 px-3 pb-4 pt-2 md:px-6">
+      <div className="z-10 shrink-0 px-3 pb-2 pt-2 md:px-6">
         <div className="mx-auto max-w-5xl">
           <AnimatePresence initial={false} onExitComplete={() => setIsRunDockExiting(false)}>
             {runningItem && (

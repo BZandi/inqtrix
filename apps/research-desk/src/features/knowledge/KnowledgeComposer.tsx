@@ -45,6 +45,7 @@ import { KnowledgeStatusMenu } from './KnowledgeStatusMenu'
 import type { KnowledgeProfileOption } from './profileOptions'
 import { profileDescription, profileDisplayName } from './stepLines'
 import type { KnowledgeCollectionOption } from './types'
+import { ComposerDisclosureHint } from '@/features/composer/ComposerDisclosureHint'
 
 type KnowledgeComposerProps = {
   className?: string
@@ -536,6 +537,7 @@ export function KnowledgeComposer({
       {notice && (
         <p className="mt-1.5 px-1 t-meta text-destructive">{notice}</p>
       )}
+      <ComposerDisclosureHint />
     </form>
   )
 }

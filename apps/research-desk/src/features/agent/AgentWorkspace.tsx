@@ -1036,7 +1036,7 @@ export function AgentWorkspace({
           )}
         </div>
       </ScrollArea>
-      <div className="z-10 shrink-0 px-3 pb-4 pt-2 md:px-6">{composer}</div>
+      <div className="z-10 shrink-0 px-3 pb-2 pt-2 md:px-6">{composer}</div>
     </div>
   )
 

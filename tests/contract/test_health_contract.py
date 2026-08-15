@@ -34,6 +34,7 @@ HEALTH_REQUIRED_KEYS = {
     "auth_required",
     "auth_mode",
     "legal",
+    "ai_disclosure",
 }
 
 
@@ -52,6 +53,8 @@ def test_health_payload_carries_all_contract_keys():
     assert isinstance(payload["node_models"], dict)
     assert isinstance(payload["chat_model_options"], list)
     assert isinstance(payload["models_catalog"], list)
+    assert payload["ai_disclosure"]["marker"] == "ai-generated"
+    assert payload["ai_disclosure"]["producer"] == "Inqtrix"
 
 
 def test_health_reports_auth_required_true_when_api_key_set():

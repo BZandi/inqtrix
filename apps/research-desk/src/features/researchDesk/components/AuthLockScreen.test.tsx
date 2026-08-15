@@ -41,3 +41,17 @@ describe('AuthLockScreen', () => {
     expect(lockMarkup()).toContain('id="auth-lock-title"')
   })
 })
+
+describe('AuthLockScreen AI disclosure', () => {
+  it('states that Inqtrix is an AI system before the quality caveat', () => {
+    const markup = lockMarkup()
+    const disclosure = markup.indexOf('Inqtrix ist ein KI-System.')
+    const caveat = markup.indexOf('KI-Ergebnisse können falsch')
+
+    expect(disclosure).toBeGreaterThan(-1)
+    expect(caveat).toBeGreaterThan(-1)
+    // The disclosure precedes the caveat: what the system IS comes before
+    // how reliable it is.
+    expect(disclosure).toBeLessThan(caveat)
+  })
+})

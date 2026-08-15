@@ -6,7 +6,10 @@ import type {
 } from '@/features/project/types'
 import { formatAnswerForCopy } from './copyAnswer'
 
+const AI_NOTICE = 'Dieser Text wurde von einem KI-System erzeugt (Inqtrix).'
+
 const labels = {
+  aiDisclosure: AI_NOTICE,
   evidenceHeading: 'Belege',
   pageLabel: 'S. {n}',
   sectionLabel: 'Abschnitt {n}',
@@ -56,14 +59,29 @@ function makeAnswer(overrides: Partial<KnowledgeAnswerRecord> = {}): KnowledgeAn
 }
 
 describe('formatAnswerForCopy', () => {
-  it("'answer' mode copies only the answer markdown", () => {
-    expect(formatAnswerForCopy(makeAnswer(), 'answer', labels)).toBe('Antwort [K1] und [K2].')
+  it("'answer' mode copies the answer markdown and no source list", () => {
+    const out = formatAnswerForCopy(makeAnswer(), 'answer', labels)
+    expect(out).toBe(`Antwort [K1] und [K2].\n\n> ${AI_NOTICE}\n`)
+    expect(out).not.toContain('## Quellen')
   })
 
   it('a refusal / reference-less answer copies the bare text in every mode', () => {
     const refusal = makeAnswer({ answerMarkdown: 'Keine belegbare Antwort.', refusal: true, references: [], quotes: [] })
-    expect(formatAnswerForCopy(refusal, 'sources', labels)).toBe('Keine belegbare Antwort.')
-    expect(formatAnswerForCopy(refusal, 'evidence', labels)).toBe('Keine belegbare Antwort.')
+    for (const mode of ['answer', 'sources', 'evidence'] as const) {
+      const out = formatAnswerForCopy(refusal, mode, labels)
+      expect(out).toBe(`Keine belegbare Antwort.\n\n> ${AI_NOTICE}\n`)
+      expect(out).not.toContain('## Quellen')
+      expect(out).not.toContain('## Belege')
+    }
+  })
+
+  it('carries the AI disclosure in every mode, including the refusal path', () => {
+    const answer = makeAnswer()
+    const refusal = makeAnswer({ answerMarkdown: 'Keine belegbare Antwort.', refusal: true, references: [], quotes: [] })
+    for (const mode of ['answer', 'sources', 'evidence'] as const) {
+      expect(formatAnswerForCopy(answer, mode, labels)).toContain(AI_NOTICE)
+      expect(formatAnswerForCopy(refusal, mode, labels)).toContain(AI_NOTICE)
+    }
   })
 
   it("'sources' lists one line per citation, in [K#] order, without excerpts or the belegt marker", () => {
@@ -120,6 +138,7 @@ describe('formatAnswerForCopy', () => {
       labels,
     )
     expect(out).toContain('**[K2] Doc B · https://example.com/report**')
-    expect(out).not.toContain('\n> ')
+    // The trailing AI disclosure is the only blockquote; no excerpt block.
+    expect(out.split('\n').filter((line) => line.startsWith('> '))).toEqual([`> ${AI_NOTICE}`])
   })
 })

@@ -73,6 +73,7 @@ import {
 import { useLocale } from '@/i18n/LocaleProvider'
 import { scheduleIdle } from '@/lib/idle'
 import { formatDuration } from '@/lib/time'
+import { withAiDisclosure } from '@/lib/aiDisclosure'
 import { cn } from '@/lib/utils'
 import { suggestionDiffSegments } from '@/features/editor/suggestionDiff'
 import { AgentActivityLine, AgentPulseTrack } from '../AgentPulseTrack'
@@ -363,7 +364,9 @@ export function DocumentCanvasView({
               className="size-7 text-muted-foreground hover:text-foreground"
               onClick={() => {
                 if (artifact.contentMarkdown !== undefined) {
-                  void navigator.clipboard.writeText(artifact.contentMarkdown)
+                  void navigator.clipboard.writeText(
+                    withAiDisclosure(artifact.contentMarkdown, t.aiTransparency.exportNotice),
+                  )
                 }
               }}
               size="icon"
@@ -435,6 +438,7 @@ export function DocumentCanvasView({
             />
           ) : artifact.contentMarkdown !== undefined ? (
             <MarkdownSelectionCopyMenu
+              aiGenerated
               className="report-markdown w-full min-w-0 max-w-full [overflow-wrap:anywhere]"
               markdown={artifact.contentMarkdown}
               onClickCapture={(event: MouseEvent<HTMLDivElement>) => {
@@ -1898,6 +1902,7 @@ function TaskDetailView({
               {t.agent.canvas.child.result}
             </p>
             <MarkdownSelectionCopyMenu
+              aiGenerated
               className="chat-markdown mt-1 min-w-0 text-sm leading-snug text-foreground/90"
               markdown={resultMarkdown}
             >

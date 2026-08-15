@@ -22,6 +22,7 @@ import { MarkdownSelectionCopyMenu } from '@/components/markdown/MarkdownSelecti
 import { effortLevelLabel } from '@/lib/modelCard'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { formatDuration, formatMessageTimestamp } from '@/lib/time'
+import { withAiDisclosure } from '@/lib/aiDisclosure'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 import type { CanvasViewDescriptor } from '@/features/canvas/types'
@@ -450,10 +451,12 @@ function AgentAnswerBlock({
   }
   const copy = () => {
     if (body === undefined) return
-    void navigator.clipboard.writeText(body).then(() => {
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 1500)
-    })
+    void navigator.clipboard
+      .writeText(withAiDisclosure(body, t.aiTransparency.exportNotice))
+      .then(() => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1500)
+      })
   }
   return (
     <div
@@ -483,6 +486,7 @@ function AgentAnswerBlock({
       </div>
       {body !== undefined ? (
         <MarkdownSelectionCopyMenu
+          aiGenerated
           className="chat-markdown max-w-4xl text-sm leading-snug text-foreground"
           markdown={body}
           onClickCapture={onCitationClick}

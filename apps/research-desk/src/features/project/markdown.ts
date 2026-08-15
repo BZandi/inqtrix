@@ -27,6 +27,7 @@ import type {
 import type { JobStatus } from '@/features/researchDesk/types'
 import { PROJECT_SCHEMA_VERSION } from './types'
 import { normalizeReportReferences } from './reportReferences'
+import { AI_CONTENT_DISCLOSURE, aiDisclosureFrontmatter } from '@/lib/aiDisclosure'
 import { asNonEmptyString, asString } from '@/lib/coerce'
 import {
   chatRuleAutocompleteOrDefault,
@@ -162,6 +163,11 @@ export function serializeResearchRun(
   path = defaultResearchRunPath(run),
 ): ProjectFile {
   const frontmatter = {
+    // AI-generation markers ride in the front matter only. The body is
+    // assigned straight back to `result.markdown` on import, so a body
+    // marker would be absorbed into the answer and duplicated on every
+    // export/import round trip.
+    ...aiDisclosureFrontmatter(AI_CONTENT_DISCLOSURE),
     agent_overrides: run.agentOverrides,
     created_at: run.createdAt,
     duration_seconds: run.durationSeconds ?? null,
@@ -204,6 +210,9 @@ export function serializeChatThread(
   path = defaultChatThreadPath(thread),
 ): ProjectFile {
   const frontmatter = {
+    // See serializeResearchRun: markers stay out of the body so the chat
+    // round-trip keeps every message byte-exact.
+    ...aiDisclosureFrontmatter(AI_CONTENT_DISCLOSURE),
     created_at: thread.createdAt,
     kind: 'inqtrix.chat',
     message_order: thread.messages.map((message) => message.id),

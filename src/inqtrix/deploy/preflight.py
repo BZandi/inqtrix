@@ -364,6 +364,17 @@ def validate_start(config: DeployConfig) -> dict[str, str]:
         raise DeployError(
             "active placeholder values remain for: " + ", ".join(placeholders)
         )
+    # Selects the bundled brokers' server/CLI binaries by interpolation, so an
+    # unknown value would surface as an unresolvable container command mid-`up`
+    # instead of here. Checked unconditionally: it drives the workers broker AND
+    # the separate langfuse one.
+    broker_engine = values.get("INQTRIX_BROKER_ENGINE", "").strip()
+    if broker_engine and broker_engine not in {"valkey", "redis"}:
+        raise DeployError(
+            'INQTRIX_BROKER_ENGINE must be "valkey" or "redis" (got '
+            f"{broker_engine!r}); it selects the bundled broker's "
+            "server and CLI binaries"
+        )
     database_url = values.get("INQTRIX_DATABASE_URL", "").strip()
     if not database_url:
         raise DeployError(

@@ -58,7 +58,7 @@ spec:
                   key: INQTRIX_BUNDLED_VALKEY_PASSWORD
           # $(VALKEY_PASSWORD) is expanded from the env var above by Kubernetes.
           command:
-            - valkey-server
+            - {{ include "inqtrix.brokerBinary" . }}-server
             - --requirepass
             - $(VALKEY_PASSWORD)
             - --appendonly
@@ -72,14 +72,14 @@ spec:
               containerPort: 6379
           readinessProbe:
             exec:
-              command: ["sh", "-c", "REDISCLI_AUTH=\"$VALKEY_PASSWORD\" valkey-cli ping | grep -q PONG"]
+              command: ["sh", "-c", "REDISCLI_AUTH=\"$VALKEY_PASSWORD\" {{ include "inqtrix.brokerBinary" . }}-cli ping | grep -q PONG"]
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
           livenessProbe:
             exec:
-              command: ["sh", "-c", "REDISCLI_AUTH=\"$VALKEY_PASSWORD\" valkey-cli ping | grep -q PONG"]
+              command: ["sh", "-c", "REDISCLI_AUTH=\"$VALKEY_PASSWORD\" {{ include "inqtrix.brokerBinary" . }}-cli ping | grep -q PONG"]
             initialDelaySeconds: 20
             periodSeconds: 20
             timeoutSeconds: 5

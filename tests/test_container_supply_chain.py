@@ -51,6 +51,9 @@ def test_disabled_workflow_snapshots_match_the_documented_checksums() -> None:
     assert "arm64 image was not scanned" in readme
 
 
+_COMPOSE_OVERRIDE = re.compile(r"^\$\{[A-Z0-9_]+:-(?P<default>.+)\}$")
+
+
 def test_production_container_references_are_qualified_and_immutable() -> None:
     """Compose and bundled Helm defaults reject mutable image references."""
     compose = yaml.safe_load(
@@ -62,6 +65,14 @@ def test_production_container_references_are_qualified_and_immutable() -> None:
         image = service.get("image")
         if image is None:
             continue
+        # An operator-overridable image must still SHIP a pinned default, so
+        # the reference is asserted on what the stack runs unattended. The
+        # override itself is an explicit act that carries its own pin, exactly
+        # like `--set valkey.image=` on the Helm side.
+        override = _COMPOSE_OVERRIDE.match(image)
+        if override is not None:
+            image = override.group("default")
+        assert "$" not in image, f"{name} resolves to an uncontrolled reference"
         assert "/" in image, f"{name} uses an unqualified registry path"
         assert "@sha256:" in image, f"{name} uses a mutable image reference"
         assert not re.search(r":(?:latest|stable)(?:@|$)", image)

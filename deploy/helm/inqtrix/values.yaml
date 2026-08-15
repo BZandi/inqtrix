@@ -555,6 +555,17 @@ qdrant:
 
 valkey:
   enabled: false
+  # Engine of the BUNDLED broker: "valkey" (default) or "redis". It selects the
+  # container command and probe binaries (valkey-server/-cli vs redis-server/-cli);
+  # every server flag and the probes' REDISCLI_AUTH are identical on both, and the
+  # app speaks plain RESP either way (Redis 6.2 is the floor -- XAUTOCLAIM). Any
+  # other value fails the render. Set this TOGETHER with the image: a redis image
+  # carries no valkey-* binaries, so changing only the image fails at container
+  # start. Only the valkey image below is digest-pinned and updated by this
+  # project: selecting redis means supplying your own pinned image and tracking
+  # its CVEs. An EXTERNAL broker needs neither value -- set
+  # secret.data.INQTRIX_VALKEY_URL and leave enabled=false.
+  engine: valkey
   image: docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9
   imagePullPolicy: IfNotPresent
   # Embedded verbatim into INQTRIX_VALKEY_URL, so use only URL-unreserved

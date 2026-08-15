@@ -669,6 +669,55 @@ def test_workers_require_visible_valkey_topology_and_secret(
 
 
 @pytest.mark.parametrize(
+    ("engine", "accepted"),
+    (("valkey", True), ("redis", True), ("keydb", False), ("Redis", False)),
+)
+def test_bundled_broker_engine_is_restricted_to_known_binaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    engine: str,
+    accepted: bool,
+) -> None:
+    """The engine selects a binary name, so an unknown value must fail here.
+
+    Without the check it would reach the container as an unresolvable
+    ``<engine>-server`` command and surface as a crash loop mid-``up``.
+    """
+    root, stack_env, secrets_env, _ = _project(tmp_path)
+    stack_env.write_text(
+        stack_env.read_text(encoding="utf-8")
+        + "INQTRIX_QUEUE_BACKEND=valkey\n"
+        + "INQTRIX_VALKEY_URL="
+        + "redis://:${INQTRIX_VALKEY_PASSWORD}@valkey:6379/0\n"
+        + f"INQTRIX_BROKER_ENGINE={engine}\n",
+        encoding="utf-8",
+    )
+    secrets_env.write_text(
+        secrets_env.read_text(encoding="utf-8")
+        + "INQTRIX_VALKEY_PASSWORD=SyntheticValkeyPassword2026\n",
+        encoding="utf-8",
+    )
+    secrets_env.chmod(0o600)
+    trace = _install_fake_docker(tmp_path, monkeypatch)
+    command = [
+        *_arguments(root, stack_env, secrets_env),
+        "--profile",
+        "workers",
+        "up",
+        "--detach",
+    ]
+
+    if accepted:
+        assert main(command) == 0
+        return
+
+    assert main(command) == 2
+    assert "INQTRIX_BROKER_ENGINE" in capsys.readouterr().err
+    assert _trace(trace) == []
+
+
+@pytest.mark.parametrize(
     ("profile", "required_name"),
     (
         ("s3", "INQTRIX_S3_ACCESS_KEY"),

@@ -1112,7 +1112,7 @@ def test_byo_service_account_creates_none_and_requires_explicit_name() -> None:
 
 def test_chart_version_tracks_chart_contract_changes() -> None:
     chart = yaml.safe_load((_CHART / "Chart.yaml").read_text(encoding="utf-8"))
-    assert chart["version"] == "0.1.13"
+    assert chart["version"] == "0.1.14"
 
 
 def test_observability_tracing_env_renders_for_api_and_worker() -> None:
@@ -1381,6 +1381,44 @@ def test_valkey_probes_do_not_put_password_in_process_arguments() -> None:
         assert "REDISCLI_AUTH=" in command
         assert "valkey-cli ping" in command
         assert "valkey-cli -a" not in command
+
+
+@pytest.mark.parametrize("engine", ("valkey", "redis"))
+def test_bundled_broker_binaries_follow_the_selected_engine(
+    engine: str,
+) -> None:
+    """Command and both probes name the binary family of the chosen engine.
+
+    A mismatch would render a container whose command does not exist in its
+    own image, which only surfaces as a crash loop in the cluster.
+    """
+    docs = _docs(
+        _template(
+            _MANAGED_EXTERNAL,
+            "valkey.enabled=true",
+            f"valkey.engine={engine}",
+        )
+    )
+    container = next(
+        document
+        for document in _by_kind(docs, "StatefulSet")
+        if document["metadata"]["name"].endswith("-valkey")
+    )["spec"]["template"]["spec"]["containers"][0]
+
+    assert container["command"][0] == f"{engine}-server"
+    for probe_name in ("readinessProbe", "livenessProbe"):
+        command = " ".join(container[probe_name]["exec"]["command"])
+        assert f"{engine}-cli ping" in command
+        assert "REDISCLI_AUTH=" in command
+
+
+def test_unknown_broker_engine_fails_the_render() -> None:
+    with pytest.raises(RuntimeError, match="valkey.engine"):
+        _template(
+            _MANAGED_EXTERNAL,
+            "valkey.enabled=true",
+            "valkey.engine=keydb",
+        )
 
 
 def test_openshift_omits_uid_on_bundled_qdrant_valkey_minio():

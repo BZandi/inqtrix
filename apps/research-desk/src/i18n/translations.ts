@@ -2213,7 +2213,9 @@ export const translations = {
         postgres: 'Postgres',
         qdrant: 'Qdrant',
         s3: 'S3',
-        valkey: 'Valkey',
+        // The setting value is named `valkey`, but the queue only requires the
+        // Redis protocol and the broker may run either engine.
+        valkey: 'Valkey / Redis',
         volume: 'Volume',
         worker_dispatch: 'Worker-Dispatch',
       },
@@ -4583,7 +4585,9 @@ export const translations = {
         postgres: 'Postgres',
         qdrant: 'Qdrant',
         s3: 'S3',
-        valkey: 'Valkey',
+        // The setting value is named `valkey`, but the queue only requires the
+        // Redis protocol and the broker may run either engine.
+        valkey: 'Valkey / Redis',
         volume: 'Volume',
         worker_dispatch: 'Worker dispatch',
       },

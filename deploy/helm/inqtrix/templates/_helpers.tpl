@@ -342,6 +342,30 @@ derived from the bundled Valkey (password embedded in the URL).
 {{- end -}}
 
 {{/*
+Binary prefix of the BUNDLED broker. The queue speaks the Redis protocol, so the
+bundled service runs either engine; only the binary names differ (valkey-server/
+valkey-cli vs redis-server/redis-cli). Every server flag the chart passes and the
+REDISCLI_AUTH variable the probes use are identical on both. An unknown value
+fails the render rather than rendering a container that CrashLoopBackOffs on an
+unresolvable command.
+
+Image and engine must be set TOGETHER, but the chart does not name-match the
+image to enforce it: verified 2026-08-15, the valkey image ships redis-server/
+redis-cli compat symlinks (so engine=redis against it merely mislabels a working
+Valkey), while a redis image has no valkey-* at all -- forgetting the engine
+after changing the image fails at container start with a self-explanatory
+"executable file `valkey-server` not found in $PATH". A registry-path heuristic
+would add false render failures for mirrored images without catching more.
+*/}}
+{{- define "inqtrix.brokerBinary" -}}
+{{- $engine := .Values.valkey.engine | default "valkey" -}}
+{{- if not (has $engine (list "valkey" "redis")) -}}
+{{- fail (printf "valkey.engine must be \"valkey\" or \"redis\", got %q" $engine) -}}
+{{- end -}}
+{{- $engine -}}
+{{- end -}}
+
+{{/*
 Pod security context. seccompProfile is always RuntimeDefault. On vanilla
 Kubernetes a fixed non-root UID and fsGroup are set (so a mounted PVC is
 group-owned and writable); on OpenShift they are omitted so the restricted-v2

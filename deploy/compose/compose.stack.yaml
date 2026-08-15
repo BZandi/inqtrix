@@ -440,14 +440,18 @@ services:
     restart: unless-stopped
 
   valkey:
-    # Job-queue broker for the workers profile.
-    image: docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9
+    # Job-queue broker for the workers profile. The queue speaks the Redis
+    # protocol, so INQTRIX_BROKER_ENGINE (valkey|redis) selects the server/CLI
+    # binaries and INQTRIX_BROKER_IMAGE the image; both default to the pinned
+    # Valkey below, and only that default is maintained by this project. The
+    # pair also applies to the separate langfuse broker further down.
+    image: ${INQTRIX_BROKER_IMAGE:-docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9}
     profiles: ["workers"]
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
         : "$${INQTRIX_VALKEY_PASSWORD:?INQTRIX_VALKEY_PASSWORD is required for the workers profile}"
-        exec valkey-server \
+        exec ${INQTRIX_BROKER_ENGINE:-valkey}-server \
           --requirepass "$${INQTRIX_VALKEY_PASSWORD}" \
           --appendonly yes \
           --appendfsync everysec \
@@ -458,7 +462,7 @@ services:
       - valkey_data:/data
     healthcheck:
       test:
-        ["CMD-SHELL", "REDISCLI_AUTH=\"$${INQTRIX_VALKEY_PASSWORD}\" valkey-cli ping | grep -q PONG"]
+        ["CMD-SHELL", "REDISCLI_AUTH=\"$${INQTRIX_VALKEY_PASSWORD}\" ${INQTRIX_BROKER_ENGINE:-valkey}-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -539,14 +543,16 @@ services:
     # Dedicated broker/cache for Langfuse (BullMQ). Deliberately NOT the
     # workers-profile Valkey: Langfuse demands the INSTANCE-WIDE
     # maxmemory-policy noeviction, and coupling the run queue to the
-    # trace backend would let observability trouble stall run dispatch.
-    image: docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9
+    # trace backend would let observability trouble stall run dispatch. The
+    # ENGINE/IMAGE selection is shared with the workers broker above; the
+    # instances stay separate.
+    image: ${INQTRIX_BROKER_IMAGE:-docker.io/valkey/valkey:9.1.0@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9}
     profiles: ["observability"]
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
         : "$${LANGFUSE_VALKEY_PASSWORD:?LANGFUSE_VALKEY_PASSWORD is required for the observability profile}"
-        exec valkey-server \
+        exec ${INQTRIX_BROKER_ENGINE:-valkey}-server \
           --requirepass "$${LANGFUSE_VALKEY_PASSWORD}" \
           --maxmemory-policy noeviction \
           --appendonly no
@@ -556,7 +562,7 @@ services:
       - langfuse_valkey_data:/data
     healthcheck:
       test:
-        ["CMD-SHELL", "REDISCLI_AUTH=\"$${LANGFUSE_VALKEY_PASSWORD}\" valkey-cli ping | grep -q PONG"]
+        ["CMD-SHELL", "REDISCLI_AUTH=\"$${LANGFUSE_VALKEY_PASSWORD}\" ${INQTRIX_BROKER_ENGINE:-valkey}-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10

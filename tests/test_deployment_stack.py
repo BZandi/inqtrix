@@ -6,6 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -214,18 +215,44 @@ def test_bundled_qdrant_fails_closed_without_a_real_api_key() -> None:
     )
 
 
-def test_bundled_valkey_healthcheck_does_not_put_password_in_argv() -> None:
-    """valkey-cli must receive auth through its environment, not ``-a``."""
+@pytest.mark.parametrize("service", ("valkey", "langfuse-valkey"))
+def test_bundled_broker_healthcheck_does_not_put_password_in_argv(
+    service: str,
+) -> None:
+    """The broker CLI receives auth through its environment, not via ``-a``.
+
+    The binary name is engine-selected, so the probe is asserted on the
+    ``-cli`` suffix plus the interpolation default rather than on a fixed
+    ``valkey-cli`` literal.
+    """
     stack = yaml.safe_load(
         (_ROOT / "deploy" / "compose" / "compose.stack.yaml").read_text(
             encoding="utf-8"
         )
     )
-    probe = " ".join(stack["services"]["valkey"]["healthcheck"]["test"])
+    probe = " ".join(stack["services"][service]["healthcheck"]["test"])
 
     assert "REDISCLI_AUTH=" in probe
-    assert "valkey-cli ping" in probe
-    assert "valkey-cli -a" not in probe
+    assert "${INQTRIX_BROKER_ENGINE:-valkey}-cli ping" in probe
+    assert "-cli -a" not in probe
+
+
+@pytest.mark.parametrize("service", ("valkey", "langfuse-valkey"))
+def test_bundled_broker_server_and_probe_share_one_engine_selector(
+    service: str,
+) -> None:
+    """One variable drives both binaries, so they cannot drift apart."""
+    stack = yaml.safe_load(
+        (_ROOT / "deploy" / "compose" / "compose.stack.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    definition = stack["services"][service]
+    command = " ".join(definition["command"])
+
+    assert "exec ${INQTRIX_BROKER_ENGINE:-valkey}-server" in command
+    assert "exec valkey-server" not in command
+    assert definition["image"].startswith("${INQTRIX_BROKER_IMAGE:-")
 
 
 def test_direct_tls_uses_one_public_origin_across_runtime_services() -> None:

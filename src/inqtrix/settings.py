@@ -2014,13 +2014,15 @@ class KnowledgeSettings(BaseSettings):
         alias="INQTRIX_KNOWLEDGE_SPARSE",
         description=(
             "Lexical retrieval branch for the qdrant backend. "
-            "``bm25_german`` (default) computes BM25 sparse vectors "
-            "client-side — a tokenizer/stemmer ALGORITHM, no hosted "
-            "model — and fuses them with the dense branch via RRF. "
+            "``bm25_german`` (default) has the Qdrant server compute BM25 "
+            "sparse vectors itself (core inference, server >= 1.15.3; a "
+            "tokenizer/stemmer ALGORITHM, no model, no download) and fuses "
+            "them with the dense branch via RRF. Startup fails fast with an "
+            "actionable error when a reachable server is older than 1.15.3. "
             "``off`` runs dense-only. Ignored by the memory backend."
         ),
     )
-    """Lexical retrieval branch for the qdrant backend. ``bm25_german`` (default) computes BM25 sparse vectors client-side and fuses via RRF; ``off`` runs dense-only. Ignored by the memory backend."""
+    """Lexical retrieval branch for the qdrant backend. ``bm25_german`` (default) has the Qdrant server compute BM25 sparse vectors itself (server >= 1.15.3, checked at startup) and fuses via RRF; ``off`` runs dense-only. Ignored by the memory backend."""
     reranker_provider: Literal["none", "cohere", "llm"] = Field(
         "none",
         alias="INQTRIX_RERANKER_PROVIDER",

@@ -16,9 +16,10 @@ Two consumers of one Qdrant topology:
 Topology (Qdrant's multi-tenant guidance): ONE physical Qdrant
 collection per embedding-model configuration, with the logical
 collection as an indexed payload field (``is_tenant`` partitioning).
-Hybrid retrieval fuses a dense branch with a client-side BM25 sparse
-branch (fastembed; a tokenizer + Snowball stemmer ALGORITHM, German,
-paired with Qdrant's IDF modifier) via reciprocal rank fusion.
+Hybrid retrieval fuses a dense branch with a BM25 sparse branch that the
+Qdrant server computes itself (core BM25 inference, server >= 1.15.3; a
+tokenizer + Snowball stemmer ALGORITHM, German, paired with Qdrant's IDF
+modifier) via reciprocal rank fusion. Nothing is downloaded at runtime.
 
 The port is async; the synchronous ``qdrant_client`` calls run off the
 event loop via ``asyncio.to_thread`` (proven sync bodies wrapped, not
@@ -153,43 +154,108 @@ def _require_qdrant():
 
 
 # The lexical (BM25) branch is monolingual. Its tokenizer language and the
-# ISO-639-1 code are the SAME fact in two representations (fastembed wants the
-# English name "german"; capability manifests and the algorithm compare against
-# detect_ui_language's "de"). Defined ONCE here so the encoder init and the
-# `sparse_language` property can never drift apart (Designprinzip 4).
+# ISO-639-1 code are the SAME fact in two representations (the Document
+# inference options want the English name "german"; capability manifests and
+# the algorithm compare against detect_ui_language's "de"). Defined ONCE here
+# so the wire options and the `sparse_language` property can never drift
+# apart (Designprinzip 4).
 _BM25_TOKENIZER_LANGUAGE = "german"
 _BM25_LANGUAGE_CODE = "de"
 
+# BM25 inference runs inside the Qdrant server (compiled into the core since
+# 1.15.2; 1.15.3 is the floor qdrant-client names for forwarding
+# ``models.Document`` unchanged). The client forwards by connection MODE, not
+# by server version, so a too-old server would fail per request — the startup
+# gate below turns that into one actionable error instead.
+_BM25_MODEL = "Qdrant/bm25"
+_BM25_MIN_SERVER = (1, 15, 3)
+# The server keeps arbitrarily long tokens by default; the previous
+# client-side encoder dropped tokens longer than 40 characters. Pinning the
+# same cap keeps pre-swap and post-swap vectors BIT-IDENTICAL (proven by the
+# golden parity tests), so mixed generations coexist without a reindex.
+# Lifting the cap is a deliberate future decision that requires reindexing —
+# otherwise long German compounds would match only newly indexed documents.
+_BM25_MAX_TOKEN_LEN = 40
+
 
 class _Bm25:
-    """Lazy client-side BM25 sparse encoder (German), thread-safe init."""
+    """Builds BM25 inference Documents; Qdrant expands them server-side.
 
-    def __init__(self) -> None:
-        self._encoder = None
-        self._lock = threading.Lock()
-
-    def _ensure(self):
-        # Double-checked init: the encoder is reached from many
-        # to_thread worker threads concurrently; the lock prevents a
-        # wasteful double-construction on first use.
-        if self._encoder is None:
-            with self._lock:
-                if self._encoder is None:
-                    try:
-                        from fastembed import SparseTextEmbedding
-                    except ImportError as exc:  # pragma: no cover - env-dependent
-                        raise RuntimeError(_IMPORT_HINT) from exc
-                    self._encoder = SparseTextEmbedding(
-                        model_name="Qdrant/bm25",
-                        language=_BM25_TOKENIZER_LANGUAGE,
-                    )
-        return self._encoder
+    Wire objects only — no local model, no download. The server derives the
+    sparse vector from the Document's position: a named-vector slot in an
+    upsert gets the document TF formula, a query position gets unique tokens
+    at weight 1.0, hash-compatible with the sparse vectors this class used to
+    compute client-side (murmur3-32, |i32| — proven by the golden fixtures in
+    the live parity tests, so pre-swap collections stay searchable without a
+    reindex). The two methods mirror that positional distinction and are the
+    seam offline tests stub with literal ``SparseVector`` values.
+    """
 
     def documents(self, texts: list[str]):
-        return list(self._ensure().embed(texts))
+        _client, models = _require_qdrant()
+        return [
+            models.Document(
+                text=text,
+                model=_BM25_MODEL,
+                options={
+                    "language": _BM25_TOKENIZER_LANGUAGE,
+                    "max_token_len": _BM25_MAX_TOKEN_LEN,
+                },
+            )
+            for text in texts
+        ]
 
     def query(self, text: str):
-        return list(self._ensure().query_embed(text))[0]
+        _client, models = _require_qdrant()
+        return models.Document(
+            text=text,
+            model=_BM25_MODEL,
+            options={
+                "language": _BM25_TOKENIZER_LANGUAGE,
+                "max_token_len": _BM25_MAX_TOKEN_LEN,
+            },
+        )
+
+
+def _require_server_side_bm25(client, *, context: str) -> None:
+    """Fail fast when the connected Qdrant cannot run BM25 inference.
+
+    The sparse branch sends ``models.Document`` objects for server-side
+    expansion, which needs Qdrant >= 1.15.3. qdrant-client forwards those
+    Documents by connection mode without checking the server version, so a
+    too-old server would reject every sparse upsert/query at request time;
+    one reachable-and-too-old check at store construction converts that into
+    a single actionable startup error. An UNREACHABLE server stays tolerated
+    (documented startup behavior: knowledge simply is not advertised) — then
+    the requirement is logged loudly and enforcement falls to the per-request
+    errors plus the re-check on the next restart. Dev builds with unparseable
+    version strings take the warn path as well.
+    """
+    minimum = ".".join(str(part) for part in _BM25_MIN_SERVER)
+    try:
+        raw_version = client.info().version
+        parsed = tuple(int(part) for part in str(raw_version).split(".")[:3])
+        if len(parsed) < 3:
+            raise ValueError(f"unparseable version: {raw_version!r}")
+    except Exception as exc:  # noqa: BLE001 - any probe failure => warn path
+        log.warning(
+            "%s: Qdrant-Version nicht ermittelbar (%s) — "
+            "INQTRIX_KNOWLEDGE_SPARSE=bm25_german braucht Qdrant >= %s "
+            "(serverseitige BM25-Inference). Der Check laeuft beim "
+            "naechsten Start erneut; ein zu alter Server schlaegt pro "
+            "Anfrage laut fehl.",
+            context,
+            exc,
+            minimum,
+        )
+        return
+    if parsed < _BM25_MIN_SERVER:
+        raise RuntimeError(
+            f"{context}: Qdrant {raw_version} beherrscht kein serverseitiges "
+            f"BM25 — INQTRIX_KNOWLEDGE_SPARSE=bm25_german braucht Qdrant >= "
+            f"{minimum}. Entweder den Qdrant-Server aktualisieren oder "
+            "INQTRIX_KNOWLEDGE_SPARSE=off setzen (nur dichte Suche)."
+        )
 
 
 def _ensure_chunks_collection(
@@ -384,6 +450,8 @@ class QdrantVectorIndex:
         self._client = QdrantClient(url=url, api_key=api_key or None, timeout=timeout)
         self._sparse_enabled = sparse == "bm25_german"
         self._bm25 = _Bm25()
+        if self._sparse_enabled:
+            _require_server_side_bm25(self._client, context="QdrantVectorIndex")
 
     @property
     def supports_hybrid(self) -> bool:
@@ -455,10 +523,7 @@ class QdrantVectorIndex:
         for index, chunk in enumerate(vectors):
             vector: dict[str, Any] = {"dense": list(chunk.dense)}
             if sparse_vectors is not None:
-                sparse = sparse_vectors[index]
-                vector["sparse"] = models.SparseVector(
-                    indices=list(sparse.indices), values=list(sparse.values)
-                )
+                vector["sparse"] = sparse_vectors[index]
             points.append(
                 models.PointStruct(
                     id=_point_uuid(chunk.chunk_id),
@@ -861,9 +926,7 @@ class QdrantVectorIndex:
                     limit=prefetch_depth,
                 ),
                 models.Prefetch(
-                    query=models.SparseVector(
-                        indices=list(sparse.indices), values=list(sparse.values)
-                    ),
+                    query=sparse,
                     using="sparse",
                     filter=scope,
                     limit=prefetch_depth,
@@ -1004,6 +1067,10 @@ class QdrantKnowledgeStore:
         self._registry_ready = False
         self._revision_lock = threading.RLock()
         self._vector_candidate_cap = safe_candidate_cap
+        if self._sparse_enabled:
+            _require_server_side_bm25(
+                self._client, context="QdrantKnowledgeStore"
+            )
 
     @property
     def supports_safe_reindex(self) -> bool:
@@ -2060,10 +2127,7 @@ class QdrantKnowledgeStore:
         for index, (chunk_text, dense) in enumerate(zip(chunks, embeddings)):
             vector: dict[str, Any] = {"dense": dense}
             if sparse_vectors is not None:
-                sparse = sparse_vectors[index]
-                vector["sparse"] = models.SparseVector(
-                    indices=list(sparse.indices), values=list(sparse.values)
-                )
+                vector["sparse"] = sparse_vectors[index]
             points.append(
                 models.PointStruct(
                     id=(
@@ -3126,9 +3190,7 @@ class QdrantKnowledgeStore:
                         limit=depth,
                     ),
                     models.Prefetch(
-                        query=models.SparseVector(
-                            indices=list(sparse.indices), values=list(sparse.values)
-                        ),
+                        query=sparse,
                         using="sparse",
                         filter=scope_filter,
                         limit=depth,

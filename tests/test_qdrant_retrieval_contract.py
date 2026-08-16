@@ -41,9 +41,11 @@ class _Client:
         self.stalled = stalled
         self.exhausted = exhausted
         self.depths: list[int] = []
+        self.query_kwargs: list[dict] = []
 
-    def query_points(self, *, limit: int, **_kwargs):
+    def query_points(self, *, limit: int, **kwargs):
         self.depths.append(limit)
+        self.query_kwargs.append(kwargs)
         if self.exhausted:
             count = min(2, limit)
         elif self.stalled:
@@ -72,16 +74,18 @@ def _store(
         point.candidate for point in points if point.active
     ]
     store._sparse_enabled = True
-    store._bm25 = SimpleNamespace(
-        query=lambda _query: SimpleNamespace(indices=[0], values=[1.0])
-    )
+    store._bm25 = SimpleNamespace(query=lambda _query: _SPARSE_QUERY_SENTINEL)
     return store
+
+
+# The sparse query object (production: a BM25 inference Document) must reach
+# the wire VERBATIM — the store passes it through without re-wrapping.
+_SPARSE_QUERY_SENTINEL = SimpleNamespace(kind="sparse-query-sentinel")
 
 
 def _hybrid_models():
     return SimpleNamespace(
         Prefetch=lambda **kwargs: kwargs,
-        SparseVector=lambda **kwargs: kwargs,
         FusionQuery=lambda **kwargs: kwargs,
         Fusion=SimpleNamespace(RRF="rrf"),
     )
@@ -105,6 +109,11 @@ def test_valid_candidate_cap_is_bound_to_the_store(monkeypatch) -> None:
         def __init__(self, **_kwargs) -> None:
             pass
 
+        def info(self):
+            # Deliberately exercise the BM25 gate's pass branch instead of
+            # falling into the version-undeterminable warn branch.
+            return SimpleNamespace(version="1.19.0")
+
     monkeypatch.setattr(module, "_require_qdrant", lambda: (Client, object()))
 
     store = QdrantKnowledgeStore(
@@ -127,6 +136,16 @@ def _search(store, retrieval_mode: str, monkeypatch):
         lambda: (None, _hybrid_models()),
     )
     return store._sync_hybrid_search("query", [1.0], ["kc"], 100, "m")
+
+
+def test_hybrid_sparse_query_is_passed_through_verbatim(monkeypatch) -> None:
+    store = _store()
+
+    _search(store, "hybrid", monkeypatch)
+
+    prefetch = store._client.query_kwargs[0]["prefetch"]
+    assert prefetch[1]["using"] == "sparse"
+    assert prefetch[1]["query"] is _SPARSE_QUERY_SENTINEL
 
 
 @pytest.mark.parametrize("retrieval_mode", ["dense", "hybrid"])

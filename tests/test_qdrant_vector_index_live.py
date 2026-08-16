@@ -63,7 +63,7 @@ async def index(model_name: str) -> Iterator[QdrantVectorIndex]:
 
 @pytest_asyncio.fixture()
 async def hybrid_index(model_name: str) -> Iterator[QdrantVectorIndex]:
-    """A hybrid index; the first run downloads the fastembed BM25 model."""
+    """A hybrid index; BM25 vectors are computed inside the Qdrant server."""
     instance = QdrantVectorIndex(
         url=QDRANT_URL, api_key=QDRANT_API_KEY, sparse="bm25_german"
     )

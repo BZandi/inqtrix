@@ -2,26 +2,41 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 qdrant_client = pytest.importorskip("qdrant_client")
 
-from inqtrix.knowledge.stores.qdrant_store import QdrantVectorIndex
+from inqtrix.knowledge.stores.qdrant_store import (
+    QdrantVectorIndex,
+    _Bm25,
+    _require_server_side_bm25,
+)
 from inqtrix.knowledge.stores.vector_index import ChunkVector, VectorSearchScope
 
 
 class _SparseStub:
-    """Deterministic sparse vectors without model downloads."""
+    """Literal sparse vectors so the ``:memory:`` client never infers.
+
+    Production ``_Bm25`` returns ``models.Document`` objects that only a
+    REMOTE Qdrant expands server-side; a local-mode client would attempt
+    client-side inference (wanting fastembed plus a model download) for
+    them. Literal ``SparseVector`` values are accepted verbatim by every
+    client mode, keeping these tests hermetic.
+    """
 
     @staticmethod
     def documents(texts: list[str]):
-        return [SimpleNamespace(indices=[0], values=[1.0]) for _text in texts]
+        return [
+            qdrant_client.models.SparseVector(indices=[0], values=[1.0])
+            for _text in texts
+        ]
 
     @staticmethod
     def query(_text: str):
-        return SimpleNamespace(indices=[0], values=[1.0])
+        return qdrant_client.models.SparseVector(indices=[0], values=[1.0])
 
 
 def _index(*, sparse: bool = False) -> QdrantVectorIndex:
@@ -368,3 +383,140 @@ async def test_generation_document_cleanup_removes_unknown_points_only_in_scope(
         collection_id="kc_a",
         generation_id="gen_active",
     ) == 1
+
+
+class _CapturingClient:
+    """Records upsert/query wire objects; server-side inference contract."""
+
+    def __init__(self) -> None:
+        self.upserts: list[dict] = []
+        self.queries: list[dict] = []
+
+    def upsert(self, **kwargs) -> None:
+        self.upserts.append(kwargs)
+
+    def collection_exists(self, _name: str) -> bool:
+        return True
+
+    def query_points(self, **kwargs):
+        self.queries.append(kwargs)
+        return SimpleNamespace(points=[])
+
+
+def _document_index() -> tuple[QdrantVectorIndex, _CapturingClient]:
+    index = object.__new__(QdrantVectorIndex)
+    client = _CapturingClient()
+    index._client = client
+    index._sparse_enabled = True
+    index._bm25 = _Bm25()
+    return index, client
+
+
+@pytest.mark.asyncio
+async def test_upsert_sends_bm25_inference_document() -> None:
+    index, client = _document_index()
+
+    await index.upsert(
+        embedding_model="m",
+        collection_id="kc",
+        document_id="kd",
+        vectors=[
+            ChunkVector(
+                "kch",
+                (1.0, 0.0),
+                text="Die Verpflegungspauschale",
+                generation_id="gen",
+                revision_id="rev",
+            )
+        ],
+    )
+
+    sparse = client.upserts[0]["points"][0].vector["sparse"]
+    assert isinstance(sparse, qdrant_client.models.Document)
+    assert sparse.text == "Die Verpflegungspauschale"
+    assert sparse.model == "Qdrant/bm25"
+    assert sparse.options == {"language": "german", "max_token_len": 40}
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_sends_bm25_inference_document() -> None:
+    index, client = _document_index()
+
+    await index.hybrid_search(
+        embedding_model="m",
+        query_text="Verpflegungspauschale",
+        query_embedding=[1.0, 0.0],
+        scopes=[_active_scope()],
+        top_k=3,
+    )
+
+    prefetch = client.queries[0]["prefetch"]
+    assert prefetch[1].using == "sparse"
+    document = prefetch[1].query
+    assert isinstance(document, qdrant_client.models.Document)
+    assert document.text == "Verpflegungspauschale"
+    assert document.model == "Qdrant/bm25"
+    assert document.options == {"language": "german", "max_token_len": 40}
+
+
+class _VersionClient:
+    def __init__(self, version: str) -> None:
+        self._version = version
+
+    def info(self):
+        return SimpleNamespace(version=self._version)
+
+
+class _UnreachableClient:
+    def info(self):
+        raise ConnectionError("connection refused")
+
+
+def test_bm25_gate_rejects_old_reachable_server() -> None:
+    with pytest.raises(RuntimeError, match=r"1\.15\.3"):
+        _require_server_side_bm25(
+            _VersionClient("1.14.2"), context="QdrantVectorIndex"
+        )
+
+
+@pytest.mark.parametrize("version", ["1.15.3", "1.19.0"])
+def test_bm25_gate_accepts_capable_server(version: str) -> None:
+    _require_server_side_bm25(
+        _VersionClient(version), context="QdrantVectorIndex"
+    )
+
+
+@pytest.mark.parametrize(
+    "client", [_UnreachableClient(), _VersionClient("1.19.0-dev")]
+)
+def test_bm25_gate_warns_when_version_is_undeterminable(
+    client, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        _require_server_side_bm25(client, context="QdrantVectorIndex")
+
+    assert any(
+        "nicht ermittelbar" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_constructor_gates_only_when_sparse_enabled(monkeypatch) -> None:
+    import inqtrix.knowledge.stores.qdrant_store as module
+
+    class _NullClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    gated: list[str] = []
+    monkeypatch.setattr(module, "_require_qdrant", lambda: (_NullClient, object()))
+    monkeypatch.setattr(
+        module,
+        "_require_server_side_bm25",
+        lambda _client, *, context: gated.append(context),
+    )
+
+    QdrantVectorIndex(url="http://unused.invalid", api_key="k", sparse="off")
+    assert gated == []
+
+    QdrantVectorIndex(url="http://unused.invalid", api_key="k")
+    assert gated == ["QdrantVectorIndex"]

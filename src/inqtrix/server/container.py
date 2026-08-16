@@ -485,6 +485,9 @@ def build_deletion_store(settings: Settings) -> Any:
         completed_ttl_seconds=(
             settings.server.deletion_receipt_retention_seconds
         ),
+        dispatch_timeout_seconds=(
+            settings.server.deletion_dispatch_timeout_seconds
+        ),
         worker_id=f"api-{socket.gethostname()}-{os.getpid()}",
         restrict_to_workspace_members=(
             settings.sharing.restrict_to_workspace_members

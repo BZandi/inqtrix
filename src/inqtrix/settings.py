@@ -856,6 +856,25 @@ class ServerSettings(BaseSettings):
             "upper bound in Valkey mode."
         ),
     )
+    deletion_dispatch_timeout_seconds: int = Field(
+        240,
+        alias="INQTRIX_DELETION_DISPATCH_TIMEOUT_SECONDS",
+        ge=1,
+        description=(
+            "How long an aggregate deletion operation may sit unclaimed in "
+            "``queued`` before it is failed with ``dispatch_timeout``. "
+            "Without this bound an operation nobody picked up never becomes "
+            "terminal: clients keep polling its receipt and ``retry`` stays "
+            "rejected, because retry requires ``delete_failed``. Expiry is "
+            "non-destructive — an unclaimed operation has deleted nothing, "
+            "and the visible failure offers retry. Keep the default "
+            "comfortably above the worker reconciler's re-dispatch window "
+            "(queued rows are re-sent from 120 seconds of age, checked every "
+            "60) so a Valkey deployment heals itself first; a deployment "
+            "without the queue has no reconciler to wait for and can lower "
+            "this to about 60 seconds."
+        ),
+    )
     deletion_receipt_retention_seconds: int = Field(
         2_592_000,
         alias="INQTRIX_DELETION_RECEIPT_RETENTION_SECONDS",

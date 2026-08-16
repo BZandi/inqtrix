@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { ServerDeletionOperation } from '@/api/inqtrixClient'
 import {
   assertSessionDeletionOperation,
+  nextDeletionPollDelayMs,
   SessionDeletionContractError,
   sessionDeletionFromWire,
 } from './sessionDeletion'
@@ -61,5 +62,37 @@ describe('session deletion projection', () => {
       stage: 'delete_failed',
       status: 'delete_failed',
     })
+  })
+})
+
+describe('deletion receipt poll cadence', () => {
+  it('keeps the first seconds fast so a normal deletion stays snappy', () => {
+    // Perceived deletion time is the server's work PLUS this wait, so the
+    // window that covers an ordinary deletion must not back off at all.
+    const fast = Array.from({ length: 10 }, (_unused, index) =>
+      nextDeletionPollDelayMs(index))
+    expect(fast).toEqual(Array.from({ length: 10 }, () => 300))
+
+    const elapsedMs = fast.reduce((total, delay) => total + delay, 0)
+    expect(elapsedMs).toBeGreaterThanOrEqual(3_000)
+  })
+
+  it('calms down only once an operation misses that window, and caps', () => {
+    expect(nextDeletionPollDelayMs(10)).toBe(600)
+    expect(nextDeletionPollDelayMs(11)).toBe(1_200)
+    expect(nextDeletionPollDelayMs(12)).toBe(2_400)
+    expect(nextDeletionPollDelayMs(13)).toBe(4_800)
+    expect(nextDeletionPollDelayMs(14)).toBe(5_000)
+    expect(nextDeletionPollDelayMs(500)).toBe(5_000)
+  })
+
+  it('stays well under a hundred polls across a full dispatch timeout', () => {
+    let elapsedMs = 0
+    let polls = 0
+    while (elapsedMs < 240_000) {
+      elapsedMs += nextDeletionPollDelayMs(polls)
+      polls += 1
+    }
+    expect(polls).toBeLessThan(100)
   })
 })

@@ -13,6 +13,7 @@ import {
   type ClientOptions,
   type ServerDeletionOperation,
 } from '@/api/inqtrixClient'
+import { nextDeletionPollDelayMs } from '@/features/project/sessionDeletion'
 import type {
   FileAssetRecord,
   FileGroupRecord,
@@ -21,7 +22,6 @@ import type {
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import { deleteVectorIndexAggregate } from './vectorIndexDeletion'
 
-const FIRST_POLL_DELAY_MS = 350
 const MAX_RETRY_DELAY_MS = 5_000
 const OPERATION_PAGE_LIMIT = 200
 
@@ -276,7 +276,8 @@ export function useAssetDeletionApi({
     const controller = polling.open(operationId, expectedScopeKey)
     if (!controller) return
     void (async () => {
-      let delay = FIRST_POLL_DELAY_MS
+      let delay = nextDeletionPollDelayMs(0)
+      let completedPolls = 0
       try {
         while (!controller.signal.aborted) {
           await waitForAssetDeletionPoll(delay, controller.signal)
@@ -291,7 +292,8 @@ export function useAssetDeletionApi({
             if (!applyOperation(operation, expectedScopeKey)) return
             setError(null)
             if (operation.status === 'deleted' || operation.status === 'delete_failed') return
-            delay = FIRST_POLL_DELAY_MS
+            completedPolls += 1
+            delay = nextDeletionPollDelayMs(completedPolls)
           } catch (caught) {
             if (controller.signal.aborted || !polling.isCurrent(expectedScopeKey)) return
             setError(errorMessage(caught))

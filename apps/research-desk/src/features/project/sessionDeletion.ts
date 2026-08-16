@@ -9,6 +9,27 @@ export type SessionDeletionState = {
 
 export class SessionDeletionContractError extends Error {}
 
+const FAST_POLL_DELAY_MS = 300
+const FAST_POLL_COUNT = 10
+const MAX_POLL_DELAY_MS = 5_000
+
+/** Delay before the next receipt poll, given how many polls already came
+ * back non-terminal.
+ *
+ * The first {@link FAST_POLL_COUNT} polls keep a constant fast cadence,
+ * because perceived deletion time is the server's work PLUS the wait for
+ * the poll that notices it finished — backing off immediately would add
+ * seconds of spinner to deletions that are already done. Only an
+ * operation that has proven it will not finish in that window gets a
+ * calmer cadence, and that is exactly the operation which may run until
+ * the server's dispatch timeout expires it. Shared by the session and
+ * asset receipts so the two cannot drift apart. */
+export function nextDeletionPollDelayMs(completedPolls: number): number {
+  if (completedPolls < FAST_POLL_COUNT) return FAST_POLL_DELAY_MS
+  const grown = FAST_POLL_DELAY_MS * 2 ** (completedPolls - FAST_POLL_COUNT + 1)
+  return Math.min(MAX_POLL_DELAY_MS, grown)
+}
+
 export function assertSessionDeletionOperation(
   operation: ServerDeletionOperation,
   expectedKind: 'agent_session' | 'knowledge_session',

@@ -448,6 +448,12 @@ def main() -> None:
         completed_ttl_seconds=(
             settings.server.deletion_receipt_retention_seconds
         ),
+        # Same bound as the API: both processes must agree on when an
+        # undispatchable operation is given up on, or one keeps reviving
+        # what the other just failed.
+        dispatch_timeout_seconds=(
+            settings.server.deletion_dispatch_timeout_seconds
+        ),
         worker_id=worker_id,
         restrict_to_workspace_members=(
             settings.sharing.restrict_to_workspace_members

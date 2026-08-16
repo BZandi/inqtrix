@@ -8,11 +8,11 @@ import {
 } from '@/api/inqtrixClient'
 import {
   assertSessionDeletionOperation,
+  nextDeletionPollDelayMs,
   SessionDeletionContractError,
   type SessionDeletionState,
 } from './sessionDeletion'
 
-const FIRST_POLL_DELAY_MS = 300
 const MAX_RETRY_DELAY_MS = 5_000
 
 type SessionRow = { deletion?: SessionDeletionState }
@@ -103,7 +103,7 @@ export function useSessionDeletionApi({
     operationId: string,
     expectedSessionId: string,
     scope: string,
-    initialDelay = FIRST_POLL_DELAY_MS,
+    initialDelay = nextDeletionPollDelayMs(0),
   ) => {
     if (
       !enabled
@@ -114,6 +114,7 @@ export function useSessionDeletionApi({
     controllersRef.current.set(operationId, controller)
     void (async () => {
       let delayMs = initialDelay
+      let completedPolls = 0
       try {
         while (!controller.signal.aborted && scopeRef.current === scope) {
           await wait(delayMs, controller.signal)
@@ -124,7 +125,8 @@ export function useSessionDeletionApi({
           if (!apply(operation, expectedSessionId, scope)) return
           setError(null)
           if (operation.status === 'deleted' || operation.status === 'delete_failed') return
-          delayMs = FIRST_POLL_DELAY_MS
+          completedPolls += 1
+          delayMs = nextDeletionPollDelayMs(completedPolls)
         }
       } catch (caught) {
         if (controller.signal.aborted || scopeRef.current !== scope) return

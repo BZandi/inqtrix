@@ -94,6 +94,9 @@ _KNOWLEDGE_DELETION_TARGET_VALUES = tuple(
 _SESSION_DELETION_TARGET_VALUES = tuple(
     target_kind.value for target_kind in SESSION_DELETION_TARGET_KINDS
 )
+# Read paths drive the expiry sweep, so throttle it: the receipt poll asks
+# several times per second and the answer cannot change that fast.
+_EXPIRY_CHECK_INTERVAL_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -130,6 +133,7 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         restrict_to_workspace_members: bool = False,
         sharing_enabled: bool = True,
         recover_orphans: bool | None = None,
+        dispatch_timeout_seconds: float = 240.0,
     ) -> None:
         super().__init__(
             engine=engine,
@@ -143,6 +147,8 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         self._restrict_to_workspace_members = restrict_to_workspace_members
         self._sharing_enabled = sharing_enabled
         self._source_authority = PostgresSourceLifecycleAuthority()
+        self._dispatch_timeout_seconds = float(dispatch_timeout_seconds)
+        self._last_expiry_check: float | None = None
 
     def submit(
         self,
@@ -230,6 +236,7 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
     ) -> DeletionOperationRecord:
+        self.expire_stalled_operations()
         return self._call(
             self._get_record_db(
                 operation_id,
@@ -238,6 +245,112 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
                 workspace_id=workspace_id,
             )
         )
+
+    def expire_stalled_operations(self) -> None:
+        """Make terminal what no process is going to execute.
+
+        Two shapes of one failure — a receipt that stays non-terminal while
+        nobody owns it — resolved through the ONE public :meth:`fail` path,
+        so tombstones, the ``inqtrix.deletion.failed`` event, and the retry
+        precondition come out identical to an ordinary failure:
+
+        * restart orphans, whose in-process work closure died with the
+          previous process. Swept once per process, exactly like the run
+          store, and only where ``resolve_orphan_sweep`` allows it (never
+          in queue mode, where the workers own those rows); and
+        * operations never claimed within ``dispatch_timeout_seconds`` —
+          the shape a queue without a consuming worker produces, where no
+          restart ever comes to clean up.
+
+        Without this a stuck receipt is unreachable: ``retry`` requires
+        ``delete_failed`` and a second DELETE answers 409, so the operation
+        can only be freed by editing the database.
+
+        Operations this process owns are never candidates: everything it
+        executes or is about to dispatch sits in ``_local`` until its
+        worker thread unwinds. Losing a race is harmless anyway — ``fail``
+        CASes on ``queued``/``running``, and a worker that wakes up late is
+        fenced out by the attempt counter.
+        """
+
+        now = time.monotonic()
+        with self._lock:
+            if self._closing or self._closed:
+                return
+            last = self._last_expiry_check
+            if last is not None and now - last < _EXPIRY_CHECK_INTERVAL_SECONDS:
+                return
+            self._last_expiry_check = now
+            sweep = self._sweep_orphans
+        if sweep:
+            self._fail_stalled(
+                self._call(self._restart_orphan_operations_db()),
+                message="Ein Server-Neustart hat die Loeschung unterbrochen.",
+                error_type="server_restarted",
+            )
+            # Cleared only after the sweep landed, so an exception above
+            # leaves the next call to retry it.
+            with self._lock:
+                self._sweep_orphans = False
+        self._fail_stalled(
+            [
+                operation_id
+                for operation_id, _tenant_id in self.stale_queued_operations(
+                    older_than_seconds=self._dispatch_timeout_seconds
+                )
+            ],
+            message=(
+                "Die Loeschung wurde von keinem Prozess uebernommen und "
+                "wurde abgebrochen."
+            ),
+            error_type="dispatch_timeout",
+        )
+
+    def _fail_stalled(
+        self,
+        operation_ids: list[str],
+        *,
+        message: str,
+        error_type: str,
+    ) -> None:
+        """Fail candidates this process does not own, one row at a time."""
+
+        if not operation_ids:
+            return
+        with self._lock:
+            owned = set(self._local)
+        for operation_id in operation_ids:
+            if operation_id in owned:
+                continue
+            log.warning(
+                "Loeschoperation %s wird als %s beendet — sie war nicht "
+                "terminal und kein Prozess hat sie uebernommen.",
+                operation_id,
+                error_type,
+            )
+            self.fail(operation_id, message, error_type=error_type)
+
+    async def _restart_orphan_operations_db(self) -> list[str]:
+        """Non-terminal operations left behind by a previous process."""
+
+        async with self._session(DEFAULT_TENANT) as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(deletion_operations.c.operation_id).where(
+                            deletion_operations.c.status.in_(
+                                (
+                                    DeletionOperationStatus.QUEUED.value,
+                                    DeletionOperationStatus.RUNNING.value,
+                                )
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return list(rows)
 
     def has_collection_deletion(self, collection_id: str) -> bool:
         """Return whether a retained aggregate tombstone fences a collection."""
@@ -328,6 +441,7 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         limit: int,
         after: tuple[float, str] | None,
     ) -> tuple[list[dict[str, Any]], str | None]:
+        self.expire_stalled_operations()
         records, next_cursor = self._call(
             self._list_operations_db(
                 tenant_id=tenant_id,

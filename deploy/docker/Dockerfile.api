@@ -47,7 +47,7 @@ COPY --from=build /app/src /app/src
 # non-root UID that is a member of group 0, not as the image's USER. Such a UID
 # owns no files, so every path the process writes is made group-0 owned and
 # group-writable (chgrp 0 + chmod g=u): /app for HOME, logs and the image-default
-# object store (data/object-store), the fastembed/qdrant-client model cache
+# object store (data/object-store), the XDG cache directory
 # (XDG_CACHE_HOME), and the /var/lib/inqtrix mount points -- object store and
 # trace spool -- pre-created so a mounted volume/PVC inherits these writable
 # perms for the random UID (a fresh Docker named volume copies the image dir's

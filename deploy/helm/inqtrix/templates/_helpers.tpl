@@ -408,7 +408,7 @@ seccompProfile:
 
 {{/*
 Writable volumes/mounts for the api and worker pods under a read-only root
-filesystem: scratch /tmp, the XDG cache (fastembed/qdrant-client models),
+filesystem: scratch /tmp, the XDG cache,
 /app/logs (so INQTRIX_LOG_ENABLED=true does not crash on the read-only root --
 note these logs are ephemeral; container stdout is the durable sink), and the
 local object store. The object store mounts at the SAME path the app writes to

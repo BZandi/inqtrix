@@ -714,7 +714,7 @@ Each component, and the role it plays:
 
 - **Postgres:** durable run rows, identity, knowledge metadata, prompt templates. The Compose deployment defaults to it; the `migrate` service applies the schema once before the API starts.
 - **Collaboration service:** a private, single-replica Node/Hocuspocus coordinator for Yjs synchronization. FastAPI remains the identity and persistence authority, and the sidecar has neither a public port nor database credentials.
-- **Qdrant:** the persistent vector + document store; the only backend with hybrid dense+BM25 retrieval. Without it the knowledge engine uses an in-memory, dense-only store.
+- **Qdrant:** the persistent vector + document store; the only backend with hybrid dense+BM25 retrieval (BM25 runs inside the Qdrant server itself, no client-side model). Without it the knowledge engine uses an in-memory, dense-only store.
 - **Valkey + worker:** dispatches native runs to separate worker processes for horizontal scaling and restart survival. The worker refuses to start without both Postgres and Valkey.
 - **Object store:** storage for uploaded file blobs; a local volume by default, or any S3 endpoint (SeaweedFS is the bundled reference).
 - **OIDC / LDAP IdP:** browser SSO or directory bind login. External enterprise

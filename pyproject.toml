@@ -75,14 +75,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Qdrant-backed knowledge store with hybrid retrieval; fastembed is
-# pulled for the BM25 sparse ALGORITHM (tokenizer/stemmer, no hosted
-# model weights beyond stopword files).
+# Qdrant-backed knowledge store with hybrid retrieval. The BM25 sparse
+# branch runs INSIDE the Qdrant server (core inference, server >= 1.15.3,
+# checked at startup) — no client-side embedding library, nothing
+# downloads at runtime.
 # The floor tracks the bundled server minor: Qdrant's supported upgrade
 # order is SDK first, then server, and an older client against a newer
 # server is the unsupported direction.
 knowledge-qdrant = [
-    "qdrant-client[fastembed]>=1.19,<2.0",
+    "qdrant-client>=1.19,<2.0",
 ]
 # Valkey-Streams job queue for durable run dispatch (INQTRIX_QUEUE_BACKEND=valkey).
 queue-valkey = [

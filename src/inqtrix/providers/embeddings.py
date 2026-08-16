@@ -8,7 +8,7 @@ selectable-model surface feeding the embedding catalog.
 First implementation: :class:`LiteLLMEmbeddings` against any
 OpenAI-compatible ``/embeddings`` endpoint (LiteLLM proxy, OpenAI,
 vLLM, Ollama) — zero new dependencies, reusing the ``openai`` SDK
-already in the tree. A local ``fastembed``-backed provider is a staged
+already in the tree. A local in-process provider is a staged
 alternative behind the same ABC for deployments without an embeddings
 endpoint.
 """

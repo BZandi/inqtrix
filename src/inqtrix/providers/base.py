@@ -202,7 +202,10 @@ def provider_cancel_scope(
         probe: Zero-argument callable returning ``True`` once the run has
             been cancelled (typically ``threading.Event.is_set``). ``None``
             binds nothing and preserves the historical behaviour exactly
-            (library mode, editor calls, custom adapters).
+            (library mode, custom adapters) — note that inside an outer
+            scope, ``None`` therefore INHERITS that scope rather than
+            suspending it; there is deliberately no way to mark a
+            sub-call uncancellable.
     """
     if probe is None:
         yield

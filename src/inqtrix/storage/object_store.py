@@ -121,6 +121,18 @@ class ObjectStore(ABC):
         """Remove the blob. Missing keys are tolerated — the registry
         row is the source of truth and may outlive a crashed upload."""
 
+    @abstractmethod
+    def list_keys(self, prefix: str) -> Iterator[tuple[str, float]]:
+        """Yield ``(key, last_modified_epoch)`` for blobs under *prefix*.
+
+        Maintenance-only surface: the orphan sweep compares the physical
+        inventory against the registry rows. Implementations yield
+        page by page as the backend delivers entries and raise
+        ``ObjectStoreError`` when the backend cannot be listed — an
+        unreachable backend must never look like an empty store to a
+        job that deletes based on the answer.
+        """
+
 
 def _iter_file(handle: IO[bytes]) -> Iterator[bytes]:
     """Yield chunks from an already-open handle, closing it at the end."""
@@ -200,6 +212,27 @@ class LocalFSObjectStore(ObjectStore):
     def delete(self, key: str) -> None:
         """Remove the blob file; a missing file is a tolerated no-op."""
         self._path(key).unlink(missing_ok=True)
+
+    def list_keys(self, prefix: str) -> Iterator[tuple[str, float]]:
+        """Walk the local tree under *prefix* and yield key + mtime."""
+        base = self._path(prefix)
+        if not base.exists():
+            return
+        if not base.is_dir():
+            raise ObjectStoreError(
+                f"list prefix is not a directory: {prefix!r}"
+            )
+        root = self._root.resolve()
+        for path in sorted(base.rglob("*")):
+            if not path.is_file() or path.suffix == ".part":
+                continue
+            try:
+                stat = path.stat()
+            except OSError as exc:
+                raise ObjectStoreError(
+                    f"local store listing failed at {path.name!r}"
+                ) from exc
+            yield path.relative_to(root).as_posix(), stat.st_mtime
 
 
 class S3ObjectStore(ObjectStore):
@@ -533,4 +566,18 @@ class S3ObjectStore(ObjectStore):
         except Exception as exc:
             raise _s3_operation_error(
                 "delete", target=f"key {key!r}", cause=exc
+            ) from exc
+
+    def list_keys(self, prefix: str) -> Iterator[tuple[str, float]]:
+        """Stream the bucket inventory under *prefix* via pagination."""
+        try:
+            paginator = self._s3().get_paginator("list_objects_v2")
+            for page in paginator.paginate(
+                Bucket=self._bucket, Prefix=prefix
+            ):
+                for entry in page.get("Contents", ()):
+                    yield entry["Key"], entry["LastModified"].timestamp()
+        except Exception as exc:
+            raise _s3_operation_error(
+                "list", target=f"prefix {prefix!r}", cause=exc
             ) from exc

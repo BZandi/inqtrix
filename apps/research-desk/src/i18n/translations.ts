@@ -1651,7 +1651,7 @@ export const translations = {
       openSourceLabel: 'Open Source auf GitHub',
       documentationLabel: 'Dokumentation',
       documentationUrl: 'https://github.com/BZandi/inqtrix/blob/main/docs/README.md',
-      repositoryLabel: 'BZandi/inqtrix',
+      repositoryLabel: 'Quellcode',
       repositoryUrl: 'https://github.com/BZandi/inqtrix',
       licenseLabel: 'AGPL-3.0-only',
       licenseUrl: 'https://github.com/BZandi/inqtrix/blob/main/LICENSE',
@@ -2175,6 +2175,11 @@ export const translations = {
       runQueue: 'Queue',
       workerDispatch: 'Worker',
       inProcessExecution: 'In-process',
+      queueNoConsumers: 'Keine Konsumenten',
+      queueTelemetry: (consumers: number, depth: number | null) =>
+        depth == null
+          ? `${consumers} Konsumenten`
+          : `${consumers} Konsumenten · ${depth} Nachrichten`,
       reachable: 'Erreichbar',
       unreachable: 'Nicht erreichbar',
       filesKnowledgeTitle: 'Dateien & Knowledge',
@@ -2205,6 +2210,7 @@ export const translations = {
       traceRetentionDays: (days: number) =>
         `${days} Tage (eigener Aufräum-Job)`,
       traceRetentionSpool: 'Datei-Spool mit Größen-Cap',
+      retentionNotEnforced: 'Ohne Worker nicht durchgesetzt',
       runtimeLabels: {
         azure: 'Azure',
         bm25_german: 'BM25 Deutsch',
@@ -4030,7 +4036,7 @@ export const translations = {
       openSourceLabel: 'Open source on GitHub',
       documentationLabel: 'Documentation',
       documentationUrl: 'https://github.com/BZandi/inqtrix/blob/main/docs/README.md',
-      repositoryLabel: 'BZandi/inqtrix',
+      repositoryLabel: 'Source code',
       repositoryUrl: 'https://github.com/BZandi/inqtrix',
       licenseLabel: 'AGPL-3.0-only',
       licenseUrl: 'https://github.com/BZandi/inqtrix/blob/main/LICENSE',
@@ -4552,6 +4558,11 @@ export const translations = {
       runQueue: 'Queue',
       workerDispatch: 'Worker',
       inProcessExecution: 'In-process',
+      queueNoConsumers: 'No consumers',
+      queueTelemetry: (consumers: number, depth: number | null) =>
+        depth == null
+          ? `${consumers} consumers`
+          : `${consumers} consumers · ${depth} messages`,
       reachable: 'Reachable',
       unreachable: 'Not reachable',
       filesKnowledgeTitle: 'Files & Knowledge',
@@ -4582,6 +4593,7 @@ export const translations = {
       traceRetentionDays: (days: number) =>
         `${days} days (own cleanup job)`,
       traceRetentionSpool: 'File spool with size cap',
+      retentionNotEnforced: 'Not enforced without a worker',
       runtimeLabels: {
         azure: 'Azure',
         bm25_german: 'German BM25',

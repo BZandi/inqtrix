@@ -2409,3 +2409,110 @@ async def test_failed_edit_resume_restores_prior_plan_status(
     assert plan.version == 1
     assert plan.status == "proposed"
     assert len(versions) == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_releases_canvas_and_settles_approvals(
+    service: AgentControlService,
+    run_store: RunStore,
+) -> None:
+    """A dead run leaves no locked canvas and no live-looking approval."""
+    run_id = _parked_agent_run(run_store)
+    artifact = await service.store.upsert_artifact(
+        run_id=run_id,
+        artifact_id="art_settle_memo",
+        kind="memo",
+        session_id="sess-settle",
+        title="Memo",
+        status="writing",
+        content_markdown="# Gestreamter Stand",
+        payload={},
+        refs=[],
+        updated_by="agent",
+    )
+    approval = await service.store.create_approval(_approval(run_id))
+    clarification = await service.store.create_clarification(
+        ClarificationRecord(
+            clarification_id=f"clr_{uuid.uuid4().hex[:8]}",
+            run_id=run_id,
+            question="Welcher Zeitraum?",
+            options=(
+                {"id": "q1", "label": "Q1"},
+                {"id": "q2", "label": "Q2"},
+            ),
+            default_assumption="Q1",
+        )
+    )
+    assert run_store.cancel(run_id, visible_to=VISIBLE)["status"] == "cancelled"
+
+    assert await service.reconcile_terminal_tasks(run_id) is True
+
+    released, revisions = await service.store.get_artifact(
+        run_id, artifact.artifact_id
+    )
+    del revisions
+    assert released.status == "ready"
+    assert released.revision == artifact.revision, (
+        "release must not fabricate a revision nobody authored"
+    )
+    assert released.content_markdown == "# Gestreamter Stand"
+
+    settled = await service.store.get_approval(run_id, approval.approval_id)
+    assert settled.status == "rejected"
+    assert settled.decision == "", (
+        "system settlement must stay distinguishable from a user reject"
+    )
+    assert "endete" in settled.note
+    assert settled.decided_by_user_id is None
+
+    rounds = await service.store.list_clarifications(run_id)
+    kept = [
+        row for row in rounds
+        if row.clarification_id == clarification.clarification_id
+    ]
+    assert kept and kept[0].status == "pending", (
+        "unanswered rounds stay pending by contract — truthful and inert"
+    )
+
+    # Second pass is a no-op pair.
+    assert await service.store.settle_terminal_control_rows(run_id) == (0, 0)
+
+    # The canvas is editable again.
+    edited = await service.user_update_artifact(
+        run_id=run_id,
+        artifact_id=artifact.artifact_id,
+        content_markdown="# Wieder editierbar",
+        expected_revision=released.revision,
+        principal=PRINCIPAL,
+    )
+    assert edited.updated_by == "user"
+
+
+@pytest.mark.asyncio
+async def test_failed_run_settles_control_rows_too(
+    service: AgentControlService,
+    run_store: RunStore,
+) -> None:
+    """The failed branch of the reconcile settles exactly like cancelled."""
+    run_id = _parked_agent_run(run_store)
+    await service.store.upsert_artifact(
+        run_id=run_id,
+        artifact_id="art_settle_failed",
+        kind="memo",
+        session_id="sess-settle-failed",
+        title="Memo",
+        status="writing",
+        content_markdown="# Stand",
+        payload={},
+        refs=[],
+        updated_by="agent",
+    )
+    run_store.fail(run_id, "kaputt", error_type="server_error")
+    assert run_store.get(run_id, visible_to=VISIBLE)["status"] == "failed"
+
+    assert await service.reconcile_terminal_tasks(run_id) is True
+
+    released, _revisions = await service.store.get_artifact(
+        run_id, "art_settle_failed"
+    )
+    assert released.status == "ready"

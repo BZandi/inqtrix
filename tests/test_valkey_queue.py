@@ -140,3 +140,20 @@ def test_dead_letter_moves_payload_and_acks(client):
     assert len(dead) == 1
     assert dead[0][1]["run_id"] == "run_1"
     assert dead[0][1]["reason"] == "max_attempts_exceeded"
+
+
+def test_group_info_reports_consumers_and_depth(client):
+    queue = make_queue(client)
+    assert queue.group_info() is None, "no stream yet reads as no group"
+    queue.ensure_group()
+    queue.enqueue(run_id="run_gi", tenant_id="default")
+    info = queue.group_info()
+    assert info is not None
+    assert info["depth"] == 1
+    assert info["consumers"] == 0, "nobody claimed yet"
+    claimed = queue.claim_new(block_ms=1)
+    assert claimed, "the enqueued dispatch must be claimable"
+    info_after = queue.group_info()
+    assert info_after is not None
+    assert info_after["consumers"] >= 1
+    assert info_after["pending"] >= 1

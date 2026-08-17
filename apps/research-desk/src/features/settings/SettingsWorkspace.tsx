@@ -352,6 +352,8 @@ export default function SettingsWorkspace({
   const apiRequestBaseUrl = import.meta.env.VITE_INQTRIX_API_BASE_URL || undefined
   const apiBaseUrl = apiRequestBaseUrl || t.settings.sameOriginApi
   const legal = apiHealth?.legal
+  // Server build wins once connected; the SPA build constant covers demo/offline.
+  const appVersion = apiHealth?.version ?? __APP_VERSION__
   const hasMultiStackSelection = stackDiscoveryStatus === 'available' && stackOptions.length > 1
   const projectSourceUrl = legal?.source_url ?? t.authLock.repositoryUrl
   const stackModeLabel = stackDiscoveryStatus === 'available'
@@ -524,6 +526,7 @@ export default function SettingsWorkspace({
         apiError={apiError}
         apiHealth={apiHealth}
         apiKey={apiKey}
+        appVersion={appVersion}
         authMode={authMode}
         authSession={authSession}
         onSsoLogin={onSsoLogin}
@@ -783,6 +786,7 @@ function SettingsPanel({
   apiError,
   apiHealth,
   apiKey,
+  appVersion,
   authMode,
   authSession,
   onSsoLogin,
@@ -827,6 +831,7 @@ function SettingsPanel({
   apiError: string | null
   apiHealth: InqtrixHealth | null
   apiKey: string
+  appVersion: string
   authMode: AuthMode
   authSession?: {
     status: string
@@ -987,6 +992,7 @@ function SettingsPanel({
           />
         ) : (
           <LicensingPanel
+            appVersion={appVersion}
             legal={legal}
             projectSourceUrl={projectSourceUrl}
           />
@@ -2016,9 +2022,11 @@ function ConnectionPanel({
 }
 
 function LicensingPanel({
+  appVersion,
   legal,
   projectSourceUrl,
 }: {
+  appVersion: string
   legal: InqtrixHealth['legal'] | undefined
   projectSourceUrl: string
 }) {
@@ -2031,10 +2039,13 @@ function LicensingPanel({
         description={legal?.copyright ?? t.authLock.copyright}
         title={legal?.project ?? t.appName}
       >
-        <StatusBadge
-          label={legal?.license ?? t.authLock.licenseLabel}
-          tone="brand"
-        />
+        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+          <StatusBadge
+            label={legal?.license ?? t.authLock.licenseLabel}
+            tone="brand"
+          />
+          <StatusBadge label={`v${appVersion}`} tone="neutral" />
+        </div>
       </LicensingInfoRow>
       <LicensingInfoRow title={t.settings.projectSource}>
         <span className="block min-w-0 break-words t-meta text-foreground">

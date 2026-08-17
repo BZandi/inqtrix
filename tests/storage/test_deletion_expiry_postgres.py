@@ -2,9 +2,11 @@
 
 A deletion receipt that stays ``queued``/``running`` forever is a dead end:
 clients poll it without an exit, ``retry`` is rejected because it requires
-``delete_failed``, and a second DELETE answers 409. These tests pin the two
-ways out — the dispatch timeout for an operation nobody claimed, and the
-restart sweep for one whose in-process work closure died with its process.
+``delete_failed``, and a second DELETE answers 409. These tests pin the
+three ways out — the dispatch timeout for an operation nobody claimed, the
+restart sweep for one whose in-process work closure died with its process,
+and the lost-execution expiry for a RUNNING receipt whose executing thread
+died without a terminal write.
 
 Every store gets its OWN engine (it drives its own event loop, and asyncpg
 pools are loop-affine), and the test's own assertions use short-lived
@@ -194,6 +196,9 @@ async def test_unclaimed_operation_expires_and_frees_the_session() -> None:
     store = _store(queue=_SilentQueue(), dispatch_timeout_seconds=0.0)
     try:
         operation_id = _submit_session_deletion(store, "as_expire")
+        # submit runs (and throttles) an expiry pass of its own; the next
+        # read triggers the one under test.
+        store._last_expiry_check = None
         assert _get(store, operation_id)["status"] == (
             DeletionOperationStatus.DELETE_FAILED.value
         )
@@ -244,6 +249,7 @@ async def test_expiry_is_idempotent() -> None:
     store = _store(queue=_SilentQueue(), dispatch_timeout_seconds=0.0)
     try:
         operation_id = _submit_session_deletion(store, "as_twice")
+        store._last_expiry_check = None
         first = _get(store, operation_id)
         store._last_expiry_check = None
         second = _get(store, operation_id)
@@ -308,3 +314,177 @@ async def test_queue_mode_never_sweeps_live_worker_rows() -> None:
         )
     finally:
         successor.close()
+
+
+def _orphan_running_operation(store, session_id: str, monkeypatch) -> str:
+    """Produce a RUNNING receipt whose executing thread died terminal-less.
+
+    The terminal write is broken while the in-process worker unwinds, so
+    the row stays ``running`` with no ``_local`` owner — the exact shape a
+    storage outage leaves behind.
+    """
+    import time as _time
+
+    from inqtrix.runs import durable_store as _durable
+    from inqtrix.runs.deletion_postgres import (
+        PostgresDeletionOperationStore as _Store,
+    )
+
+    monkeypatch.setattr(_durable, "_TERMINAL_WRITE_ATTEMPTS", 1)
+    monkeypatch.setattr(
+        _durable, "_TERMINAL_WRITE_BACKOFF_START_SECONDS", 0.01
+    )
+    broken = {"on": True}
+    original = _Store._terminal_db
+
+    def _breakable(self, *args, **kwargs):
+        if broken["on"]:
+
+            async def _boom():
+                raise RuntimeError("db down")
+
+            return _boom()
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Store, "_terminal_db", _breakable)
+
+    def _dying_work(handle):
+        raise RuntimeError("kaputt")
+
+    summary = store.submit(
+        target_kind=DeletionTargetKind.AGENT_SESSION,
+        target_id=session_id,
+        manifest=(),
+        tenant_id="default",
+        created_by_user_id=OWNER_ID,
+        workspace_id=WORKSPACE,
+        work=_dying_work,
+        session_context=SessionDeletionContext(
+            target_kind=DeletionTargetKind.AGENT_SESSION,
+            session_id=session_id,
+        ),
+        total_items=2,
+    )
+    operation_id = summary["operation_id"]
+    deadline = _time.monotonic() + 10.0
+    while _time.monotonic() < deadline:
+        if operation_id not in store._local:
+            break
+        _time.sleep(0.05)
+    else:
+        pytest.fail("worker thread never unwound")
+    broken["on"] = False
+    return operation_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings(
+    # The worker thread deliberately dies re-raising after its terminal
+    # write is broken — that unwind is exactly the scenario under test.
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning"
+)
+async def test_lost_running_operation_expires_and_stays_retryable(
+    monkeypatch,
+) -> None:
+    """A RUNNING receipt without an executor converges via the expiry."""
+
+    import inqtrix.runs.deletion_postgres as deletion_module
+
+    await _seed_session("as_lost_running")
+    store = _store(queue=None, dispatch_timeout_seconds=10_000.0)
+    try:
+        operation_id = _orphan_running_operation(
+            store, "as_lost_running", monkeypatch
+        )
+        monkeypatch.setattr(
+            deletion_module, "_EXECUTION_LOST_GRACE_SECONDS", 0.0
+        )
+        store._last_expiry_check = None
+        summary = _get(store, operation_id)
+        assert summary["status"] == (
+            DeletionOperationStatus.DELETE_FAILED.value
+        )
+        assert summary["error"]["type"] == "execution_lost"
+
+        row = await _session_row("as_lost_running")
+        assert row["lifecycle_status"] == "delete_failed"
+
+        retried = store.retry(
+            operation_id,
+            tenant_id="default",
+            created_by_user_id=OWNER_ID,
+            workspace_id=WORKSPACE,
+            work=lambda handle: None,
+        )
+        assert retried["status"] in (
+            DeletionOperationStatus.QUEUED.value,
+            DeletionOperationStatus.RUNNING.value,
+            DeletionOperationStatus.DELETED.value,
+        )
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning"
+)
+async def test_queue_mode_never_expires_running_rows(monkeypatch) -> None:
+    """RUNNING rows belong to workers in queue mode — no expiry may touch them."""
+
+    import inqtrix.runs.deletion_postgres as deletion_module
+
+    await _seed_session("as_worker_running")
+    producer = _store(queue=None, dispatch_timeout_seconds=10_000.0)
+    try:
+        operation_id = _orphan_running_operation(
+            producer, "as_worker_running", monkeypatch
+        )
+    finally:
+        producer.close()
+
+    successor = _store(
+        queue=_SilentQueue(),
+        dispatch_timeout_seconds=10_000.0,
+        worker_id="new-process",
+    )
+    try:
+        monkeypatch.setattr(
+            deletion_module, "_EXECUTION_LOST_GRACE_SECONDS", 0.0
+        )
+        successor._last_expiry_check = None
+        assert _get(successor, operation_id)["status"] == (
+            DeletionOperationStatus.RUNNING.value
+        )
+    finally:
+        successor.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning"
+)
+async def test_submit_pass_expires_stale_receipts_first(monkeypatch) -> None:
+    """A fresh DELETE call heals unrelated lost receipts on its way in."""
+
+    import inqtrix.runs.deletion_postgres as deletion_module
+
+    await _seed_session("as_lost_before_submit")
+    await _seed_session("as_new_target")
+    store = _store(queue=None, dispatch_timeout_seconds=10_000.0)
+    try:
+        lost_id = _orphan_running_operation(
+            store, "as_lost_before_submit", monkeypatch
+        )
+        monkeypatch.setattr(
+            deletion_module, "_EXECUTION_LOST_GRACE_SECONDS", 0.0
+        )
+        store._last_expiry_check = None
+        _submit_session_deletion(store, "as_new_target")
+        summary = _get(store, lost_id)
+        assert summary["status"] == (
+            DeletionOperationStatus.DELETE_FAILED.value
+        )
+        assert summary["error"]["type"] == "execution_lost"
+    finally:
+        store.close()

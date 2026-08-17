@@ -105,6 +105,8 @@ def test_runtime_payload_reports_configured_backends_without_secrets():
         "execution": "worker_dispatch",
         "queue": "valkey",
         "queue_available": True,
+        "queue_consumers": None,
+        "queue_depth": None,
         "store": "postgres",
         "worker_dispatch": True,
     }
@@ -316,3 +318,25 @@ def test_bounded_probe_names_exception_type(caplog):
         "vector_store" in record.message and "ValueError" in record.message
         for record in caplog.records
     )
+
+
+def test_runtime_payload_carries_probed_queue_consumer_visibility():
+    """XINFO-derived consumer/depth values reach the runs manifest."""
+    from inqtrix.services.system_runtime import RuntimeProbeResults
+
+    container = _configured_runtime_container()
+    probes = RuntimeProbeResults(
+        queue_available=True,
+        queue_consumers=2,
+        queue_depth=5,
+    )
+    payload = system_runtime_payload(container, probes=probes)
+    assert payload["runs"]["queue_consumers"] == 2
+    assert payload["runs"]["queue_depth"] == 5
+
+    degraded = system_runtime_payload(
+        container,
+        probes=RuntimeProbeResults(queue_available=True),
+    )
+    assert degraded["runs"]["queue_consumers"] is None
+    assert degraded["runs"]["queue_depth"] is None

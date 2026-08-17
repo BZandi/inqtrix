@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from queue import Queue
@@ -45,6 +46,24 @@ log = logging.getLogger("inqtrix")
 DEFAULT_TENANT = "default"
 
 _SUBSCRIPTION_POLL_SECONDS = 0.3
+
+# Worker-side terminal writes retry through transient storage outages:
+# losing that one write leaves the row non-terminal with nobody executing
+# it. 5 attempts with 1→2→4→8 s backoff sleeps; the cap only matters if
+# the attempt count is ever raised. Worst case per exhausted loop is
+# attempts x statement timeout plus the sleeps, during which the worker
+# thread keeps holding its execution slot — bounded by configuration,
+# never unbounded.
+_TERMINAL_WRITE_ATTEMPTS = 5
+_TERMINAL_WRITE_BACKOFF_START_SECONDS = 1.0
+_TERMINAL_WRITE_BACKOFF_CAP_SECONDS = 15.0
+
+# Lost-execution fence (no-queue mode): active rows whose id is absent
+# from the in-process registry are terminalized on read. The grace period
+# only shields the submit→claim and wake→dispatch windows — ownership is
+# decided by registry membership, never by age.
+_EXECUTION_LOST_GRACE_SECONDS = 60.0
+_EXECUTION_LOST_CHECK_INTERVAL_SECONDS = 15.0
 
 
 @dataclass
@@ -249,7 +268,13 @@ class DurableJobStoreBase:
         # crash-recovery path is stream reclaim, and the blanket sweep
         # would fail every queued/running run of the deployment on
         # worker start.
-        self._sweep_orphans = resolve_orphan_sweep(queue, recover_orphans)
+        #
+        # ``_recovers_orphans`` is the standing capability (it also
+        # gates the lost-execution fence); ``_sweep_orphans`` is the
+        # one-shot restart-sweep flag consumed by the first cleanup.
+        self._recovers_orphans = resolve_orphan_sweep(queue, recover_orphans)
+        self._sweep_orphans = self._recovers_orphans
+        self._last_execution_lost_check: float | None = None
 
     # -- async bridge ----------------------------------------------------- #
 
@@ -365,9 +390,26 @@ class DurableJobStoreBase:
             local = self._local.get(entity_id)
             if local is None or local.work is None:
                 continue
-            claimed = self._call(
-                self._claim_db(entity_id, DEFAULT_TENANT, allow_takeover=False)
-            )
+            try:
+                claimed = self._call(
+                    self._claim_db(entity_id, DEFAULT_TENANT, allow_takeover=False)
+                )
+            except Exception:  # noqa: BLE001 — keep dispatch draining
+                # The claim did not commit (or its outcome is unknown):
+                # drop local ownership so the row converges through the
+                # lost-execution path instead of staying exempt behind a
+                # dead registry entry, and keep draining — stopping here
+                # would strand the remaining pending ids with no future
+                # dispatch trigger on an idle process.
+                self._local.pop(entity_id, None)
+                log.exception(
+                    "%s %s konnte nicht uebernommen werden — lokale "
+                    "Ausfuehrung verworfen; die Zeile wird als verloren "
+                    "beendet.",
+                    self._job_kind,
+                    entity_id,
+                )
+                continue
             if claimed is None:
                 self._local.pop(entity_id, None)
                 continue
@@ -395,6 +437,115 @@ class DurableJobStoreBase:
         traces (the run store) override this. Implementations register
         all teardown on ``stack`` — the worker closes it in its finally.
         """
+
+    def _persist_terminal_outcome(self, entity_id: str, write: Any) -> None:
+        """Retry one worker-side terminal write through storage outages.
+
+        Only the in-process worker unwind uses this: losing THIS write
+        leaves the row non-terminal with nobody executing it, and the
+        outage that killed the work is exactly when the write fails. The
+        write is CAS-guarded and therefore idempotent. Public
+        ``complete()``/``fail()`` never retry — API callers get the
+        error immediately. Per-attempt duration is bounded only by the
+        engine's statement timeout.
+        """
+        delay = _TERMINAL_WRITE_BACKOFF_START_SECONDS
+        for attempt in range(1, _TERMINAL_WRITE_ATTEMPTS + 1):
+            try:
+                write()
+                return
+            except Exception:  # noqa: BLE001 — retry transient outages
+                if (
+                    self._closing
+                    or self._closed
+                    or attempt == _TERMINAL_WRITE_ATTEMPTS
+                ):
+                    log.error(
+                        "Terminal-Schreibvorgang fuer %s %s nach %d "
+                        "Versuchen aufgegeben — die Zeile bleibt aktiv, "
+                        "bis die Verlust-Erkennung sie beim naechsten "
+                        "Lesezugriff beendet.",
+                        self._job_kind,
+                        entity_id,
+                        attempt,
+                        exc_info=True,
+                    )
+                    raise
+                log.warning(
+                    "Terminal-Schreibvorgang fuer %s %s fehlgeschlagen "
+                    "(Versuch %d/%d) — naechster Versuch in %.0f s.",
+                    self._job_kind,
+                    entity_id,
+                    attempt,
+                    _TERMINAL_WRITE_ATTEMPTS,
+                    delay,
+                    exc_info=attempt == 1,
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, _TERMINAL_WRITE_BACKOFF_CAP_SECONDS)
+
+    # -- lost-execution fence (no-queue mode) ----------------------------- #
+
+    def _expire_lost_executions(self) -> bool:
+        """Terminalize active rows this process should execute but does not.
+
+        No-queue mode only (queue mode: workers own the rows and stream
+        reclaim recovers them); read-triggered and throttled, so quiet
+        deployments pay nothing. Runs entirely on the sync side — the
+        registry snapshot needs ``self._lock``, which store-loop
+        coroutines must never take. Rows in ``self._local`` are owned
+        (running, parked, or pending dispatch) and never touched; the
+        per-candidate status CAS in the terminal write makes a lost race
+        harmless. A thread that is alive but stuck keeps its registry
+        entry and is deliberately out of scope here — the statement
+        timeout bounds those hangs into ordinary failures.
+
+        Assumes the documented single-API-process no-queue deployment: a
+        second process sharing the database would have its in-flight
+        rows terminalized here.
+        """
+        if not self._recovers_orphans:
+            return False
+        now = time.monotonic()
+        with self._lock:
+            if self._closing or self._closed:
+                return False
+            last = self._last_execution_lost_check
+            if (
+                last is not None
+                and now - last < _EXECUTION_LOST_CHECK_INTERVAL_SECONDS
+            ):
+                return False
+            self._last_execution_lost_check = now
+        candidates = self._call(
+            self._lost_execution_candidates_db(_EXECUTION_LOST_GRACE_SECONDS)
+        )
+        if not candidates:
+            return False
+        with self._lock:
+            owned = set(self._local)
+        lost = [
+            candidate for candidate in candidates if candidate not in owned
+        ]
+        if not lost:
+            return False
+        return bool(self._call(self._expire_lost_executions_db(lost)))
+
+    async def _lost_execution_candidates_db(
+        self, grace_seconds: float
+    ) -> list[str]:
+        """Ids of active rows older than the dispatch grace period."""
+        raise NotImplementedError
+
+    async def _expire_lost_executions_db(self, entity_ids: list[str]) -> bool:
+        """Terminalize confirmed lost executions through the store's path.
+
+        Returns ``True`` when an expiry pass ran over the candidates —
+        the per-row status CAS inside absorbs races, so the return value
+        only tells the sync driver that post-commit handoffs may need
+        draining, not that every candidate changed.
+        """
+        raise NotImplementedError
 
     def _run_worker(
         self,
@@ -429,11 +580,21 @@ class DurableJobStoreBase:
             # resume may already have re-queued the run, and completing
             # it here would destroy the interrupt.
             if not getattr(handle, "parked", False):
-                self._auto_complete(entity_id)
+                self._persist_terminal_outcome(
+                    entity_id, lambda: self._auto_complete(entity_id)
+                )
         except Exception as exc:  # noqa: BLE001 — workers terminate cleanly
             crashed = True
             log.exception("%s %s failed", self._job_kind, entity_id)
-            self._terminate_work_exception(handle, entity_id, exc)
+            # ``except ... as`` unbinds its name at block exit; the retry
+            # closure needs a binding that survives.
+            failure = exc
+            self._persist_terminal_outcome(
+                entity_id,
+                lambda: self._terminate_work_exception(
+                    handle, entity_id, failure
+                ),
+            )
         finally:
             # Telemetry teardown FIRST (the span must close inside this
             # thread), then the park handoff: only after this unwind may

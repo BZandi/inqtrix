@@ -17,6 +17,7 @@ import {
 import { useLocale } from '@/i18n/LocaleProvider'
 import { patRevealReducer } from './adminModel'
 import type { usePatTokens } from './usePatTokens'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 function formatDate(seconds: number | null, locale: string): string | null {
   if (seconds == null) return null
@@ -165,7 +166,7 @@ export function AccessTokensPanel({
               <Button
                 className="shrink-0 gap-1.5"
                 onClick={() => {
-                  void navigator.clipboard?.writeText(reveal.token)
+                  void copyTextToClipboard(reveal.token)
                   setCopied(true)
                 }}
                 size="sm"

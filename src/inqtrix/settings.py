@@ -845,7 +845,7 @@ class ServerSettings(BaseSettings):
             "growth, or set 0 to evict on the next cleanup."
         ),
     )
-    """Retention (seconds) for terminal native run records in the durable (Postgres) store; default 90 days. Distinct from ``run_completed_ttl_seconds``, which bounds the in-memory store's replay buffer to a short window: this governs how long completed research reports stay fetchable from the database, so they survive page reloads, re-logins, and other devices instead of vanishing after the in-memory TTL. The in-memory store ignores this value. Lazy cleanup deletes terminal rows older than the window (their events and result payloads cascade); raise it to keep reports longer at the cost of bounded table growth, or set 0 to evict on the next cleanup."""
+    """Retention (seconds) for terminal native run records in the durable (Postgres) store; default 90 days. Distinct from ``run_completed_ttl_seconds``, which bounds the in-memory store's replay buffer to a short window: this governs how long completed research reports stay fetchable from the database, so they survive page reloads, re-logins, and other devices instead of vanishing after the in-memory TTL. The in-memory store ignores this value. Lazy cleanup deletes terminal rows older than the window (their events and result payloads cascade); raise it to keep reports longer at the cost of bounded table growth, or set 0 to evict on the next cleanup. Rows that never reached a terminal state are force-failed after a hard 7-day cap and then age out through this same window — a stuck payload therefore lives at most 7 days plus this retention, like any ordinarily failed run."""
     deletion_max_concurrent: int = Field(
         2,
         alias="INQTRIX_DELETION_MAX_CONCURRENT",
@@ -1191,6 +1191,21 @@ class StorageSettings(BaseSettings):
         ),
     )
     """Seconds a request waits for a free pooled connection before failing loudly (default 30, the SQLAlchemy default). A too-small pool trades 'too many connections' errors for waits — this bounds that wait visibly."""
+    command_timeout_seconds: float = Field(
+        120.0,
+        alias="INQTRIX_DATABASE_COMMAND_TIMEOUT_SECONDS",
+        ge=0,
+        description=(
+            "Per-STATEMENT ceiling on pooled engines (asyncpg "
+            "command_timeout; 0 disables). A statement on a silently "
+            "dead connection otherwise hangs its worker thread "
+            "indefinitely — with the ceiling it fails loudly and the "
+            "run-store recovery paths turn it into an ordinary, "
+            "visible failure. Statements legitimately longer than the "
+            "ceiling need a raised value, never a disabled one."
+        ),
+    )
+    """Per-STATEMENT wall-clock ceiling for pooled engines, enforced client-side by asyncpg (default 120 s, ``0`` disables). Bounds the one hang class connection pre-ping cannot catch: an in-flight statement on a dead connection. A fired ceiling surfaces as an ordinary database error wherever such errors already surface; per-statement scope means multi-statement transactions are bounded additively, not in total."""
 
     def pool_kwargs(self) -> dict[str, Any]:
         """The pooled-engine sizing bundle for :func:`build_engine`.
@@ -1204,6 +1219,7 @@ class StorageSettings(BaseSettings):
             "pool_size": self.pool_size,
             "max_overflow": self.pool_max_overflow,
             "pool_timeout": self.pool_timeout_seconds,
+            "command_timeout": self.command_timeout_seconds or None,
         }
 
     replica_count: int = Field(
@@ -1279,6 +1295,19 @@ class StorageSettings(BaseSettings):
         ),
     )
     """Bucket holding every uploaded blob. Object keys are namespaced ``tenants/<tenant>/files/<uuid>``; provisioning behavior is configured separately."""
+    object_orphan_grace_hours: float = Field(
+        24.0,
+        alias="INQTRIX_OBJECT_ORPHAN_GRACE_HOURS",
+        ge=0.0,
+        description=(
+            "Minimum object age before the worker's daily consistency "
+            "sweep may delete a stored blob that has no ``files`` row "
+            "(a crash between blob write and row commit leaves such an "
+            "orphan). ``0`` disables the sweep. Like every prune job, "
+            "the sweep runs in the ``inqtrix-worker`` process only."
+        ),
+    )
+    """Grace age in hours for the worker's object-orphan sweep; ``0`` disables it."""
     s3_access_key: str = Field(
         "",
         alias="INQTRIX_S3_ACCESS_KEY",

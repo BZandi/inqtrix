@@ -388,7 +388,15 @@ def create_app(
         upload_reconciler = getattr(
             startup_container, "upload_reconciler", None
         )
-        if upload_reconciler is not None and database_ready:
+        # Deliberately NOT gated on database_ready: a database blip during
+        # boot would otherwise disable upload recovery for the whole
+        # process lifetime. Each pass degrades to a WARNING on storage
+        # errors and succeeds on its own once the database returns.
+        # Accepted trade-off: unlike the queue-mode worker, which
+        # re-verifies the database contract per claim, a reconciler pass
+        # may resume previously accepted uploads while the boot contract
+        # check still fails against a DML-compatible schema.
+        if upload_reconciler is not None:
             upload_reconciler.start()
         try:
             yield

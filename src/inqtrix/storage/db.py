@@ -140,6 +140,7 @@ def build_engine(
     pool_size: int = 5,
     max_overflow: int = 10,
     pool_timeout: float = 30.0,
+    command_timeout: float | None = None,
 ) -> AsyncEngine:
     """Create the async engine for the platform persistence layer.
 
@@ -169,14 +170,26 @@ def build_engine(
             connection before failing loudly (default 30, the
             SQLAlchemy default). Bounds the queueing latency a
             too-small pool would otherwise convert errors into.
+        command_timeout: Per-statement wall-clock ceiling in seconds,
+            enforced client-side by asyncpg (``None`` disables). Pre-ping
+            only validates connections at checkout; this bounds the one
+            remaining hang class — an in-flight statement on a silently
+            dead connection — by turning it into an ordinary error.
 
     Returns:
         An :class:`AsyncEngine` with pre-ping (survives idle-timeout
         connection kills) and a 30-minute recycle below common
         infrastructure idle limits.
     """
+    connect_args = (
+        {"command_timeout": command_timeout} if command_timeout else {}
+    )
     if null_pool:
-        engine = create_async_engine(database_url, poolclass=NullPool)
+        engine = create_async_engine(
+            database_url,
+            poolclass=NullPool,
+            connect_args=connect_args,
+        )
     else:
         engine = create_async_engine(
             database_url,
@@ -185,6 +198,7 @@ def build_engine(
             pool_size=pool_size,
             max_overflow=max_overflow,
             pool_timeout=pool_timeout,
+            connect_args=connect_args,
         )
     _make_asyncpg_pool_invalidation_atomic(engine)
     return engine

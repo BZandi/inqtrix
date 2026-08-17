@@ -78,6 +78,7 @@ import type {
   KnowledgeCollectionOption,
   KnowledgeDataSource,
 } from './types'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 export type KnowledgeMode = 'ask' | 'find'
 export type KnowledgeAskOptions = {
@@ -1266,7 +1267,9 @@ function KnowledgeQuestionBubble({
 
   async function copyQuestion() {
     try {
-      await navigator.clipboard.writeText(question)
+      if (!(await copyTextToClipboard(question))) {
+        throw new Error('Zwischenablage nicht verfügbar')
+      }
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1200)
     } catch (error) {

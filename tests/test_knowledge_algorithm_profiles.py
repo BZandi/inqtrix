@@ -1,6 +1,6 @@
 """Profile behaviour of the knowledge algorithm, fully offline.
 
-Pins the contracts WP-A2 introduced: exact LLM call counts per
+Pins the profile contracts: exact LLM call counts per
 profile (`schnell` = one answer call, nothing else), the capped
 rewrite loop, ceiling degradation visible in the result state, the
 vocabulary-bridge prompt variant, per-profile rerank wiring, and —
@@ -22,6 +22,7 @@ import pytest
 from inqtrix.auth.principal import Principal
 from inqtrix.core.context import RunContext, RuntimeContext
 from inqtrix.core.results import RunRequest
+from inqtrix.exceptions import AgentCancelled
 from inqtrix.execution_failures import RunExecutionFailure
 from inqtrix.knowledge.algorithm import KnowledgeAlgorithm
 from inqtrix.knowledge.profiles import EVIDENCE_K_MAX
@@ -962,3 +963,115 @@ class TestFinalKOverride:
         )
         assert completed["final_k"] == 20
         assert completed["final_k_overridden"] is True
+
+
+class TestCancellation:
+    """Stop honors the run's cancel token at the pipeline checkpoints."""
+
+    @staticmethod
+    def _cancelled_context(context: RunContext, token: threading.Event) -> RunContext:
+        return RunContext(
+            providers=context.providers,
+            strategies=None,
+            agent_settings=context.agent_settings,
+            cancel_token=token,
+        )
+
+    def test_pre_set_cancel_token_stops_before_any_provider_call(self):
+        llm = ScriptedLLM([SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(llm)
+        token = threading.Event()
+        token.set()
+        with pytest.raises(AgentCancelled):
+            run_with_profile(
+                algorithm, runtime, self._cancelled_context(context, token)
+            )
+        assert llm.gate_prompts == []
+        assert llm.answer_prompts == []
+        assert store.search_top_ks == []
+
+    def test_cancel_between_gate_rounds_stops_the_rewrite_loop(self):
+        token = threading.Event()
+
+        class CancelAfterFirstGate(ScriptedLLM):
+            def complete_with_metadata(self, prompt, **kwargs):
+                response = super().complete_with_metadata(prompt, **kwargs)
+                if self.gate_prompts:
+                    token.set()
+                return response
+
+        llm = CancelAfterFirstGate([REWRITE, SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(llm, grow=True)
+        with pytest.raises(AgentCancelled):
+            run_with_profile(
+                algorithm,
+                runtime,
+                self._cancelled_context(context, token),
+                profile="gruendlich",
+            )
+        assert len(llm.gate_prompts) == 1, "no second gate round after cancel"
+        assert llm.answer_prompts == [], "synthesis never starts after cancel"
+
+    def test_contextualization_fallback_does_not_swallow_cancellation(self):
+        llm = ContextualizingLLM(AgentCancelled("stop"), [SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(llm)
+        token = threading.Event()
+        with pytest.raises(AgentCancelled):
+            run_followup(
+                algorithm, runtime, self._cancelled_context(context, token)
+            )
+        assert store.search_top_ks == [], (
+            "a cancel inside contextualization must never reach retrieval"
+        )
+
+
+    def test_pre_set_cancel_token_stops_before_the_contextualization_call(self):
+        llm = ContextualizingLLM("Wie ist die Haftung geregelt?", [SUFFICIENT])
+        algorithm, store, context, runtime = make_algorithm(llm)
+        token = threading.Event()
+        token.set()
+        with pytest.raises(AgentCancelled):
+            run_followup(
+                algorithm, runtime, self._cancelled_context(context, token)
+            )
+        assert llm.context_prompts == [], (
+            "a pre-set token must not pay for the contextualization call"
+        )
+        assert store.search_top_ks == []
+
+    def test_cancel_during_answer_regeneration_is_not_swallowed(self):
+        """The graceful grounding fallback must never eat a cancellation."""
+
+        class RegenerationCancelLLM(ScriptedLLM):
+            def complete_with_metadata(self, prompt, **kwargs):
+                if "AUSSCHLIESSLICH mit einem JSON-Objekt" in prompt:
+                    return super().complete_with_metadata(prompt, **kwargs)
+                self.answer_prompts.append(prompt)
+                if len(self.answer_prompts) == 1:
+                    return LLMResponse(
+                        content=(
+                            "ZITATE:\n"
+                            '[K1] "Der Mond besteht aus Kaese."\n'
+                            "\n"
+                            "ANTWORT:\n"
+                            "Falsch belegt [K1]."
+                        ),
+                        prompt_tokens=5,
+                        completion_tokens=5,
+                        model="stub-answer",
+                        finish_reason="stop",
+                    )
+                raise AgentCancelled("stop")
+
+        llm = RegenerationCancelLLM()
+        algorithm, store, context, runtime = make_algorithm(
+            llm, gate_enabled=False, grounding_enabled=True
+        )
+        token = threading.Event()
+        with pytest.raises(AgentCancelled):
+            run_with_profile(
+                algorithm, runtime, self._cancelled_context(context, token)
+            )
+        assert len(llm.answer_prompts) == 2, (
+            "the unverified quote must trigger exactly one regeneration"
+        )

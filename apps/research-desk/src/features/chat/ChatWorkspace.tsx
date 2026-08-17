@@ -143,6 +143,7 @@ import { useScrollRestoration } from '@/features/scroll/useScrollRestoration'
 import { OptionMenuHeader, OptionMenuItem, optionMenuContentClassName } from '@/components/ui/option-menu'
 import type { ChatRetryMode, ChatRetryOptions } from './retry'
 import { ComposerDisclosureHint } from '@/features/composer/ComposerDisclosureHint'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 export function shouldClearAcceptedChatDraft(
   accepted: boolean,
@@ -1791,9 +1792,12 @@ const ChatMessageBubble = memo(function ChatMessageBubble({
     try {
       // Assistant answers carry the AI disclosure; the user's own message
       // must round-trip byte-exact, and this handler serves both roles.
-      await navigator.clipboard.writeText(isUser
+      const copied = await copyTextToClipboard(isUser
         ? message.contentMarkdown
         : withAiDisclosure(message.contentMarkdown, t.aiTransparency.exportNotice))
+      if (!copied) {
+        throw new Error('Zwischenablage nicht verfügbar')
+      }
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1200)
     } catch (error) {

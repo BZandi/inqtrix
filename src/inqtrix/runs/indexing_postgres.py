@@ -268,6 +268,21 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         self._restrict_to_workspace_members = restrict_to_workspace_members
         self._sharing_enabled = sharing_enabled
         self._cleanup_callbacks: dict[str, Any] = {}
+        # The restart sweep runs eagerly so orphans of the previous
+        # process are terminal before the first client read — including
+        # the active-collection checks the deletion services consult. A
+        # failure keeps the one-shot flag set; the lazy first-cleanup
+        # fallback remains, so startup gains no new hard dependency.
+        if self._sweep_orphans:
+            try:
+                self._call(self._startup_cleanup_db())
+            except Exception as boot_exc:  # noqa: BLE001 — lazy cleanup remains
+                log.warning(
+                    "Start-Bereinigung fehlgeschlagen — sie wird beim "
+                    "naechsten Datenbankzugriff nachgeholt "
+                    "(error_type=%s).",
+                    type(boot_exc).__name__,
+                )
 
     # -- public surface (IndexingJobStore parity) ------------------------- #
 
@@ -302,6 +317,10 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 is busy (queue-mode counts are cluster-wide via the
                 database, exactly like the run store).
         """
+        # Best-effort fence before admission (bounded by grace +
+        # throttle): a lost execution should stop blocking the
+        # collection or holding a slot within that window.
+        self._expire_lost_executions()
         summary = self._call(
             self._submit_db(
                 collection_id=collection_id,
@@ -351,6 +370,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> dict[str, Any]:
         """Return a public summary for *job_id*."""
+        self._expire_lost_executions()
         return self._call(self._summary_db(job_id, workspace_id, visible_to))
 
     def execution_spec(self, job_id: str) -> IndexingExecutionSpec:
@@ -366,15 +386,40 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> list[dict[str, Any]]:
         """Return summaries for visible jobs, newest first."""
+        self._expire_lost_executions()
         return self._call(self._list_db(collection_id, workspace_id, visible_to))
 
     def has_active_job(self, collection_id: str) -> bool:
         """Whether *collection_id* has a queued/running/cancelling job."""
+        # Best-effort fence first (bounded by grace + throttle): the
+        # deletion services consult this check, and a lost execution
+        # should stop vetoing collection maintenance within that window.
+        # The boolean itself must keep answering even when the
+        # maintenance transaction fails, so fence errors degrade loudly
+        # instead of failing the read.
+        try:
+            self._expire_lost_executions()
+        except Exception as fence_exc:  # noqa: BLE001 — read must answer
+            log.warning(
+                "Verlust-Erkennung vor der Aktivitaetspruefung "
+                "fehlgeschlagen — Pruefung laeuft ohne sie weiter "
+                "(error_type=%s).",
+                type(fence_exc).__name__,
+            )
         return self._call(self._has_active_job_db(collection_id))
 
     def has_active_document_job(self, document_id: str) -> bool:
         """Whether a document-revision job can still publish this document."""
 
+        try:
+            self._expire_lost_executions()
+        except Exception as fence_exc:  # noqa: BLE001 — read must answer
+            log.warning(
+                "Verlust-Erkennung vor der Aktivitaetspruefung "
+                "fehlgeschlagen — Pruefung laeuft ohne sie weiter "
+                "(error_type=%s).",
+                type(fence_exc).__name__,
+            )
         return self._call(self._has_active_document_job_db(document_id))
 
     def cancel(
@@ -604,6 +649,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> PollingJobSubscription:
         """Subscribe after a durable cursor, then tail new events."""
+        self._expire_lost_executions()
         tenant_id, replay = self._call(
             self._replay_db(
                 job_id,
@@ -1045,7 +1091,49 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
     def _events_after(
         self, job_id: str, tenant_id: str, after_sequence: int
     ) -> list[dict[str, Any]]:
+        # Fence on the poll path: an already attached stream terminalizes
+        # a lost job on its next poll and receives the terminal event.
+        self._expire_lost_executions()
         return self._call(self._events_after_db(job_id, tenant_id, after_sequence))
+
+    # -- lost-execution fence (no-queue mode) ----------------------------- #
+
+    async def _lost_execution_candidates_db(
+        self, grace_seconds: float
+    ) -> list[str]:
+        async with self._session(DEFAULT_TENANT) as session:
+            return list(
+                (
+                    await session.execute(
+                        select(indexing_jobs.c.job_id).where(
+                            indexing_jobs.c.status.in_(_RESTART_ORPHAN_VALUES),
+                            func.coalesce(
+                                indexing_jobs.c.started_at,
+                                indexing_jobs.c.created_at,
+                            )
+                            < time.time() - grace_seconds,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    async def _expire_lost_executions_db(self, entity_ids: list[str]) -> bool:
+        async with self._session(DEFAULT_TENANT) as session:
+            await self._cleanup_db(
+                session, execution_lost_ids=frozenset(entity_ids)
+            )
+            return True
+
+    async def _startup_cleanup_db(self) -> None:
+        """Run the indexing store's lazy cleanup once in its own transaction.
+
+        Covers the restart sweep plus this store's collection-locked
+        retention and history eviction.
+        """
+        async with self._session(DEFAULT_TENANT) as session:
+            await self._cleanup_db(session)
 
     # -- async database operations ---------------------------------------- #
 
@@ -2822,7 +2910,12 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 },
             )
 
-    async def _cleanup_db(self, session: "AsyncSession") -> None:
+    async def _cleanup_db(
+        self,
+        session: "AsyncSession",
+        *,
+        execution_lost_ids: frozenset[str] = frozenset(),
+    ) -> None:
         """Apply recovery and retention through one locked lifecycle path.
 
         Collection rows are locked in canonical order before any job row.
@@ -2831,6 +2924,9 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         terminal transition. In-process execution orphans are failed visibly;
         paused rows are neither retention candidates nor restart orphans.
         Terminal history is invalidated and audited before deletion.
+        ``execution_lost_ids`` carries the lost-execution fence's
+        pre-filtered candidates through the same locked path; the status
+        re-check under lock absorbs races.
         """
         now = time.time()
         recover_orphans = self._sweep_orphans
@@ -2846,6 +2942,21 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             ).all()
         recovery_ids = {row.job_id for row in recovery_rows}
 
+        lost_rows = []
+        if execution_lost_ids:
+            lost_rows = (
+                await session.execute(
+                    select(
+                        indexing_jobs.c.job_id,
+                        indexing_jobs.c.collection_id,
+                    ).where(
+                        indexing_jobs.c.job_id.in_(sorted(execution_lost_ids)),
+                        indexing_jobs.c.status.in_(_RESTART_ORPHAN_VALUES),
+                    )
+                )
+            ).all()
+        lost_ids = frozenset(row.job_id for row in lost_rows)
+
         candidate_rows = await self._retention_candidate_rows_db(
             session,
             now=now,
@@ -2853,7 +2964,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         history_rows = await self._history_overflow_rows_db(session)
         candidate_pairs = {
             (row.job_id, row.collection_id)
-            for row in (*recovery_rows, *candidate_rows, *history_rows)
+            for row in (*recovery_rows, *lost_rows, *candidate_rows, *history_rows)
         }
         if not candidate_pairs:
             if recover_orphans:
@@ -2895,7 +3006,12 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         )
         history_ids = {row.job_id for row in history_rows}
         job_ids = tuple(
-            sorted(recovery_ids | {row.job_id for row in candidate_rows} | history_ids)
+            sorted(
+                recovery_ids
+                | lost_ids
+                | {row.job_id for row in candidate_rows}
+                | history_ids
+            )
         )
         locked_jobs = (
             (
@@ -2917,6 +3033,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                 recovery_ids=recovery_ids,
                 history_ids=history_ids,
                 terminal_cutoff=terminal_cutoff,
+                execution_lost_ids=lost_ids,
             )
             if action is None:
                 continue
@@ -3004,6 +3121,7 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         recovery_ids: set[str],
         history_ids: set[str],
         terminal_cutoff: float,
+        execution_lost_ids: frozenset[str] = frozenset(),
     ) -> _MaintenanceAction | None:
         """Choose one mutation after all lifecycle locks have landed."""
         status = row["status"]
@@ -3016,6 +3134,21 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
                         "Ein Server-Neustart hat die Indizierung unterbrochen."
                     ),
                     "type": "server_restarted",
+                },
+            )
+        if job_id in execution_lost_ids and status in _RESTART_ORPHAN_VALUES:
+            # FAILED, not CANCELLED, even for ``cancelling`` rows: the
+            # orderly cancellation cleanup never ran, so partial work may
+            # be applied — reporting an orderly cancel would be a lie.
+            # ``cancel_requested`` stays on the row as the intent record.
+            return _MaintenanceAction(
+                action="indexing.execution_lost",
+                error={
+                    "message": (
+                        "Die Ausfuehrung dieser Indizierung ist verloren "
+                        "gegangen; kein Prozess fuehrt sie mehr aus."
+                    ),
+                    "type": "execution_lost",
                 },
             )
         if (

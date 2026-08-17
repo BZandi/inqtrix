@@ -82,7 +82,7 @@ use (add a model card) or override traffic worth investigating.
 | `inqtrix_retrieval_duration_seconds` | histogram | `step` | Knowledge retrieval stages (`hybrid_search`, `rerank`). |
 | `inqtrix_run_duration_seconds` | histogram | `mode`, `outcome` | Worker execution **segments** per run mode — parked runs resume as fresh segments, so one deep run contributes several samples. Outcomes: `completed`, `failed`, `cancelled`, `parked`. Fenced-out attempts are not recorded (the winning attempt records the segment). Edge case: a park that the store resolves as an immediately-cancelled run still counts as `parked` — the segment did run up to the park attempt. |
 | `inqtrix_run_queue_wait_seconds` | histogram | — | Time from enqueue to worker claim, native **runs only** and only for first deliveries — redelivered messages keep their original enqueue timestamp and would fold the prior attempt's runtime into the wait. |
-| `inqtrix_worker_jobs_total` | counter | `loop`, `outcome` | Worker job terminations per loop (`runs`, `indexing`) and outcome (`terminal`, `parked`, `fenced`, `finalization_failed`). |
+| `inqtrix_worker_jobs_total` | counter | `loop`, `outcome` | Worker job terminations per loop (`runs`, `indexing`, `uploads`) and outcome (`terminal`, `parked`, `fenced`, `finalization_failed`); the uploads loop currently emits only `finalization_failed`. |
 | `inqtrix_indexing_documents_total` | counter | `outcome` | Documents finishing an indexing pass (`completed`, `failed` — pauses/cancellations are not failures and stay uncounted). |
 
 ### Worker exporter

@@ -125,6 +125,23 @@ export function SystemStatusPanel({
                   }
                   tone={runtime.runs.worker_dispatch ? 'brand' : 'neutral'}
                 />
+                {runtime.runs.worker_dispatch
+                  && runtime.runs.queue_consumers === 0 ? (
+                  <StatusBadge
+                    density="table"
+                    label={t.adminSystem.queueNoConsumers}
+                    tone="warning"
+                  />
+                ) : null}
+                {runtime.runs.worker_dispatch
+                  && runtime.runs.queue_consumers != null ? (
+                  <span className="t-meta text-muted-foreground">
+                    {t.adminSystem.queueTelemetry(
+                      runtime.runs.queue_consumers,
+                      runtime.runs.queue_depth,
+                    )}
+                  </span>
+                ) : null}
               </RuntimeValueGroup>
             </SystemValueRow>
           </>
@@ -241,15 +258,29 @@ export function SystemStatusPanel({
               />
             </SystemValueRow>
             <SystemValueRow title={t.adminSystem.traceRetention}>
-              <span className="t-meta text-muted-foreground">
-                {runtime.observability.retention_days != null
-                  ? t.adminSystem.traceRetentionDays(
-                      runtime.observability.retention_days,
-                    )
-                  : runtime.observability.spool
-                    ? t.adminSystem.traceRetentionSpool
-                    : t.adminSystem.none}
-              </span>
+              <RuntimeValueGroup>
+                <span className="t-meta text-muted-foreground">
+                  {runtime.observability.retention_days != null
+                    ? t.adminSystem.traceRetentionDays(
+                        runtime.observability.retention_days,
+                      )
+                    : runtime.observability.spool
+                      ? t.adminSystem.traceRetentionSpool
+                      : t.adminSystem.none}
+                </span>
+                {/* All three prune jobs (trace/audit/ledger) live in the
+                    worker; with durable storage but no worker the configured
+                    days describe an intent, not an enforced policy. */}
+                {!runtime.observability.retention_enforced
+                  && (runtime.observability.retention_days != null
+                    || runtime.storage.durable) ? (
+                  <StatusBadge
+                    density="table"
+                    label={t.adminSystem.retentionNotEnforced}
+                    tone="warning"
+                  />
+                ) : null}
+              </RuntimeValueGroup>
             </SystemValueRow>
           </>
         ) : (

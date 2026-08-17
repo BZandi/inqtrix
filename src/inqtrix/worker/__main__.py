@@ -291,6 +291,41 @@ def _start_usage_retention_thread(
     )
 
 
+def _start_object_orphan_sweep_thread(
+    settings, stop_event: "threading.Event", session_factory
+) -> None:
+    """Object-store/registry consistency sweep (files without a row)."""
+    grace_hours = float(settings.storage.object_orphan_grace_hours or 0.0)
+    if grace_hours <= 0 or session_factory is None:
+        return
+    if settings.storage.backend != "postgres":
+        return
+
+    def _pass() -> int:
+        from inqtrix.server.container import build_object_store
+        from inqtrix.storage.object_orphan_sweep import (
+            sweep_orphaned_file_objects,
+        )
+
+        return sweep_orphaned_file_objects(
+            object_store=build_object_store(settings),
+            session_factory=session_factory,
+            app_role=settings.storage.app_role,
+            grace_seconds=grace_hours * 3600.0,
+        )
+
+    _start_retention_thread(
+        name="inqtrix-object-orphan-sweep",
+        label="Objekt-Waisen-Sweep",
+        stop_event=stop_event,
+        run_pass=_pass,
+        interval_seconds=_DAILY_RETENTION_INTERVAL_SECONDS,
+        initial_delay_seconds=_DAILY_RETENTION_INITIAL_DELAY_SECONDS,
+        event="object_store.orphan_sweep.completed",
+        retention_days=max(1, round(grace_hours / 24.0)),
+    )
+
+
 def main() -> None:
     """Run one worker process until SIGTERM/SIGINT."""
     logging_env = read_logging_env()
@@ -701,6 +736,9 @@ def main() -> None:
         settings, stop_event, container.permission_service.audit_sink
     )
     _start_usage_retention_thread(settings, stop_event, usage_recorder.store)
+    _start_object_orphan_sweep_thread(
+        settings, stop_event, container.session_factory
+    )
     # The signal handler must run on the main thread; block here until it
     # fires, then let each loop's run_forever observe its stop flag.
     stop_event.wait()

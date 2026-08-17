@@ -250,3 +250,16 @@ def test_completed_knowledge_result_persists_safe_receipt_and_snapshot() -> None
         handle.payload["knowledge_retrieval"]
     )
     assert handle.snapshot["knowledge_evidence_used"] == 2
+
+
+def test_agent_cancelled_exception_terminalizes_as_client_cancel() -> None:
+    """An algorithm raising AgentCancelled ends as a CANCELLED run."""
+    from inqtrix.exceptions import AgentCancelled
+    from inqtrix.execution_failures import terminate_native_run
+
+    handle = _Handle()
+
+    error_type = terminate_native_run(handle, AgentCancelled("stop"))
+
+    assert error_type == "client_requested_cancel"
+    assert handle.calls == [("cancel", "client_requested_cancel")]

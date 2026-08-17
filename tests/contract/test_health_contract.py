@@ -33,6 +33,7 @@ HEALTH_REQUIRED_KEYS = {
     "model_tier",
     "auth_required",
     "auth_mode",
+    "version",
     "legal",
     "ai_disclosure",
 }

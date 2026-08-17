@@ -52,6 +52,7 @@ import { BoundedLruCache, MARKDOWN_RENDER_CACHE_CAPACITY } from './boundedLruCac
 import { classifyMarkdownImageSource } from './markdownImagePolicy'
 import { useMarkdownCacheEntry } from './useMarkdownCacheEntry'
 import { useProgressiveMarkdownWork } from './useProgressiveMarkdownWork'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 export type MarkdownRendererVariant = 'chat' | 'report'
 
@@ -722,7 +723,12 @@ function MarkdownCodePre({
 
   async function copyCode() {
     try {
-      await navigator.clipboard.writeText(readRenderedCodeText(preRef.current, codeText))
+      const copied = await copyTextToClipboard(
+        readRenderedCodeText(preRef.current, codeText),
+      )
+      if (!copied) {
+        throw new Error('Zwischenablage nicht verfügbar')
+      }
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1200)
     } catch (error) {

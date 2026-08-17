@@ -1,7 +1,7 @@
 """Editor endpoints (``/v1/editor/suggest``, ``/v1/editor/instruct``).
 
 Thin HTTP layer over the shared orchestration cores in
-:mod:`inqtrix.services.editor_assist_service` (extracted for the M7
+:mod:`inqtrix.services.editor_assist_service` (shared with the
 workspace-agent patch flow). The router keeps request parsing, workspace
 resolution, quota admission/record, the concurrency semaphore, and the
 exception -> error-envelope mapping; the SYNC cores run in the executor
@@ -21,7 +21,11 @@ from fastapi.responses import JSONResponse
 
 from inqtrix.auth.principal import Principal
 from inqtrix.observability.context import bound_thread_call
-from inqtrix.exceptions import AgentStructuredOutputError
+from inqtrix.exceptions import (
+    AgentCancelled,
+    AgentStructuredOutputError,
+    AgentTokenBudgetExceeded,
+)
 from inqtrix.quota.models import QuotaDimension
 from inqtrix.server.editor_instructions import (
     EditorInstructError,
@@ -37,6 +41,7 @@ from inqtrix.server.routers import (
     stack_error_response,
 )
 from inqtrix.services.agent_context import StackResolutionError
+from inqtrix.server.streaming import disconnect_watch
 from inqtrix.services.editor_assist_service import (
     EditorDocumentTooLarge,
     resolve_editor_model,
@@ -124,28 +129,63 @@ def build_router(container: "AppContainer") -> APIRouter:
         wait_timeout = editor_wait_seconds(resolved.agent_settings)
         async with sem:
             loop = asyncio.get_running_loop()
+            # A client abort releases the shared semaphore once the
+            # in-flight provider attempt returns (the probe fires at
+            # attempt boundaries and backoff sleeps) instead of burning
+            # the remaining retry ladder on a ghost request.
             try:
-                result, consumed = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None,
-                        bound_thread_call(partial(
-                            run_editor_suggest,
-                            suggest_request,
-                            llm=llm,
-                            model=model,
-                            reasoning_effort=effort,
-                            structured_supported=llm.supports_structured_output(
-                                model=model
-                            ),
-                            timeout_seconds=timeout,
-                            base_warnings=warnings,
-                        ), usage_subject=(
-                            principal.tenant_id,
-                            principal.user_id,
-                            workspace_id,
-                        )),
-                    ),
-                    timeout=wait_timeout,
+                async with disconnect_watch(req) as cancel_event:
+                    result, consumed = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            bound_thread_call(partial(
+                                run_editor_suggest,
+                                suggest_request,
+                                llm=llm,
+                                model=model,
+                                reasoning_effort=effort,
+                                structured_supported=(
+                                    llm.supports_structured_output(model=model)
+                                ),
+                                timeout_seconds=timeout,
+                                base_warnings=warnings,
+                                cancel_probe=cancel_event.is_set,
+                            ), usage_subject=(
+                                principal.tenant_id,
+                                principal.user_id,
+                                workspace_id,
+                            )),
+                        ),
+                        timeout=wait_timeout,
+                    )
+            except AgentTokenBudgetExceeded as exc:
+                # Subclass of AgentCancelled with a DIFFERENT meaning: a
+                # resource stop, never a client disconnect.
+                return error_response(
+                    502, sanitize_error(exc), "token_budget_exceeded"
+                )
+            except AgentCancelled as exc:
+                if not cancel_event.is_set():
+                    # No disconnect happened — do not claim the client left.
+                    log.error(
+                        "Editor-Vorschlag Fehler (error_type=%s)",
+                        type(exc).__name__,
+                    )
+                    return error_response(
+                        502,
+                        f"Editor-Vorschlag Fehler: {sanitize_error(exc)}",
+                        "server_error",
+                    )
+                log.warning(
+                    "Editor-Vorschlag nach Client-Disconnect abgebrochen. "
+                    "Bereits verbrauchte Tokens dieser Anfrage werden "
+                    "nicht auf das Kontingent gebucht (das "
+                    "Nutzungs-Ledger erfasst sie)."
+                )
+                return error_response(
+                    499,
+                    "Client hat die Verbindung beendet.",
+                    "client_closed_request",
                 )
             except asyncio.TimeoutError:
                 log.warning(
@@ -225,28 +265,60 @@ def build_router(container: "AppContainer") -> APIRouter:
         wait_timeout = editor_wait_seconds(resolved.agent_settings)
         async with sem:
             loop = asyncio.get_running_loop()
+            # Same disconnect semantics as the suggest route above.
             try:
-                result, consumed = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        None,
-                        bound_thread_call(partial(
-                            run_editor_instruct,
-                            instruct_request,
-                            llm=llm,
-                            model=model,
-                            reasoning_effort=effort,
-                            structured_supported=llm.supports_structured_output(
-                                model=model
-                            ),
-                            timeout_seconds=timeout,
-                            base_warnings=warnings,
-                        ), usage_subject=(
-                            principal.tenant_id,
-                            principal.user_id,
-                            workspace_id,
-                        )),
-                    ),
-                    timeout=wait_timeout,
+                async with disconnect_watch(req) as cancel_event:
+                    result, consumed = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            bound_thread_call(partial(
+                                run_editor_instruct,
+                                instruct_request,
+                                llm=llm,
+                                model=model,
+                                reasoning_effort=effort,
+                                structured_supported=(
+                                    llm.supports_structured_output(model=model)
+                                ),
+                                timeout_seconds=timeout,
+                                base_warnings=warnings,
+                                cancel_probe=cancel_event.is_set,
+                            ), usage_subject=(
+                                principal.tenant_id,
+                                principal.user_id,
+                                workspace_id,
+                            )),
+                        ),
+                        timeout=wait_timeout,
+                    )
+            except AgentTokenBudgetExceeded as exc:
+                # Subclass of AgentCancelled with a DIFFERENT meaning: a
+                # resource stop, never a client disconnect.
+                return error_response(
+                    502, sanitize_error(exc), "token_budget_exceeded"
+                )
+            except AgentCancelled as exc:
+                if not cancel_event.is_set():
+                    # No disconnect happened — do not claim the client left.
+                    log.error(
+                        "Editor-Anweisung Fehler (error_type=%s)",
+                        type(exc).__name__,
+                    )
+                    return error_response(
+                        502,
+                        f"Editor-Anweisung Fehler: {sanitize_error(exc)}",
+                        "server_error",
+                    )
+                log.warning(
+                    "Editor-Anweisung nach Client-Disconnect abgebrochen. "
+                    "Bereits verbrauchte Tokens dieser Anfrage werden "
+                    "nicht auf das Kontingent gebucht (das "
+                    "Nutzungs-Ledger erfasst sie)."
+                )
+                return error_response(
+                    499,
+                    "Client hat die Verbindung beendet.",
+                    "client_closed_request",
                 )
             except asyncio.TimeoutError:
                 log.warning(

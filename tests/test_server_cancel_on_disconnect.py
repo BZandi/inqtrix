@@ -210,28 +210,28 @@ async def test_stream_response_sets_cancel_event_on_disconnect(monkeypatch):
 @pytest.mark.asyncio
 async def test_watch_disconnect_signals_cancel_on_http_disconnect():
     """Direct unit test for the watcher helper: http.disconnect -> cancel_event.set()."""
-    from inqtrix.server.streaming import _watch_disconnect
+    from inqtrix.server.streaming import watch_disconnect
 
     class _ImmediateDisconnectRequest:
         async def receive(self) -> dict:
             return {"type": "http.disconnect"}
 
     event = threading.Event()
-    await _watch_disconnect(_ImmediateDisconnectRequest(), event)
+    await watch_disconnect(_ImmediateDisconnectRequest(), event)
     assert event.is_set(), "Watcher must set cancel_event on http.disconnect"
 
 
 @pytest.mark.asyncio
 async def test_watch_disconnect_treats_receive_error_as_disconnect():
     """If receive() raises (e.g. transport torn down), watcher must still cancel."""
-    from inqtrix.server.streaming import _watch_disconnect
+    from inqtrix.server.streaming import watch_disconnect
 
     class _BrokenRequest:
         async def receive(self) -> dict:
             raise RuntimeError("transport gone")
 
     event = threading.Event()
-    await _watch_disconnect(_BrokenRequest(), event)
+    await watch_disconnect(_BrokenRequest(), event)
     assert event.is_set(), (
         "Watcher must set cancel_event when receive() crashes — treating an "
         "unreadable transport as a disconnect avoids burning tokens for a run "
@@ -242,7 +242,7 @@ async def test_watch_disconnect_treats_receive_error_as_disconnect():
 @pytest.mark.asyncio
 async def test_watch_disconnect_cancellation_propagates():
     """The watcher must propagate asyncio.CancelledError so cleanup awaits resolve."""
-    from inqtrix.server.streaming import _watch_disconnect
+    from inqtrix.server.streaming import watch_disconnect
 
     class _SilentRequest:
         async def receive(self) -> dict:
@@ -250,7 +250,7 @@ async def test_watch_disconnect_cancellation_propagates():
             return {"type": "http.disconnect"}
 
     event = threading.Event()
-    task = asyncio.create_task(_watch_disconnect(_SilentRequest(), event))
+    task = asyncio.create_task(watch_disconnect(_SilentRequest(), event))
     await asyncio.sleep(0.05)  # let the task enter receive()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -291,18 +291,23 @@ async def test_stream_response_cleans_up_watcher_on_normal_completion(monkeypatc
     # Stream completed normally with [DONE] sentinel; no leftover tasks.
     assert any("data: [DONE]" in chunk for chunk in chunks)
     pending = [
-        t for t in asyncio.all_tasks() if "_watch_disconnect" in t.get_coro().__qualname__
+        t for t in asyncio.all_tasks() if "watch_disconnect" in t.get_coro().__qualname__
     ]
     assert pending == [], f"Watcher task leaked after normal completion: {pending}"
 
 
 # ------------------------------------------------------------------ #
-# Backwards-compat — blocking path is unaffected
+# Blocking path — carries the disconnect cancel event
 # ------------------------------------------------------------------ #
 
 
-def test_chat_completions_blocking_path_unaffected(monkeypatch):
-    """Blocking /v1/chat/completions does not need a cancel_event."""
+def test_chat_completions_blocking_path_carries_a_cancel_event(monkeypatch):
+    """Blocking /v1/chat/completions wires the disconnect cancel event.
+
+    The non-streaming transport shares the SSE disconnect semantics: the
+    route's watcher event reaches the graph as ``cancel_event``, so a
+    client abort stops the run at its next checkpoint.
+    """
     def fake_run(
         question,
         *,
@@ -310,7 +315,10 @@ def test_chat_completions_blocking_path_unaffected(monkeypatch):
         providers,
         strategies,
         settings,
+        cancel_event,
     ):
+        assert isinstance(cancel_event, threading.Event)
+        assert not cancel_event.is_set()
         return {
             "answer": "ok",
             "result_state": {},
@@ -327,3 +335,409 @@ def test_chat_completions_blocking_path_unaffected(monkeypatch):
             json={"messages": [{"role": "user", "content": "Hallo"}], "stream": False},
         )
     assert response.status_code == 200
+
+
+# ------------------------------------------------------------------ #
+# disconnect_watch context manager (shared by chat JSON + editor routes)
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_disconnect_watch_sets_event_and_never_leaks():
+    """Disconnect inside the block flips the event; exit reaps the task."""
+    from inqtrix.server.streaming import disconnect_watch
+
+    class _ImmediateDisconnectRequest:
+        async def receive(self) -> dict:
+            return {"type": "http.disconnect"}
+
+    async with disconnect_watch(_ImmediateDisconnectRequest()) as cancel_event:
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while not cancel_event.is_set():
+            if asyncio.get_event_loop().time() > deadline:
+                pytest.fail("disconnect never flipped the cancel event")
+            await asyncio.sleep(0.01)
+    pending = [
+        t for t in asyncio.all_tasks()
+        if "watch_disconnect" in t.get_coro().__qualname__
+    ]
+    assert pending == []
+
+
+@pytest.mark.asyncio
+async def test_disconnect_watch_exit_does_not_set_event():
+    """Normal completion reaps the watcher WITHOUT signalling a cancel."""
+    from inqtrix.server.streaming import disconnect_watch
+
+    class _SilentRequest:
+        async def receive(self) -> dict:
+            await asyncio.sleep(60)
+            return {"type": "http.disconnect"}
+
+    async with disconnect_watch(_SilentRequest()) as cancel_event:
+        pass
+    assert not cancel_event.is_set()
+    pending = [
+        t for t in asyncio.all_tasks()
+        if "watch_disconnect" in t.get_coro().__qualname__
+    ]
+    assert pending == []
+
+
+# ------------------------------------------------------------------ #
+# Non-streaming chat: client abort answers 499 instead of burning budget
+# ------------------------------------------------------------------ #
+
+
+def _chat_service_for(algorithm):
+    from types import SimpleNamespace
+
+    from inqtrix.services.chat_service import ChatService
+
+    registry = SimpleNamespace(get=lambda _mode: algorithm)
+    return ChatService(registry=registry, runtime=None)
+
+
+def _resolved_stub():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        mode="knowledge",
+        agent_overrides={},
+        knowledge_filters={},
+        providers=None,
+        strategies=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_complete_maps_cancel_to_499():
+    class _CancelledAlgorithm:
+        def run(self, _request, *, runtime, context):
+            del runtime
+            assert context.cancel_token is not None, (
+                "the route's cancel event must reach the algorithm"
+            )
+            raise AgentCancelled("stop")
+
+    service = _chat_service_for(_CancelledAlgorithm())
+    cancel_event = threading.Event()
+    cancel_event.set()
+    response = await service.complete(
+        question="Frage",
+        history="",
+        messages=[],
+        resolved=_resolved_stub(),
+        chat_agent_settings=AgentSettings(),
+        semaphore=asyncio.Semaphore(1),
+        cancel_event=cancel_event,
+    )
+    assert response.status_code == 499
+    import json as _json
+
+    body = _json.loads(response.body)
+    assert body["error"]["type"] == "client_closed_request"
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_cancel_without_disconnect_is_a_server_error():
+    """An AgentCancelled with NO disconnect must not claim the client left."""
+
+    class _CancelledAlgorithm:
+        def run(self, _request, *, runtime, context):
+            del runtime, context
+            raise AgentCancelled("stop")
+
+    service = _chat_service_for(_CancelledAlgorithm())
+    response = await service.complete(
+        question="Frage",
+        history="",
+        messages=[],
+        resolved=_resolved_stub(),
+        chat_agent_settings=AgentSettings(),
+        semaphore=asyncio.Semaphore(1),
+        cancel_event=threading.Event(),
+    )
+    assert response.status_code == 502
+    import json as _json
+
+    body = _json.loads(response.body)
+    assert body["error"]["type"] == "server_error"
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_token_budget_stop_is_typed_with_usage():
+    """The AgentCancelled SUBCLASS keeps its resource meaning and usage."""
+    from inqtrix.exceptions import AgentTokenBudgetExceeded
+
+    class _BudgetStopAlgorithm:
+        def run(self, _request, *, runtime, context):
+            del runtime, context
+            raise AgentTokenBudgetExceeded(
+                "Tokenbudget erreicht.",
+                usage={"prompt_tokens": 11, "completion_tokens": 4},
+            )
+
+    service = _chat_service_for(_BudgetStopAlgorithm())
+    response = await service.complete(
+        question="Frage",
+        history="",
+        messages=[],
+        resolved=_resolved_stub(),
+        chat_agent_settings=AgentSettings(),
+        semaphore=asyncio.Semaphore(1),
+        cancel_event=threading.Event(),
+    )
+    assert response.status_code == 502
+    import json as _json
+
+    body = _json.loads(response.body)
+    assert body["error"]["type"] == "token_budget_exceeded"
+    assert response.inqtrix_usage == {
+        "prompt_tokens": 11,
+        "completion_tokens": 4,
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_cancelled_graph_result_maps_to_499_with_usage():
+    from inqtrix.core.results import AgentResult
+
+    class _GraphCancelledAlgorithm:
+        def run(self, _request, *, runtime, context):
+            del runtime, context
+            return AgentResult(
+                answer="",
+                raw={
+                    "answer": "",
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+                    "result_state": {"cancelled": True},
+                },
+            )
+
+    service = _chat_service_for(_GraphCancelledAlgorithm())
+    response = await service.complete(
+        question="Frage",
+        history="",
+        messages=[],
+        resolved=_resolved_stub(),
+        chat_agent_settings=AgentSettings(),
+        semaphore=asyncio.Semaphore(1),
+        cancel_event=threading.Event(),
+    )
+    assert response.status_code == 499
+    assert response.inqtrix_usage == {
+        "prompt_tokens": 7,
+        "completion_tokens": 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_stream_route_cancels_on_client_disconnect(monkeypatch):
+    """ASGI-level: a disconnect after the JSON body cancels the blocking run.
+
+    Drives the real app with a scripted receive channel: one
+    ``http.request`` carrying the body, then ``http.disconnect``. The
+    watcher must park on the post-body ``receive()``, flip the event,
+    and the route must answer 499 after the graph observed the cancel.
+    """
+    import json as _json
+
+    observed: dict[str, Any] = {}
+
+    def slow_run(
+        question, *, history, providers, strategies, settings, cancel_event
+    ):
+        for _ in range(200):
+            if cancel_event.is_set():
+                observed["cancelled"] = True
+                raise AgentCancelled("client disconnect observed")
+            time.sleep(0.05)
+        return {"answer": "never", "result_state": {}, "usage": {}}
+
+    monkeypatch.setattr(web_research_module, "run_web_graph", slow_run)
+
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    # Works without running the lifespan because the non-postgres default
+    # marks the database contract ready at create_app time; a
+    # postgres-backed Settings fixture would need the lifespan (503 gate).
+    app = create_app(settings=Settings(), providers=providers)
+
+    body = _json.dumps(
+        {"messages": [{"role": "user", "content": "Hallo"}], "stream": False}
+    ).encode()
+    inbox = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def receive() -> dict:
+        if inbox:
+            return inbox.pop(0)
+        await asyncio.sleep(0.3)
+        return {"type": "http.disconnect"}
+
+    sent: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"host", b"testserver"),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+    await app(scope, receive, send)
+
+    assert observed.get("cancelled") is True, (
+        "the graph must observe the disconnect-driven cancel event"
+    )
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 499
+
+
+def _suggest_request():
+    from inqtrix.server.editor_suggestions import parse_editor_suggest_payload
+
+    return parse_editor_suggest_payload(
+        {"block_text": "Ein Absatz.", "instruction": "Formeller machen."},
+        max_text_chars=10_000,
+        max_background_chars=10_000,
+    )
+
+
+class _ProbeConsultingLLM:
+    """Mimics a real provider: consults the ambient cancel probe.
+
+    Real providers read the thread-local probe inside their retry
+    ladders; this stub does the same via the module helper so the test
+    pins that the editor service BINDS the scope on its calling thread.
+    """
+
+    def supports_structured_output(self, model=None) -> bool:
+        return False
+
+    def complete(self, prompt, **kwargs) -> str:
+        from inqtrix.providers import base as providers_base
+
+        if providers_base._provider_cancel_requested():
+            raise AgentCancelled("stop")
+        return '{"suggestion": "Ein Absatz."}'
+
+
+def test_run_editor_suggest_binds_the_cancel_probe():
+    from inqtrix.services.editor_assist_service import run_editor_suggest
+
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(AgentCancelled):
+        run_editor_suggest(
+            _suggest_request(),
+            llm=_ProbeConsultingLLM(),
+            model=None,
+            reasoning_effort=None,
+            structured_supported=False,
+            timeout_seconds=5.0,
+            cancel_probe=cancelled.is_set,
+        )
+
+
+def test_editor_suggest_route_maps_noncancelled_cancel_to_502(monkeypatch):
+    """Without a disconnect, an AgentCancelled must not claim the client left."""
+
+    class _CancelledLLM(_ProbeConsultingLLM):
+        def complete(self, prompt, **kwargs) -> str:
+            raise AgentCancelled("stop")
+
+        def is_available(self) -> bool:
+            return True
+
+    providers = ProviderContext(llm=_CancelledLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/editor/suggest",
+            json={
+                "block_text": "Ein Absatz.",
+                "instruction": "Formeller machen.",
+            },
+        )
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "server_error"
+
+
+@pytest.mark.asyncio
+async def test_editor_suggest_route_cancels_on_client_disconnect():
+    """ASGI-level: a disconnect during the editor call answers 499.
+
+    The probe-consulting LLM mimics a real provider's attempt-boundary
+    check; the scripted receive channel delivers ``http.disconnect``
+    after the body, and the route must map the resulting abort to 499.
+    """
+    import json as _json
+
+    class _SlowProbeLLM(_ProbeConsultingLLM):
+        def complete(self, prompt, **kwargs) -> str:
+            from inqtrix.providers import base as providers_base
+
+            for _ in range(200):
+                if providers_base._provider_cancel_requested():
+                    raise AgentCancelled("stop")
+                time.sleep(0.05)
+            return '{"suggestion": "nie erreicht"}'
+
+        def is_available(self) -> bool:
+            return True
+
+    providers = ProviderContext(llm=_SlowProbeLLM(), search=_DummySearch())
+    # Works without running the lifespan because the non-postgres default
+    # marks the database contract ready at create_app time; a
+    # postgres-backed Settings fixture would need the lifespan (503 gate).
+    app = create_app(settings=Settings(), providers=providers)
+
+    body = _json.dumps(
+        {"block_text": "Ein Absatz.", "instruction": "Formeller machen."}
+    ).encode()
+    inbox = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def receive() -> dict:
+        if inbox:
+            return inbox.pop(0)
+        await asyncio.sleep(0.3)
+        return {"type": "http.disconnect"}
+
+    sent: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/editor/suggest",
+        "raw_path": b"/v1/editor/suggest",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"host", b"testserver"),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+    await app(scope, receive, send)
+
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 499

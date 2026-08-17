@@ -157,6 +157,28 @@ def test_compose_external_db_override_detaches_bundled_postgres() -> None:
     ]
 
 
+def test_noqueue_override_pins_in_process_execution_to_the_api_service() -> None:
+    """A worker-less stack must actually run in-process, not enqueue.
+
+    The paired stack env may pin ``INQTRIX_QUEUE_BACKEND=valkey``; merely
+    omitting the workers profile would then leave the API enqueueing into
+    a broker that never starts. The override flips exactly one key on
+    exactly one service — anything more would fork stack policy.
+    """
+    override = yaml.safe_load(
+        (_ROOT / "deploy" / "compose" / "compose.noqueue.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert override["name"] == "inqtrix"
+    assert set(override) == {"name", "services"}
+    assert set(override["services"]) == {"api"}
+    assert override["services"]["api"] == {
+        "environment": {"INQTRIX_QUEUE_BACKEND": "memory"}
+    }
+
+
 def test_compose_web_ingress_requires_explicit_non_loopback_bind() -> None:
     """LAN exposure is configurable without weakening the safe default."""
     stack = yaml.safe_load(

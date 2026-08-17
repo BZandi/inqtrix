@@ -2799,9 +2799,9 @@ export function ResearchDesk({
         throw new Error(t.chat.demoModeDisabled)
       }
 
-      // Knowledge mode answers non-streaming: the backend rejects
-      // stream=true for retrieval algorithms until streaming
-      // dispatches through the registry.
+      // Knowledge mode answers over the request/response transport; the
+      // server cancels the run when this request is aborted, so Stop is
+      // effective on both transports.
       if (useStreaming && !knowledgeMode) {
         await streamChatCompletion(
           {

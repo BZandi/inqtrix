@@ -3945,6 +3945,10 @@ export type AdminSystemRuntime = {
     execution: string
     queue: string
     queue_available: boolean
+    /** Recently active stream consumers; null when the probe cannot tell. */
+    queue_consumers: number | null
+    /** Messages in the dispatch stream, in-flight ones included; null when the probe cannot tell. */
+    queue_depth: number | null
     store: string
     worker_dispatch: boolean
   }
@@ -3958,6 +3962,8 @@ export type AdminSystemRuntime = {
     content_capture: boolean
     sample_rate: number
     spool: boolean
+    /** Whether ANY process runs the prune jobs (all three live in the worker). */
+    retention_enforced: boolean
     retention_days: number | null
     ui_link_configured: boolean
   }

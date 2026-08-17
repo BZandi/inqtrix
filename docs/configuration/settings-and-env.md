@@ -214,6 +214,7 @@ Selects persistence for the platform layer (identity, file registry, run records
 | `INQTRIX_S3_AUTH_MODE` | `static` | `static` requires explicit access/secret keys and accepts an optional STS token. `default` passes no Inqtrix credentials to boto3, enabling workload/container/instance identity; any Inqtrix static credential in that mode is rejected. |
 | `INQTRIX_S3_ENDPOINT_URL` | *(empty)* | Optional S3-compatible endpoint, e.g. `http://127.0.0.1:8333` for SeaweedFS. Empty delegates native AWS endpoint resolution to boto3. |
 | `INQTRIX_S3_BUCKET` | `inqtrix-files` | Non-empty bucket holding keys below `tenants/<tenant>/files/<uuid>`. Provisioning is controlled separately. |
+| `INQTRIX_OBJECT_ORPHAN_GRACE_HOURS` | `24` | Daily object-store consistency sweep in the worker: blobs under `tenants/<tenant>/files/` that have no `files` row and are older than this many hours are deleted (a crash between blob write and row commit leaves such an orphan). Every deletion is logged; a tenant whose listing has objects but no matching registry row at all is skipped with a WARNING (protection against a misresolved tenant context). `0` disables the sweep. The bucket (or local object path) must belong to exactly ONE Inqtrix database — with a shared bucket, one instance's sweep would delete the other instance's live blobs. |
 | `INQTRIX_S3_ACCESS_KEY` | *(empty)* | Required with `AUTH_MODE=static`; forbidden with `default`. |
 | `INQTRIX_S3_SECRET_KEY` | *(empty)* | Required with `AUTH_MODE=static`; forbidden with `default`. |
 | `INQTRIX_S3_SESSION_TOKEN` | *(empty)* | Optional temporary STS token with static credentials; forbidden with `default`. |
@@ -513,13 +514,15 @@ needs nothing from this table (only `OTEL_EXPORTER_OTLP_ENDPOINT`,
 The commented block in [`deploy/.env.stack.example`](../../deploy/.env.stack.example)
 carries the same list with copy-paste defaults.
 
-**Where retention actually runs.** All three prune jobs (traces, `audit_log`,
-`llm_usage`) are daemon threads inside the `inqtrix-worker` process. A
-deployment WITHOUT a worker (`INQTRIX_QUEUE_BACKEND=memory`, the default) keeps
-audit and ledger rows indefinitely regardless of these settings — the retention
-values then describe an intent, not an enforced policy. Run a worker, or prune
-externally on a schedule via the same SECURITY DEFINER functions. The admin
-status panel reports this as `retention_enforced`.
+**Where retention actually runs.** All four prune jobs (traces, `audit_log`,
+`llm_usage`, and the object-orphan sweep — see
+`INQTRIX_OBJECT_ORPHAN_GRACE_HOURS` in the storage table) are daemon threads inside the
+`inqtrix-worker` process. A deployment WITHOUT a worker
+(`INQTRIX_QUEUE_BACKEND=memory`, the default) keeps audit and ledger rows
+indefinitely regardless of these settings — the retention values then describe
+an intent, not an enforced policy. Run a worker, or prune externally on a
+schedule via the same SECURITY DEFINER functions. The admin status panel
+reports this as `retention_enforced`.
 
 **Ledger vs. quota — known, deliberate divergences.** Quota stays the
 enforcement authority and books one aggregate number per request/run; the

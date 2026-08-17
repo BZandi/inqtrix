@@ -472,15 +472,26 @@ class AgentControlService:
         except RunNotFound:
             return False
         status = str(summary.get("status") or "")
+        if status not in ("cancelled", "failed"):
+            return False
         if status == "cancelled":
             await self.settle_cancelled_tasks(run_id)
-            return True
-        if status == "failed":
+        else:
             await settle_terminal_plan_tasks(
                 self._store, run_id, status="failed"
             )
-            return True
-        return False
+        released, settled = await self._store.settle_terminal_control_rows(
+            run_id
+        )
+        if released or settled:
+            log.info(
+                "Terminaler Lauf %s: %d Artefakte freigegeben, %d "
+                "Freigaben geschlossen.",
+                run_id,
+                released,
+                settled,
+            )
+        return True
 
     async def reconcile_terminal_run_tree(
         self, run_ids: tuple[str, ...]

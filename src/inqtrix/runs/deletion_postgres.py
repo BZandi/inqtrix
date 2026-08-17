@@ -25,7 +25,12 @@ from inqtrix.project.asset_lifecycle import (
 from inqtrix.project.asset_records_ports import AssetNotFound, GroupNotFound
 from inqtrix.project.knowledge_sessions_ports import KnowledgeSessionNotFound
 from inqtrix.project.vector_index_ports import VectorIndexNotFound
-from inqtrix.runs.durable_store import DEFAULT_TENANT, DurableJobStoreBase, _LocalJob
+from inqtrix.runs.durable_store import (
+    DEFAULT_TENANT,
+    _EXECUTION_LOST_GRACE_SECONDS,
+    DurableJobStoreBase,
+    _LocalJob,
+)
 from inqtrix.runs.deletion_operations import (
     KNOWLEDGE_DELETION_TARGET_KINDS,
     SESSION_DELETION_TARGET_KINDS,
@@ -173,6 +178,10 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         # operation and tombstones. The memory-tier callback is therefore not
         # needed here.
         del before_dispatch, refresh_manifest, terminal_action
+        # Best-effort expiry first (bounded by grace + throttle): a lost
+        # previous operation on the same target should stop answering
+        # fresh DELETEs with a conflict within that window.
+        self.expire_stalled_operations()
         try:
             record, created = self._call(
                 self._submit_db(
@@ -249,18 +258,22 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
     def expire_stalled_operations(self) -> None:
         """Make terminal what no process is going to execute.
 
-        Two shapes of one failure — a receipt that stays non-terminal while
-        nobody owns it — resolved through the ONE public :meth:`fail` path,
-        so tombstones, the ``inqtrix.deletion.failed`` event, and the retry
-        precondition come out identical to an ordinary failure:
+        Three shapes of one failure — a receipt that stays non-terminal
+        while nobody owns it — resolved through the ONE public
+        :meth:`fail` path, so tombstones, the ``inqtrix.deletion.failed``
+        event, and the retry precondition come out identical to an
+        ordinary failure:
 
         * restart orphans, whose in-process work closure died with the
           previous process. Swept once per process, exactly like the run
           store, and only where ``resolve_orphan_sweep`` allows it (never
-          in queue mode, where the workers own those rows); and
+          in queue mode, where the workers own those rows);
         * operations never claimed within ``dispatch_timeout_seconds`` —
           the shape a queue without a consuming worker produces, where no
-          restart ever comes to clean up.
+          restart ever comes to clean up; and
+        * RUNNING receipts whose executing thread died without a terminal
+          write (no-queue mode only — queue mode recovers those through
+          claim fencing).
 
         Without this a stuck receipt is unreachable: ``retry`` requires
         ``delete_failed`` and a second DELETE answers 409, so the operation
@@ -305,6 +318,22 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             ),
             error_type="dispatch_timeout",
         )
+        if self._recovers_orphans:
+            # No-queue mode only: a RUNNING receipt whose executing
+            # thread died without a terminal write has no other exit.
+            # Queue mode leaves running rows to their workers — claim
+            # fencing recovers those — so this selector must never fire
+            # there, unlike the mode-agnostic dispatch timeout above.
+            self._fail_stalled(
+                self._call(
+                    self._stale_running_db(_EXECUTION_LOST_GRACE_SECONDS)
+                ),
+                message=(
+                    "Die Ausfuehrung dieser Loeschung ist verloren "
+                    "gegangen; kein Prozess fuehrt sie mehr aus."
+                ),
+                error_type="execution_lost",
+            )
 
     def _fail_stalled(
         self,
@@ -467,6 +496,10 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         # transaction as the operation retry below. Volatile stores use this
         # callback to provide the equivalent pre-dispatch boundary.
         del before_dispatch
+        # Best-effort expiry first (bounded by grace + throttle): a retry
+        # against a lost RUNNING receipt should find the row already in
+        # ``delete_failed`` within that window.
+        self.expire_stalled_operations()
         record = self._call(
             self._retry_db(
                 operation_id,
@@ -2574,6 +2607,36 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
                 now=now,
             )
             return True
+
+    async def _stale_running_db(self, grace_seconds: float) -> list[str]:
+        """Running operations without recent progress (no-queue orphans).
+
+        ``updated_at`` moves on every progress write, so a live but quiet
+        operation is additionally protected by the ``_local`` exclusion
+        in ``_fail_stalled`` — the age here only shields the claim
+        window.
+        """
+
+        async with self._session(DEFAULT_TENANT) as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(deletion_operations.c.operation_id).where(
+                            # Belt and braces alongside RLS: this sweep
+                            # must never reach beyond its own tenant even
+                            # on a bypassing connection role.
+                            deletion_operations.c.tenant_id == DEFAULT_TENANT,
+                            deletion_operations.c.status
+                            == DeletionOperationStatus.RUNNING.value,
+                            deletion_operations.c.updated_at
+                            < time.time() - grace_seconds,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return list(rows)
 
     async def _stale_queued_db(
         self, older_than_seconds: float

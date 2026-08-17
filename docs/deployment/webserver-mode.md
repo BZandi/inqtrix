@@ -305,11 +305,38 @@ object-store paths, bucket names, service endpoints, and credentials.
 `runs.execution=worker_dispatch` means runs are configured to dispatch through
 Valkey to workers; it is not a live worker-count heartbeat, and it describes
 the run path only. Indexing, deletion, and upload recovery use their own
-streams under the same durable queue deployment.
+streams under the same durable queue deployment. In queue mode the block also
+carries `runs.queue_consumers` (stream consumers seen alive within the last
+minute) and `runs.queue_depth` (messages in the dispatch stream, in-flight
+ones included), both probed with a bounded timeout. They are `null` when the
+broker cannot be asked — and also while no worker has EVER attached, because
+the first worker creates the consumer group. A worker fleet that attached
+once and then died shows `0` consumers on the System page.
 
 ## Concurrency and cancel
 
 `MAX_CONCURRENT` (default 6) caps active `/v1/chat/completions` requests; a saturated semaphore returns 429 (no queueing on the OpenAI-compatible path). Native runs use `RUN_MAX_CONCURRENT` (falling back to `MAX_CONCURRENT`) for active workers and queue up to `RUN_QUEUE_MAX_SIZE` jobs (default 50) before `POST /v1/runs` returns 429. Background reindex jobs have their own pair, `INQTRIX_REINDEX_MAX_CONCURRENT` (default 6) and `INQTRIX_REINDEX_QUEUE_MAX_SIZE` (default 50). The caps are per surface, not a global provider limiter — worst case is their sum.
+
+Because those semaphores are shared capacity, request-scoped endpoints stop
+working for callers that are gone: non-streaming `/v1/chat/completions` and
+both editor assist routes watch the client connection and cancel the
+server-side work cooperatively when the caller disconnects mid-request
+(provider calls stop at attempt boundaries and during retry backoff waits,
+which poll the cancel signal about every half second; a single in-flight
+HTTP attempt still runs to its transport timeout). A request abandoned this way is
+answered with HTTP 499 and the typed error `client_closed_request` — never
+delivered to the caller. The API's own uvicorn access log stays silent
+(uvicorn skips access logging for clients that are already gone); the web
+gateway's access log DOES record the 499 line for the aborted request. The greppable signals are
+the WARNING lines instead — "…nach Client-Disconnect abgebrochen…" on the
+API and "Client disconnected while awaiting the upstream response" on the
+web gateway. 499 is only used when the disconnect actually happened; a
+cancellation raised without one stays an honest 502. The bundled web
+gateway propagates client aborts itself: when the browser closes the
+connection while the gateway is still waiting for the upstream response,
+it cancels the upstream request (the aborted connection is closed, never
+reused from the keep-alive pool). Third-party reverse proxies in front of
+the API must do the same for server-side cancellation to trigger.
 
 The research graph and document re-embedding are **synchronous work on a bounded thread pool**, not unbounded async coroutines: each active job holds one OS thread for its full duration. That is deliberate and fine for this app's scaling model — the work is I/O-bound on the LLM/embedding/search providers, the concurrency caps keep thread count small, and you scale *out* (more worker processes) rather than *up* (thousands of threads in one process). The practical ceiling on any single process is the upstream provider's rate limit and host CPU/RAM, not the thread model; rewriting the agent graph to async would be a large, risky change across every node, provider, and strategy and would not raise that ceiling (horizontal scaling does).
 
@@ -332,7 +359,7 @@ tiers are chosen by the storage and queue switches:
 **Sizing guidance.** For a small-to-mid deployment (say up to ~100 users with bursty, occasional runs/reindexes), **`postgres` + `memory` on a single API process is the right, simpler choice**: durable records, no broker, no worker. Tune `MAX_CONCURRENT` / `INQTRIX_REINDEX_MAX_CONCURRENT` to your provider's rate limit and the host's CPU/RAM. Two constraints define this mode:
 
 - **Bounded concurrency, then a queue.** Beyond the active caps, jobs wait (FIFO) and then return 429. Sustained simultaneous *long* runs are what saturates it, not raw user count.
-- **Single API process.** In-process durable mode assumes ONE API process: on restart it marks lost queued/running/cancelling closures `failed` (`server_restarted` — visible, not silent), while durable `paused_dependency`/`paused_validation` rows and checkpoints remain paused. Explicit resume reconstructs the operation from its canonical document/revision or generation identity before queueing it. Two replicas sharing one Postgres would still sweep each other's in-flight closures. Running more than one replica, or needing actively executing jobs to survive a restart, is the cue to switch on Valkey + the worker (`--profile workers`).
+- **Single API process.** In-process durable mode assumes ONE API process, and its recovery is continuous, not restart-only: on restart it marks lost queued/running/cancelling closures `failed` (`server_restarted` — visible, not silent), and during operation a read-triggered check does the same for active rows this process no longer executes (`execution_lost` — a crashed execution converges within roughly a minute instead of spinning forever). Durable `paused_dependency`/`paused_validation` rows and checkpoints remain paused; explicit resume reconstructs the operation from its canonical document/revision or generation identity before queueing it. Because ownership is decided by this one process's in-memory registry, two replicas sharing one Postgres would continuously terminalize each other's in-flight closures — not just at boot. Running more than one replica, or needing actively executing jobs to survive a restart, is the cue to switch on Valkey + the worker (`--profile workers`).
 
 **When to add Valkey + worker** is therefore about *operational shape*, not a fixed headcount: (a) more than one API replica (HA / load balancing), (b) isolating long jobs from the request-serving process, or (c) in-flight jobs that must survive a restart. With the worker tier, per-worker parallelism is `INQTRIX_WORKER_CONCURRENCY` and you scale by running more worker replicas; the API-side `MAX_CONCURRENT` / `REINDEX_MAX_CONCURRENT` then govern admission only.
 

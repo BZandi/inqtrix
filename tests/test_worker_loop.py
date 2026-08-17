@@ -838,16 +838,43 @@ def test_unclaimable_job_is_acked_and_skipped(monkeypatch):
     assert queue.calls == [("ack", "1-0")]
 
 
-def test_exhausted_delivery_budget_dead_letters_and_fails(monkeypatch):
-    store = StubStore(claim_result=claimed())
+def test_exhausted_delivery_budget_claims_then_fails_with_fence(monkeypatch):
+    """Dead-lettering supersedes a possibly live attempt via a fenced claim.
+
+    The takeover claim bumps the attempt and fences the terminal write,
+    so a partitioned owner's later writes become visible no-ops instead
+    of racing the terminalization — and the upload store's ``fail``
+    REQUIRES the fence, so an unfenced call would crash this path.
+    """
+    fresh_claim = ClaimedRun(
+        run_id="run_w1",
+        tenant_id="default",
+        attempt=7,
+        request_payload={"question": "x", "body": {"mode": "research"}},
+    )
+    store = StubStore(claim_result=fresh_claim)
     queue = StubQueue()
 
     run_one(store, queue, monkeypatch, the_job=job(delivery_count=4))
 
+    assert "claim" in store.names()
     fails = [call for call in store.calls if call[0] == "fail"]
     assert fails and fails[0][3] == "max_retries_exceeded"
+    assert fails[0][4] == 7, (
+        "the terminal write must be fenced to the FRESH claim attempt"
+    )
     assert ("dead_letter", "run_w1", "max_attempts_exceeded") in queue.calls
-    assert "claim" not in store.names()
+
+
+def test_exhausted_budget_on_terminal_row_dead_letters_without_fail(monkeypatch):
+    """A row already terminal is respected: park the message, write nothing."""
+    store = StubStore(claim_result=None)
+    queue = StubQueue()
+
+    run_one(store, queue, monkeypatch, the_job=job(delivery_count=4))
+
+    assert [call for call in store.calls if call[0] == "fail"] == []
+    assert ("dead_letter", "run_w1", "max_attempts_exceeded") in queue.calls
 
 
 def test_empty_request_payload_fails_loudly(monkeypatch):

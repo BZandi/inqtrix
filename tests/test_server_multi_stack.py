@@ -354,7 +354,9 @@ def _patched_agent_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         providers,
         strategies,
         settings,
+        cancel_event,
     ):
+        assert cancel_event is not None and not cancel_event.is_set()
         captured["llm_label"] = providers.llm._label
         captured["settings_max_rounds"] = settings.max_rounds
         return {
@@ -441,3 +443,20 @@ def test_chat_completions_per_stack_agent_settings_override_global(monkeypatch):
         )
     assert response.status_code == 200
     assert captured["settings_max_rounds"] == 2
+
+
+def test_multi_stack_lifespan_owns_the_upload_reconciler():
+    """The multi-stack factory shares the single-stack recovery contract:
+    the lifespan starts upload reconciliation and stops it on shutdown."""
+    app = create_multi_stack_app(
+        settings=_make_settings(),
+        stacks={"alpha": _bundle("alpha")},
+        default_stack="alpha",
+    )
+    reconciler = app.state.container.upload_reconciler
+    assert reconciler is not None
+    assert reconciler.running is False
+    with TestClient(app):
+        assert reconciler.running is True
+    assert reconciler.running is False
+    reconciler.close()

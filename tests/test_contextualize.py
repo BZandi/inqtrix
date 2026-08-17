@@ -1102,3 +1102,22 @@ def test_evidence_without_verified_source_fails_closed():
                 chunk=chunk, score=1.0, document_title="Alt.pdf"
             ),
         )
+
+
+def test_followup_contextualization_reraises_cancellation() -> None:
+    """A run cancel is not a provider failure — no fallback may eat it."""
+    from inqtrix.exceptions import AgentCancelled
+    from inqtrix.knowledge.contextualize import (
+        contextualize_followup_question,
+    )
+
+    class CancelledLLM:
+        def complete_with_metadata(self, *_args: Any, **_kwargs: Any):
+            raise AgentCancelled("stop")
+
+    with pytest.raises(AgentCancelled):
+        contextualize_followup_question(
+            CancelledLLM(),
+            question="Und die Haftung?",
+            history="Nutzer: Wie ist der Rahmenvertrag geregelt?",
+        )

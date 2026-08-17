@@ -20,10 +20,11 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import exists, func, insert, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.agents.control_ports import (
+    TERMINAL_APPROVAL_SETTLE_NOTE,
     APPROVAL_STATUS_BY_DECISION,
     ApprovalAlreadyDecided,
     ApprovalNotFound,
@@ -196,6 +197,71 @@ class PostgresAgentControlStore(BaseSessionStore):
                 .all()
             )
             return [_plan_from_row(row) for row in rows]
+
+    async def settle_terminal_control_rows(
+        self, run_id: str
+    ) -> tuple[int, int]:
+        """Release ``writing`` artifacts and settle pending approvals.
+
+        Idempotent CAS pair for a run that cannot re-enter its graph —
+        the second call is a ``(0, 0)`` no-op. Content and revision of a
+        released artifact stay untouched: the last streamed state simply
+        becomes user-editable again.
+        """
+        now = time.time()
+        async with self._session() as session:
+            # Probe first, lock-free: reconcile runs on every plan read
+            # of a terminal run, and the settled steady state must not
+            # pay an authority lock plus two empty UPDATEs per poll.
+            has_candidates = (
+                await session.execute(
+                    select(literal(1)).where(
+                        or_(
+                            exists(
+                                select(literal(1)).where(
+                                    run_artifacts.c.run_id == run_id,
+                                    run_artifacts.c.status == "writing",
+                                )
+                            ),
+                            exists(
+                                select(literal(1)).where(
+                                    run_approvals.c.run_id == run_id,
+                                    run_approvals.c.status == "pending",
+                                )
+                            ),
+                        )
+                    )
+                )
+            ).scalar_one_or_none()
+            if has_candidates is None:
+                return 0, 0
+            await self._lock_runtime_authority(session, run_id)
+            released = (
+                await session.execute(
+                    update(run_artifacts)
+                    .where(
+                        run_artifacts.c.run_id == run_id,
+                        run_artifacts.c.status == "writing",
+                    )
+                    .values(status="ready", updated_at=now)
+                )
+            ).rowcount
+            settled = (
+                await session.execute(
+                    update(run_approvals)
+                    .where(
+                        run_approvals.c.run_id == run_id,
+                        run_approvals.c.status == "pending",
+                    )
+                    .values(
+                        status="rejected",
+                        decision="",
+                        note=TERMINAL_APPROVAL_SETTLE_NOTE,
+                        decided_at=now,
+                    )
+                )
+            ).rowcount
+            return max(0, int(released)), max(0, int(settled))
 
     async def transition_plan_task(
         self,

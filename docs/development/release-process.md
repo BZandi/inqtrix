@@ -6,7 +6,7 @@ The release process is maintainer-owned. This page exists so contributors know w
 
 ## Today's state
 
-The repository is marked experimental and is at `0.2.0`, a placeholder. The version is defined once as `__version__` in `src/inqtrix/__init__.py`; `pyproject.toml` derives the package version from it (Hatchling dynamic version). No version has been tagged or published yet. A formal release process — signing, PyPI publication, GitHub Releases, change categorisation — is a dedicated follow-up task.
+The repository is marked experimental and is on release line `0.2.0` (dev designation `0.2.0.7`), a placeholder. The version is defined once as `__version__` in `src/inqtrix/__init__.py`; `pyproject.toml` derives the package version from it (Hatchling dynamic version). No version has been tagged or published yet. A formal release process — signing, PyPI publication, GitHub Releases, change categorisation — is a dedicated follow-up task.
 
 ## Automation status
 
@@ -26,24 +26,35 @@ administratively blocked.
 
 ## Bumping the version
 
-The version lives in **one place**: `__version__` in [`src/inqtrix/__init__.py`](../../src/inqtrix/__init__.py). `pyproject.toml` declares `dynamic = ["version"]` with a `[tool.hatch.version]` source pointing at that file, so Hatchling derives the package version (and the wheel metadata) from that single line. Verify with:
+Two values live in [`src/inqtrix/__init__.py`](../../src/inqtrix/__init__.py), and the difference between them matters:
+
+- **`__version__`** is the **release line**, always three segments (`major.minor.patch`). `pyproject.toml` declares `dynamic = ["version"]` with a `[tool.hatch.version]` source pointing at that line, so Hatchling derives the package version and the wheel metadata from it. Three other things are pinned to it and break if it moves: `apps/research-desk/package.json` (npm accepts only SemVer), the `_inqtrix_version` stamp in every `tests/eval/baselines/*.json` (enforced by `tests/verification/repository-hygiene.test.ts`, so moving it declares those measured baselines re-validated), and a literal in `tests/verification/orchestrator.test.ts`.
+- **`__display_version__`** is the **dev designation inside that line** — a fourth segment matching the branch name (`local/dev-inqtrix-v0.2.0.7`). It is what `/health` reports and what the app shows in Settings → Licensing. It moves freely every dev milestone, which is precisely why it is separate: the release line stays put and nothing downstream is disturbed. `tests/test_routes.py` pins that it starts with `__version__`.
+
+Historically the fourth segment lived only in branch names while `__version__` stayed at `0.2.0`; `__display_version__` makes that existing practice explicit instead of leaving the running build invisible.
+
+Verify with:
 
 ```bash
 # uv
-uv run python -c "import inqtrix; print(inqtrix.__version__)"
+uv run python -c "import inqtrix; print(inqtrix.__version__, inqtrix.__display_version__)"
 uv run python -c "from importlib.metadata import version; print(version('inqtrix'))"
 
 # or, after `python -m pip install -e .`
-python -c "import inqtrix; print(inqtrix.__version__)"
+python -c "import inqtrix; print(inqtrix.__version__, inqtrix.__display_version__)"
 python -c "from importlib.metadata import version; print(version('inqtrix'))"
 ```
 
-A few surfaces cannot read the Python version and are bumped by hand:
+**A dev milestone** moves only `__display_version__`. Nothing else needs to change: `/health` and the SPA read it directly (`apps/research-desk/vite.config.ts` parses it out of `src/inqtrix/__init__.py`, and `deploy/docker/Dockerfile.web` copies that file into the SPA build stage so the container build can too).
 
-1. **`src/inqtrix/__init__.py`**: `__version__` (the source; `pyproject.toml` derives from it). Run `uv sync` afterwards so the installed metadata and `uv.lock` update.
+**A release-line bump** additionally moves `__version__`, and these surfaces cannot derive it, so they are changed by hand in the same commit:
+
+1. **`src/inqtrix/__init__.py`**: `__version__` itself. Run `uv sync --all-extras --reinstall-package inqtrix` afterwards — a plain `uv sync` neither refreshes the editable install's metadata on a version-only edit (`importlib.metadata` keeps reporting the old number) nor keeps the extras, and it prunes `pytest` out of the environment so `uv run pytest` silently falls back to whatever `pytest` is on `PATH`. `uv.lock` never records the project's own version, so it shows no diff.
 2. **`README.md`**: the static `Version X.Y.Z` shields.io badge (markdown, with no CI to derive it).
-3. **`apps/research-desk/package.json`**: the React app's `version` (npm; internal and not user-facing, but keep it in sync for tidiness).
-4. **Docs prose** that names the number: this page's *Today's state* and [`docs/reference/changelog.md`](../reference/changelog.md).
+3. **`apps/research-desk/package.json`**: the React app's `version`, which mirrors `__version__` and must stay valid SemVer — `npm ci` fails on a four-segment workspace version, so `__display_version__` never goes here. The app does not read it either way.
+4. **`tests/eval/baselines/*.json`**: the `_inqtrix_version` stamp on every measured baseline. Re-stamping asserts those numbers still hold for the new release line, so re-run the evals rather than editing the field on its own.
+5. **`tests/verification/orchestrator.test.ts`**: the literal release line asserted on the verification report.
+6. **Docs prose** that names the number: this page's *Today's state* and [`docs/reference/changelog.md`](../reference/changelog.md).
 
 There is currently no active source-controlled CI or release pipeline, so the
 version is bumped manually at milestones.
@@ -58,7 +69,7 @@ version is bumped manually at milestones.
 
 1. Pick the new version number following SemVer (`0.x.y` until the API stabilises; `1.y.z` once semver applies strictly).
 2. Move `Unreleased` entries in `docs/reference/changelog.md` into a dated section, grouped by `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
-3. Bump the version (see [Bumping the version](#bumping-the-version)): edit `__version__` in `src/inqtrix/__init__.py`, run `uv sync`, then update the README badge and `apps/research-desk/package.json` to match.
+3. Bump the version (see [Bumping the version](#bumping-the-version)): edit `__version__` and `__display_version__` in `src/inqtrix/__init__.py`, run `uv sync --all-extras --reinstall-package inqtrix`, then work through the release-line list on that section — README badge, `apps/research-desk/package.json`, eval baselines, the orchestrator literal, and the docs prose.
 4. Tag the commit with `vX.Y.Z`, push the tag.
 5. Create a GitHub Release pointing at the tag, paste the changelog section as the body.
 6. Publish to PyPI if applicable (`uv build`, inspection, `uv publish`).

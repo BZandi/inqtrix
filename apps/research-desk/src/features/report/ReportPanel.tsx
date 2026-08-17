@@ -45,6 +45,7 @@ import {
   agentStepScrollTop,
   isAgentStepScrollKey,
 } from './agentStepScroll'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 type ReportPanelProps = {
   onHide: () => void
@@ -339,7 +340,12 @@ function ReportPreview({
     try {
       // Whole-answer copy carries the disclosure; selections and code/table
       // copies stay byte-exact (see lib/aiDisclosure).
-      await copyTextToClipboard(withAiDisclosure(markdown, t.aiTransparency.exportNotice))
+      const copied = await copyTextToClipboard(
+        withAiDisclosure(markdown, t.aiTransparency.exportNotice),
+      )
+      if (!copied) {
+        throw new Error('Unable to copy markdown')
+      }
       setCopyFeedback('copied')
       copyResetRef.current = window.setTimeout(() => {
         setCopyFeedback('idle')
@@ -404,38 +410,6 @@ function ReportPreview({
       </div>
     </div>
   )
-}
-
-async function copyTextToClipboard(text: string) {
-  if (copyTextWithTextArea(text)) {
-    return
-  }
-
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text)
-    return
-  }
-
-  throw new Error('Unable to copy markdown')
-}
-
-function copyTextWithTextArea(text: string) {
-  const textArea = document.createElement('textarea')
-  textArea.value = text
-  textArea.setAttribute('readonly', 'true')
-  textArea.style.opacity = '0'
-  textArea.style.position = 'fixed'
-  textArea.style.top = '0'
-
-  document.body.appendChild(textArea)
-  textArea.focus()
-  textArea.select()
-  textArea.setSelectionRange(0, text.length)
-
-  const didCopy = document.execCommand('copy')
-  document.body.removeChild(textArea)
-
-  return didCopy
 }
 
 function RunStatusPanel({ run }: { run: ResearchRunRecord }) {

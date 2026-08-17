@@ -1,3 +1,5 @@
+import { copyTextToClipboard } from '@/lib/clipboard'
+
 export const MARKDOWN_BLOCK_EXPORT_PADDING_PX = 24
 export const MARKDOWN_BLOCK_EXPORT_PIXEL_RATIO = 3
 export const MARKDOWN_BLOCK_FILE_NAMES = {
@@ -116,33 +118,8 @@ export function markdownBlockPngOptions(
 }
 
 export async function copyMarkdownBlockText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text)
-    return
-  }
-
-  const previouslyFocused = document.activeElement instanceof HTMLElement
-    ? document.activeElement
-    : null
-  const textArea = document.createElement('textarea')
-  textArea.value = text
-  textArea.setAttribute('readonly', 'true')
-  textArea.style.opacity = '0'
-  textArea.style.position = 'fixed'
-  textArea.style.top = '0'
-  document.body.appendChild(textArea)
-  try {
-    textArea.focus()
-    textArea.select()
-    textArea.setSelectionRange(0, text.length)
-    if (!document.execCommand('copy')) {
-      throw new Error('Browser rejected the clipboard operation.')
-    }
-  } finally {
-    document.body.removeChild(textArea)
-    if (previouslyFocused?.isConnected) {
-      previouslyFocused.focus({ preventScroll: true })
-    }
+  if (!(await copyTextToClipboard(text))) {
+    throw new Error('Browser rejected the clipboard operation.')
   }
 }
 

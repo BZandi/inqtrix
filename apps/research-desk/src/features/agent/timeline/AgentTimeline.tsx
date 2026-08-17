@@ -60,6 +60,7 @@ import {
 } from '../plan/taskPresentation'
 import { agentRunCompletionRecap } from '../runPresentation'
 import { WebEvidenceSourceRow } from '../WebEvidenceSourceRow'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 export type AgentTimelineActions = {
   answerClarification: (
@@ -451,12 +452,13 @@ function AgentAnswerBlock({
   }
   const copy = () => {
     if (body === undefined) return
-    void navigator.clipboard
-      .writeText(withAiDisclosure(body, t.aiTransparency.exportNotice))
-      .then(() => {
-        setCopied(true)
-        window.setTimeout(() => setCopied(false), 1500)
-      })
+    void copyTextToClipboard(
+      withAiDisclosure(body, t.aiTransparency.exportNotice),
+    ).then((copied) => {
+      if (!copied) return
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    })
   }
   return (
     <div

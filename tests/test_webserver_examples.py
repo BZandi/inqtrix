@@ -73,7 +73,12 @@ def fake_agent_run(monkeypatch: pytest.MonkeyPatch):
         providers,
         strategies,
         settings,
+        cancel_event,
     ):
+        # The blocking chat path wires the route's disconnect event into
+        # the graph; it arrives as a real, unset Event on a healthy call.
+        assert cancel_event is not None
+        assert not cancel_event.is_set()
         return {
             "answer": "stubbed answer",
             "result_state": {},

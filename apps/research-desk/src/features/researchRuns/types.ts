@@ -65,6 +65,8 @@ export type InqtrixHealth = {
   node_models?: Record<string, NodeModelResolution>
   testing_mode?: boolean
   high_risk_score_threshold?: number
+  /** App version of the server build; absent on older servers. */
+  version?: string
   legal?: {
     copyright: string
     license: string

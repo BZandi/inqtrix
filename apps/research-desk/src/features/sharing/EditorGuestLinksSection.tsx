@@ -22,6 +22,7 @@ import type {
   EditorShareLink,
   EditorShareLinkPermission,
 } from './types'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 const PERMISSIONS: EditorShareLinkPermission[] = [
   'view',
@@ -197,7 +198,9 @@ export function EditorGuestLinksSection({
 
   const copyText = async (kind: 'password' | 'url', value: string) => {
     try {
-      await navigator.clipboard.writeText(value)
+      if (!(await copyTextToClipboard(value))) {
+        throw new Error('Zwischenablage nicht verfügbar')
+      }
       setCopied(kind)
       window.setTimeout(() => setCopied(null), 1500)
     } catch {

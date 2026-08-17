@@ -358,6 +358,13 @@ def create_multi_stack_app(
                 log.info(
                     "Workspace-Share-Reconciliation completed without changes."
                 )
+        # Deliberately NOT gated on database_ready: a database blip during
+        # boot would otherwise disable upload recovery for the whole
+        # process lifetime. Each pass degrades to a WARNING on storage
+        # errors and succeeds on its own once the database returns.
+        upload_reconciler = getattr(container, "upload_reconciler", None)
+        if upload_reconciler is not None:
+            upload_reconciler.start()
         try:
             yield
         finally:
@@ -365,6 +372,9 @@ def create_multi_stack_app(
                 "Inqtrix multi-stack server stopping | stacks=%d",
                 len(resolved_stacks),
             )
+            upload_reconciler = getattr(container, "upload_reconciler", None)
+            if upload_reconciler is not None:
+                upload_reconciler.close()
             collaboration_service = getattr(
                 container, "editor_collaboration_service", None
             )

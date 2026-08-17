@@ -25,6 +25,8 @@ class RuntimeProbeResults:
     object_store_available: bool | None = None
     queue_available: bool | None = None
     vector_store_available: bool | None = None
+    queue_consumers: int | None = None
+    queue_depth: int | None = None
 
 
 async def system_runtime_payload_checked(
@@ -55,7 +57,9 @@ def system_runtime_payload(
         A JSON-serializable manifest of backend categories only. It
         deliberately omits database URLs, object-store paths, bucket names,
         service endpoints, and credentials. Queue values describe the
-        configured dispatch mode; they do not claim live worker heartbeats.
+        configured dispatch mode plus, when probed, the consumer-group
+        attachment count and stream depth (the honest someone-is-attached
+        signal); they still do not claim per-worker heartbeats.
     """
     settings = container.settings
     knowledge = _knowledge_payload(container, probes=probes)
@@ -98,6 +102,12 @@ def system_runtime_payload(
             ),
             "queue": queue_backend,
             "queue_available": queue_available,
+            "queue_consumers": (
+                probes.queue_consumers if probes is not None else None
+            ),
+            "queue_depth": (
+                probes.queue_depth if probes is not None else None
+            ),
             "store": (
                 "postgres" if settings.storage.backend == "postgres" else "memory"
             ),
@@ -173,15 +183,22 @@ def _observability_payload(settings: Any) -> dict[str, Any]:
 
 async def runtime_probe_results(container: "AppContainer") -> RuntimeProbeResults:
     """Probe optional backing services without exposing connection details."""
-    object_store, queue, vector_store = await asyncio.gather(
+    object_store, queue_result, vector_store = await asyncio.gather(
         _probe_object_store(container),
         _probe_queue(container),
         _probe_vector_store(container),
     )
+    queue_available, queue_info = queue_result
     return RuntimeProbeResults(
         object_store_available=object_store,
-        queue_available=queue,
+        queue_available=queue_available,
         vector_store_available=vector_store,
+        queue_consumers=(
+            queue_info.get("consumers") if queue_info is not None else None
+        ),
+        queue_depth=(
+            queue_info.get("depth") if queue_info is not None else None
+        ),
     )
 
 
@@ -311,14 +328,45 @@ async def _probe_object_store(container: "AppContainer") -> bool:
     return await _bounded_probe("object_store", probe)
 
 
-async def _probe_queue(container: "AppContainer") -> bool:
+async def _probe_queue(
+    container: "AppContainer",
+    *,
+    include_info: bool = True,
+) -> tuple[bool, dict[str, int] | None]:
     settings = container.settings
     if settings.queue.backend != "valkey":
+        return True, None
+    info: dict[str, int] | None = None
+
+    def _probe() -> bool:
+        nonlocal info
+        if not _ping_valkey(settings.queue.valkey_url):
+            return False
+        if not include_info:
+            # Readiness needs only the availability bit — skip the
+            # group snapshot and its extra connection entirely.
+            return True
+        from inqtrix.runs.valkey_queue import ValkeyRunQueue
+
+        queue = ValkeyRunQueue(url=settings.queue.valkey_url)
+        try:
+            info = queue.group_info()
+        except Exception:  # noqa: BLE001 — liveness detail degrades to None
+            info = None
+        finally:
+            # Probe clients are throwaway: close like _ping_valkey does,
+            # or every runtime read leaks one broker connection.
+            try:
+                queue._client.close()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                pass
         return True
-    return await _bounded_probe(
+
+    available = await _bounded_probe(
         "valkey_queue",
-        lambda: asyncio.to_thread(_ping_valkey, settings.queue.valkey_url),
+        lambda: asyncio.to_thread(_probe),
     )
+    return available, info
 
 
 async def _probe_vector_store(container: "AppContainer") -> bool:
@@ -354,12 +402,21 @@ async def readiness_payload(
     (:data:`_RUNTIME_PROBE_TIMEOUT_SECONDS`), well below usual kubelet probe
     timeouts; memory backends stay zero-infrastructure.
     """
-    database_ok, queue_ok, vector_ok, object_store_ok = await asyncio.gather(
+    (
+        database_ok,
+        queue_result,
+        vector_ok,
+        object_store_ok,
+    ) = await asyncio.gather(
         _probe_database(container),
-        _probe_queue(container),
+        _probe_queue(container, include_info=False),
         _probe_vector_store_ready(container),
         _probe_object_store_ready(container),
     )
+    # _probe_queue returns (available, info); readiness consumes ONLY the
+    # bool — treating the tuple itself as truth would report a dead
+    # queue as ready.
+    queue_ok, _queue_info = queue_result
     ready = database_ok and queue_ok
     optional_backends_ok = vector_ok and object_store_ok
     status = "ready" if ready and optional_backends_ok else (

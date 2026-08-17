@@ -1393,3 +1393,42 @@ async def test_control_rows_cascade_with_their_run(service, run_store, control_s
     finally:
         await engine.dispose()
     assert approval.approval_id  # silence unused warning
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_settles_control_rows_postgres(
+    service, run_store, control_store
+):
+    """Postgres twin: writing→ready, pending approval→rejected, idempotent."""
+    run_id = _parked_agent_run(run_store)
+    await control_store.upsert_artifact(
+        run_id=run_id,
+        kind="memo",
+        session_id="sess-settle-pg",
+        title="Memo",
+        status="writing",
+        content_markdown="# Gestreamter Stand",
+        payload={},
+        refs=[],
+        updated_by="agent",
+        artifact_id="art_settle_pg",
+    )
+    approval = await control_store.create_approval(_approval(run_id))
+    assert run_store.cancel(run_id)["status"] == "cancelled"
+
+    assert await service.reconcile_terminal_tasks(run_id) is True
+
+    released, _revisions = await control_store.get_artifact(
+        run_id, "art_settle_pg"
+    )
+    assert released.status == "ready"
+    assert released.revision == 1
+    assert released.content_markdown == "# Gestreamter Stand"
+
+    settled = await control_store.get_approval(run_id, approval.approval_id)
+    assert settled.status == "rejected"
+    assert settled.decision == ""
+    assert "endete" in settled.note
+    assert settled.decided_at is not None
+
+    assert await control_store.settle_terminal_control_rows(run_id) == (0, 0)

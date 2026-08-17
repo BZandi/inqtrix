@@ -136,6 +136,7 @@ import type { AgentTaskResultWire } from '../types'
 import {
   taskResultReferenceGroups,
 } from '../taskResultReferences'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 const SAVE_DEBOUNCE_MS = 900
 
@@ -364,7 +365,7 @@ export function DocumentCanvasView({
               className="size-7 text-muted-foreground hover:text-foreground"
               onClick={() => {
                 if (artifact.contentMarkdown !== undefined) {
-                  void navigator.clipboard.writeText(
+                  void copyTextToClipboard(
                     withAiDisclosure(artifact.contentMarkdown, t.aiTransparency.exportNotice),
                   )
                 }

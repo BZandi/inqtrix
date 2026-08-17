@@ -25,6 +25,7 @@ from inqtrix.agents.control_ports import (
     ArtifactPublicationFenced,
     ArtifactRevisionConflict,
 )
+from inqtrix.exceptions import AgentCancelled
 from inqtrix.execution_failures import RunExecutionFailure
 from inqtrix.runs.shared import answer_artifact_id, answer_publication_id
 from inqtrix.sync_bridge import run_coro_sync
@@ -85,7 +86,7 @@ class AgentAnswerPublisher:
                     "stage": "staging",
                 },
             )
-            raise self._typed_conflict(exc) from exc
+            raise self._typed_conflict(handle, exc) from exc
 
         self._emit_artifact_signal(handle, staged)
 
@@ -113,7 +114,7 @@ class AgentAnswerPublisher:
         except (ArtifactPublicationFenced, ArtifactRevisionConflict) as exc:
             # RunHandle has already emitted ``answer.interrupted`` with the
             # exact byte offset and the ``finalizing`` stage.
-            raise self._typed_conflict(exc) from exc
+            raise self._typed_conflict(handle, exc) from exc
 
     def _stage(
         self,
@@ -179,13 +180,29 @@ class AgentAnswerPublisher:
 
     @staticmethod
     def _typed_conflict(
+        handle: "RunHandle",
         exc: ArtifactPublicationFenced | ArtifactRevisionConflict,
-    ) -> RunExecutionFailure:
+    ) -> Exception:
         if isinstance(exc, ArtifactPublicationFenced):
+            if (
+                handle.cancel_event.is_set()
+                or exc.status == "cancel_requested"
+            ):
+                # The fence fired because a requested cancel superseded
+                # this attempt mid-publication. ``exc.status`` is the
+                # store's answer from the same transaction that refused
+                # the write, so this classification does not depend on
+                # the cancel poller having already set the local event.
+                # Reporting the race as a failure would contradict the
+                # user's own action — the honest terminal is cancelled.
+                return AgentCancelled(
+                    "Die Antwort-Publikation wurde durch den "
+                    "angeforderten Abbruch beendet."
+                )
             return RunExecutionFailure(
                 "answer_publication_fenced",
-                "Die Antwort wurde nicht publiziert, weil ein neuer "
-                "Ausfuehrungsversuch den Lauf uebernommen hat.",
+                "Die Publikation war nicht mehr moeglich, weil der Lauf "
+                "diesem Ausfuehrungsversuch nicht mehr gehoert.",
             )
         return RunExecutionFailure(
             "answer_publication_conflict",

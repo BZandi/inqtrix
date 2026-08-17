@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 from inqtrix.model_routing import resolve_effort, resolve_model
+from inqtrix.providers.base import provider_cancel_scope
 
 if TYPE_CHECKING:
     from inqtrix.server.editor_instructions import (
@@ -127,6 +128,7 @@ def run_editor_suggest(
     structured_supported: bool,
     timeout_seconds: float,
     base_warnings: Sequence[str] = (),
+    cancel_probe: "Callable[[], bool] | None" = None,
 ) -> tuple["EditorSuggestResult", int]:
     """Run one paragraph-rewrite suggestion end to end (SYNC core).
 
@@ -217,7 +219,16 @@ def run_editor_suggest(
         response carries it directly; the raw path reads it back from
         the ``state`` accumulator (:func:`inqtrix.state.track_tokens`).
         This includes any reasoning tokens the char estimate would miss.
+        The cancel probe binds on THIS executor thread; providers
+        consult it at retry-attempt boundaries and backoff sleeps, so a
+        client abort stops the ladder after the in-flight attempt.
         """
+        with provider_cancel_scope(cancel_probe):
+            return _unscoped_complete(prompt)
+
+    def _unscoped_complete(
+        prompt: str,
+    ) -> tuple["EditorSuggestResult", int]:
         if structured_supported:
             structured = llm.complete_structured(
                 prompt,
@@ -291,6 +302,7 @@ def run_editor_instruct(
     structured_supported: bool,
     timeout_seconds: float,
     base_warnings: Sequence[str] = (),
+    cancel_probe: "Callable[[], bool] | None" = None,
 ) -> tuple["EditorInstructResult", int]:
     """Run one document-level instruction end to end (SYNC core).
 
@@ -361,8 +373,15 @@ def run_editor_instruct(
 
         Real provider usage, as in the suggest path — structured
         response carries it; the raw path reads it back from the
-        ``state`` accumulator.
+        ``state`` accumulator. The cancel probe binds on THIS executor
+        thread (see the suggest twin).
         """
+        with provider_cancel_scope(cancel_probe):
+            return _unscoped_complete(prompt)
+
+    def _unscoped_complete(
+        prompt: str,
+    ) -> tuple["EditorInstructResult", int]:
         if structured_supported:
             structured = llm.complete_structured(
                 prompt,

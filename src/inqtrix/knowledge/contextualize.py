@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from inqtrix.constants import REASONING_TIMEOUT
+from inqtrix.exceptions import AgentCancelled
 from inqtrix.contextualization_circuit import (
     ContextualizationCircuitBreaker,
     ContextualizationCircuitPermit,
@@ -1131,6 +1132,10 @@ def contextualize_followup_question(
         response = llm.complete_with_metadata(
             prompt, model=model, timeout=timeout
         )
+    except AgentCancelled:
+        # A run cancellation is not a provider failure — swallowing it
+        # into the fallback would keep a cancelled ask running.
+        raise
     except Exception as exc:  # noqa: BLE001 - visible fallback, not fatal
         log.warning(
             "Knowledge follow-up contextualization failed "

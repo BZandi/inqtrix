@@ -174,7 +174,7 @@ class AgentCancelled(Exception):
     aborted mid-request — the residual latency from the request to the
     actual stop is the remainder of that ONE attempt, bounded by its
     transport timeout (full transport-level abort remains a deferred
-    design decision, OPEN-MS-4).
+    design decision, a known open item).
     """
 
 

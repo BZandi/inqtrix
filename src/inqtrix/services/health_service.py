@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from inqtrix import __display_version__
 from inqtrix.core.constants import MODEL_NAME
 from inqtrix.legal import ai_disclosure_metadata, legal_metadata
 from inqtrix.model_cards import build_models_catalog
@@ -192,6 +193,7 @@ class HealthService:
             "model_tier": active_agent_settings.model_tier,
             "auth_required": self._auth_provider.mode != "none",
             "auth_mode": self._auth_provider.mode,
+            "version": __display_version__,
             "legal": legal_metadata(),
             "ai_disclosure": ai_disclosure_metadata(),
         }

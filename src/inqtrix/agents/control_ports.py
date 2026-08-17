@@ -59,6 +59,10 @@ payloads) and both stores (row writes) consume it, so the emitted status
 can never desynchronize from the stored one."""
 
 CLARIFICATION_STATUSES = ("pending", "answered")
+"""A terminal run deliberately leaves its unanswered rounds ``pending``:
+the row is truthful (nothing was answered) and inert — answering runs
+through the resume CAS, which a terminal run refuses. The run status,
+not the clarification row, gates the answer affordance."""
 
 ARTIFACT_KINDS = (
     "memo",
@@ -87,6 +91,12 @@ Session-less, one per run (``art_<run12>_ctx``), readable by the model via
 ``read_canvas`` — the durable half of ledger-grounded compaction, so
 compacting can never destroy retrievable context or break a citation.
 Added to the DB CHECK by migration 0050."""
+
+TERMINAL_APPROVAL_SETTLE_NOTE = (
+    "Der Lauf endete, bevor die Freigabe entschieden wurde."
+)
+"""System note both stores stamp on approvals a terminal run left
+pending — held once here so the twins can never drift apart."""
 
 ARTIFACT_STATUSES = ("writing", "ready")
 """``writing`` locks the artifact against user edits (E13: the canvas is
@@ -1137,6 +1147,21 @@ class AgentControlStore(Protocol):
     ) -> tuple[list[ArtifactRecord], str | None]:
         """Metadata page (``content_markdown=""``), newest-first keyset
         pagination; returns ``(rows, next_cursor)``."""
+        ...
+
+    async def settle_terminal_control_rows(
+        self, run_id: str
+    ) -> tuple[int, int]:
+        """Idempotent CAS recovery for a run that cannot re-enter its graph.
+
+        Releases every ``writing`` artifact to ``ready`` (content and
+        revision unchanged — the last streamed state becomes
+        user-editable) and settles every ``pending`` approval as
+        ``rejected`` with an empty decision verb and a system note.
+        Returns ``(artifacts_released, approvals_settled)``. Unanswered
+        clarifications stay ``pending`` deliberately (see
+        :data:`CLARIFICATION_STATUSES`).
+        """
         ...
 
     async def aclose(self) -> None: ...

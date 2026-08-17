@@ -387,6 +387,11 @@ def build_run_store(settings: Settings) -> "RunStorePort":
         ),
         sharing_enabled=settings.sharing.enabled,
         audit_service_starts=settings.observability.audit_service_starts,
+        # Explicit instead of inferred from ``queue is None``: the API
+        # process owns orphan recovery exactly when it executes runs
+        # in-process (see resolve_orphan_sweep for why the inference is
+        # wrong for the worker constructor).
+        recover_orphans=queue is None,
     )
 
 
@@ -441,6 +446,9 @@ def build_indexing_store(settings: Settings) -> Any:
             settings.sharing.restrict_to_workspace_members
         ),
         sharing_enabled=settings.sharing.enabled,
+        # Explicit instead of inferred from ``queue is None`` (see the
+        # run-store constructor above for the rationale).
+        recover_orphans=queue is None,
     )
 
 

@@ -1,8 +1,6 @@
 import {
   Download,
-  ExternalLink,
   FolderOpen,
-  Github,
   LoaderCircle,
   Menu,
   Monitor,
@@ -158,9 +156,6 @@ export function Topbar({
           </div>
           <div className="hidden md:block">
             <LanguageToggle />
-          </div>
-          <div className="hidden lg:block">
-            <RepoLink />
           </div>
           <TopbarOverflowMenu
             projectActions={projectActionsProps}
@@ -461,16 +456,6 @@ function TopbarOverflowMenu({
             </DropdownMenuItem>
           ))}
         </div>
-        <div className="lg:hidden">
-          <TopbarMenuSeparator />
-          <DropdownMenuItem asChild className={topbarMenuItemClassName}>
-            <a href={t.authLock.repositoryUrl} rel="noreferrer" target="_blank">
-              <Github className="icon-sm" />
-              <span className={topbarMenuTextClassName}>{t.authLock.repositoryLabel}</span>
-              <ExternalLink className="ml-auto icon-xs" />
-            </a>
-          </DropdownMenuItem>
-        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -660,23 +645,5 @@ function LanguageToggle() {
         )
       })}
     </div>
-  )
-}
-
-function RepoLink() {
-  const { t } = useLocale()
-
-  return (
-    <a
-      className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground shadow-[0_1px_2px_var(--shadow-hairline)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      href={t.authLock.repositoryUrl}
-      rel="noreferrer"
-      target="_blank"
-      title={t.authLock.repositoryLabel}
-    >
-      <Github className="icon-sm shrink-0" />
-      <span className="hidden sm:inline">{t.authLock.repositoryLabel}</span>
-      <ExternalLink className="hidden size-3 shrink-0 sm:inline" />
-    </a>
   )
 }

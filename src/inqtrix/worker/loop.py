@@ -392,6 +392,35 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             }
         self._periodic_maintenance()
 
+    def _dead_letter_exhausted(self, job: TJob, entity_id: str) -> None:
+        """Terminalize and dead-letter a job past its delivery budget.
+
+        The takeover claim supplies the fence for the terminal write:
+        superseding a possibly still-partitioned owner atomically turns
+        its later writes into the existing visible fenced no-ops instead
+        of racing this terminalization. A ``None`` claim means the row is
+        already terminal or gone — row truth wins and only the message is
+        parked. The upload store's ``fail`` REQUIRES the fence, so this
+        path must never call an unfenced ``fail``. Row state is protected
+        by the fence; provider SPEND is not — a partitioned owner keeps
+        burning tokens until its next fenced write or cancel-poll
+        observation, a deliberate property of the fencing model. A
+        ``fail`` blip leaves the row RUNNING under this claim until the
+        idle reclaim redelivers and retries this helper idempotently
+        (about ``claim_idle_seconds`` later).
+        """
+        claimed = self._store.claim_for_execution(
+            entity_id, job.tenant_id, allow_takeover=True
+        )
+        if claimed is not None:
+            self._store.fail(
+                entity_id,
+                "Maximale Anzahl Ausfuehrungsversuche erreicht.",
+                error_type="max_retries_exceeded",
+                fence_attempt=claimed.attempt,
+            )
+        self._queue.dead_letter(job, reason="max_attempts_exceeded")
+
     def _start(self, job: TJob, *, takeover: bool) -> None:
         if self._stop.is_set():
             log.info(
@@ -500,12 +529,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             )
             return
         if job.delivery_count > self._max_attempts:
-            self._store.fail(
-                entity_id,
-                "Maximale Anzahl Ausfuehrungsversuche erreicht.",
-                error_type="max_retries_exceeded",
-            )
-            self._queue.dead_letter(job, reason="max_attempts_exceeded")
+            self._dead_letter_exhausted(job, entity_id)
             return
         claimed = self._store.claim_for_execution(
             entity_id, job.tenant_id, allow_takeover=takeover
@@ -605,14 +629,7 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 )
                 return
             if job.delivery_count > self._max_attempts:
-                self._store.fail(
-                    entity_id,
-                    "Maximale Anzahl Ausfuehrungsversuche erreicht.",
-                    error_type="max_retries_exceeded",
-                )
-                self._queue.dead_letter(
-                    job, reason="max_attempts_exceeded"
-                )
+                self._dead_letter_exhausted(job, entity_id)
                 with self._lock:
                     if self._active.get(entity_id) is placeholder:
                         self._active.pop(entity_id, None)

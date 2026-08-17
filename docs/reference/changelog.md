@@ -4,9 +4,18 @@ This changelog follows the spirit of [Keep a Changelog](https://keepachangelog.c
 
 ## Unreleased
 
-No released artefacts yet. The repository is marked experimental (see the disclaimer in the root `README.md`); the version (`0.2.0`, defined once as `__version__` in `src/inqtrix/__init__.py`) is a placeholder and will be tagged formally with the first release.
+No released artefacts yet. The repository is marked experimental (see the disclaimer in the root `README.md`); the release line (`0.2.0`, defined once as `__version__` in `src/inqtrix/__init__.py`, currently at dev designation `0.2.0.7` in `__display_version__`) is a placeholder and will be tagged formally with the first release.
 
 ### Added
+
+- **App version on `/health` and in Settings → Licensing.** The running build is
+  no longer invisible: `__display_version__` names the dev designation inside the
+  release line (the fourth segment that until now lived only in branch names),
+  `/health` carries it as a top-level `version`, and the Licensing panel shows it
+  as a `v…` badge beside the license — falling back to the SPA build's
+  `__APP_VERSION__` constant (same source, parsed at build time) when no server is
+  reachable. `__version__` stays on the three-segment release line that packaging,
+  npm, and the eval baselines are pinned to.
 
 - **App-wide Markdown block actions.** Mermaid diagrams now preserve their native
   type scale up to the available reading width and offer a shared responsive modal
@@ -26,6 +35,10 @@ No released artefacts yet. The repository is marked experimental (see the discla
   See [Model cards](../configuration/model-cards.md).
 
 ### Changed
+
+- **Neutral source-code link label.** The GitHub link in the top bar, lock
+  screen, and Settings now reads "Source code" ("Quellcode") instead of the
+  repository slug; the link target is unchanged.
 
 - **Quote grounding tolerates page-break artifacts; one visible answer
   retry.** PDF extraction writes the printed page number and a form feed
@@ -107,6 +120,12 @@ No released artefacts yet. The repository is marked experimental (see the discla
   token meter shows what fits and warns when the context exceeds the selected
   model's window. The backend reference-document clamp stays as the visible
   last-resort guard.
+
+### Removed
+
+- **The lock screen's copyright line.** The notice remains in the `/health`
+  `legal` block, in Settings → Licensing, and in `LICENSE`; the lock screen
+  keeps the license identifier, warranty notice, and usage notices.
 
 ## How to update this file on release
 

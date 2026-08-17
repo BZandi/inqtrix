@@ -33,6 +33,7 @@ import { StatusBadge } from '@/features/settings/parts'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { canDisable, canSetRole, isSelf, sortUsers } from './adminModel'
 import type { useAdminUsers } from './useAdminUsers'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 function formatDate(seconds: number | null, locale: string): string | null {
   if (seconds == null) return null
@@ -304,7 +305,7 @@ function ResetPasswordDialog({
             <Button
               className="shrink-0 gap-1.5"
               onClick={() => {
-                void navigator.clipboard?.writeText(revealed)
+                void copyTextToClipboard(revealed)
                 setCopied(true)
               }}
               size="sm"
@@ -443,7 +444,7 @@ function CreateUserDialog({
             <Button
               className="shrink-0 gap-1.5"
               onClick={() => {
-                void navigator.clipboard?.writeText(created.password)
+                void copyTextToClipboard(created.password)
                 setCopied(true)
               }}
               size="sm"

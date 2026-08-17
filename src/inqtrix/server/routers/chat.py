@@ -25,7 +25,7 @@ from inqtrix.server.routers import (
     quota_record,
     stack_error_response,
 )
-from inqtrix.server.streaming import guarded_stream
+from inqtrix.server.streaming import disconnect_watch, guarded_stream
 from inqtrix.services.agent_context import StackResolutionError
 from inqtrix.services.request_parsing import (
     format_history,
@@ -231,15 +231,21 @@ def build_router(container: "AppContainer") -> APIRouter:
                 },
             )
 
-        response = await chat_service.complete(
-            question=question,
-            history=history,
-            messages=messages,
-            resolved=resolved,
-            chat_agent_settings=chat_agent_settings,
-            semaphore=sem,
-            principal=principal,
-        )
+        # The non-streaming transport gets the same disconnect semantics
+        # as SSE: a client abort flips the cancel event, the algorithm
+        # stops at its next checkpoint/probe, and the (undeliverable)
+        # response is discarded instead of burning provider budget.
+        async with disconnect_watch(req) as cancel_event:
+            response = await chat_service.complete(
+                question=question,
+                history=history,
+                messages=messages,
+                resolved=resolved,
+                chat_agent_settings=chat_agent_settings,
+                semaphore=sem,
+                principal=principal,
+                cancel_event=cancel_event,
+            )
         # Book real token spend on success and on a typed returned terminal
         # failure.  Ordinary pre-execution error envelopes carry no usage;
         # ChatService attaches a private usage projection only when an

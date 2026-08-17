@@ -316,6 +316,17 @@ local object store instead:
 --set config.INQTRIX_OBJECT_STORE_BACKEND=local
 ```
 
+Without a queue the API pod executes runs in-process and keeps itself honest:
+an active row whose executing thread is gone (crash, storage outage mid-write)
+is failed as `execution_lost` within about a minute of the next read, a row
+that never finds an executor fails as `queued_timeout` after 24 hours, and a
+last-resort failsafe fails anything still non-terminal after 7 days — no state
+stays "running" forever and no run silently disappears. The honest limits: a
+restart mid-run surfaces as a visible failure rather than resuming (crash
+resume is a queue+worker property), this mode supports exactly one API
+replica, and the retention prune jobs (traces, audit, usage ledger) do not run
+because they live in the worker process — the admin System page flags this.
+
 ### What the Azure overlay sets
 
 | Area | Values |
@@ -413,8 +424,11 @@ an Ingress with TLS. Provide secrets through a Kubernetes Secret you own.
    therefore optional when it is identical, and keeps precedence when the
    externally published origin intentionally differs from the Ingress host.
 
-3. To scale or survive restarts, enable the worker and a queue, and use the S3
-   object store (see [Scaling](#scaling)).
+3. To scale or survive restarts mid-run, enable the worker and a queue, and
+   use the S3 object store (see [Scaling](#scaling)). Without them the
+   platform still self-heals to visible failed states (`execution_lost`,
+   `queued_timeout`) instead of hanging — but interrupted work fails
+   honestly rather than resuming.
 
 ## Step 2, scenario D: OpenShift
 
@@ -867,7 +881,10 @@ volume accumulates.
 
 The simple defaults (in-memory run store, local object store) support exactly
 **one** API replica. To run more than one replica or survive restarts, switch to
-the durable backends — all of which Inqtrix already supports:
+the durable backends — all of which Inqtrix already supports. Postgres alone
+already keeps state across restarts and self-heals interrupted work to visible
+failures (`execution_lost`, `queued_timeout`); resuming interrupted runs and
+running more than one API replica additionally need the queue and worker:
 
 - `config.INQTRIX_STORAGE_BACKEND=postgres` with `INQTRIX_DATABASE_URL` — the run
   state lives in the database, not in one pod's memory.

@@ -186,3 +186,125 @@ def test_fenced_worker_attempt_reaches_both_artifact_transactions() -> None:
     AgentAnswerPublisher(control).publish(handle, "Antwort.", references=[])
 
     assert control.attempts == [7, 7]
+
+
+def test_publication_fence_with_pending_cancel_is_a_cancellation() -> None:
+    """A fence that fires because the user's cancel superseded the attempt
+    must terminalize as cancelled, not as a technical failure."""
+    from inqtrix.agents.control_ports import (
+        ArtifactNotFound,
+        ArtifactPublicationFenced,
+    )
+    from inqtrix.exceptions import AgentCancelled
+
+    class _FencingStore:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, Any]]] = []
+
+        def emit(
+            self,
+            _run_id: str,
+            event_type: str,
+            payload: dict[str, Any],
+            **_kwargs: Any,
+        ) -> None:
+            self.events.append((event_type, dict(payload)))
+
+        async def get_artifact(self, run_id: str, artifact_id: str) -> Any:
+            raise ArtifactNotFound(artifact_id)
+
+        async def upsert_artifact(self, **_kwargs: Any) -> Any:
+            raise ArtifactPublicationFenced(
+                expected_attempt=1, current_attempt=2, status="running"
+            )
+
+    store = _FencingStore()
+    handle = RunHandle(store, "run_cancel_fence_race", threading.Event())  # type: ignore[arg-type]
+    handle.cancel_event.set()
+
+    with pytest.raises(AgentCancelled):
+        AgentAnswerPublisher(store).publish(  # type: ignore[arg-type]
+            handle,
+            "Nie publizierte Antwort.",
+            references=[],
+        )
+    assert store.events[-1][0] == "inqtrix.answer.interrupted"
+
+
+def test_publication_fence_without_cancel_stays_a_typed_failure() -> None:
+    """Without a pending cancel the fence keeps its honest failure type."""
+    from inqtrix.agents.control_ports import (
+        ArtifactNotFound,
+        ArtifactPublicationFenced,
+    )
+
+    class _FencingStore:
+        def emit(
+            self,
+            _run_id: str,
+            _event_type: str,
+            _payload: dict[str, Any],
+            **_kwargs: Any,
+        ) -> None:
+            return None
+
+        async def get_artifact(self, run_id: str, artifact_id: str) -> Any:
+            raise ArtifactNotFound(artifact_id)
+
+        async def upsert_artifact(self, **_kwargs: Any) -> Any:
+            raise ArtifactPublicationFenced(
+                expected_attempt=1, current_attempt=2, status="running"
+            )
+
+    store = _FencingStore()
+    handle = RunHandle(store, "run_plain_fence", threading.Event())  # type: ignore[arg-type]
+
+    with pytest.raises(RunExecutionFailure) as excinfo:
+        AgentAnswerPublisher(store).publish(  # type: ignore[arg-type]
+            handle,
+            "Nie publizierte Antwort.",
+            references=[],
+        )
+    assert excinfo.value.error_type == "answer_publication_fenced"
+
+
+def test_fence_with_committed_cancel_flag_cancels_before_poller_notices() -> None:
+    """The store's own fence status carries the committed cancel flag; the
+    classification must not depend on the 2s cancel poller having set the
+    local event yet."""
+    from inqtrix.agents.control_ports import (
+        ArtifactNotFound,
+        ArtifactPublicationFenced,
+    )
+    from inqtrix.exceptions import AgentCancelled
+
+    class _FencingStore:
+        def emit(
+            self,
+            _run_id: str,
+            _event_type: str,
+            _payload: dict[str, Any],
+            **_kwargs: Any,
+        ) -> None:
+            return None
+
+        async def get_artifact(self, run_id: str, artifact_id: str) -> Any:
+            raise ArtifactNotFound(artifact_id)
+
+        async def upsert_artifact(self, **_kwargs: Any) -> Any:
+            raise ArtifactPublicationFenced(
+                expected_attempt=1,
+                current_attempt=1,
+                status="cancel_requested",
+            )
+
+    store = _FencingStore()
+    handle = RunHandle(store, "run_committed_cancel", threading.Event())  # type: ignore[arg-type]
+    assert not handle.cancel_event.is_set()
+
+    with pytest.raises(AgentCancelled):
+        AgentAnswerPublisher(store).publish(  # type: ignore[arg-type]
+            handle,
+            "Nie publizierte Antwort.",
+            references=[],
+        )

@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 import inqtrix.server.app as app_module
 import inqtrix.research.web_research as web_research_module
 import inqtrix.server.routers.chat as chat_router_module
+from inqtrix import __display_version__, __version__
 from inqtrix.legal import ai_disclosure_metadata, legal_metadata
 from inqtrix.providers.base import ProviderContext
 from inqtrix.search_result import GroundedSearchResult
@@ -124,6 +125,26 @@ def test_health_exposes_ai_disclosure_beside_legal():
 
     assert payload["ai_disclosure"] == ai_disclosure_metadata()
     assert "ai_disclosure" not in payload["legal"]
+
+
+def test_health_exposes_version_beside_legal():
+    client = _make_app(llm_available=True, search_available=True)
+
+    payload = client.get("/health").json()
+
+    assert payload["version"] == __display_version__
+    assert "version" not in payload["legal"]
+
+
+def test_display_version_extends_the_release_line():
+    """The shown build must stay inside the packaged release line.
+
+    ``__version__`` is what Hatchling, npm, and the eval baselines are pinned
+    to; ``__display_version__`` adds the dev designation the branch carries.
+    Letting them drift apart would make the app report a build that no
+    published artefact corresponds to.
+    """
+    assert __display_version__.startswith(__version__)
 
 
 def test_ai_disclosure_metadata_carries_machine_tokens():
@@ -831,7 +852,9 @@ def test_chat_completions_direct_llm_allows_large_embedded_context(monkeypatch):
         providers,
         strategies,
         settings,
+        cancel_event,
     ):
+        assert cancel_event is not None and not cancel_event.is_set()
         captured["question_len"] = len(question)
         captured["max_question_length"] = settings.max_question_length
         captured["skip_search"] = settings.skip_search
@@ -1150,3 +1173,27 @@ def test_startup_silent_when_per_user_cap_fits_a_wave():
     assert not any(
         "RUN_MAX_CONCURRENT_PER_USER" in message for message in messages
     )
+
+
+def test_upload_reconciler_starts_even_when_database_contract_is_not_ready(
+    monkeypatch,
+):
+    """A database blip during boot must not disable upload recovery for the
+    whole process lifetime: reconciler passes already degrade to a WARNING on
+    storage errors and succeed on their own once the database returns."""
+
+    async def _not_ready(_container) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "inqtrix.services.system_runtime.database_runtime_contract_ready",
+        _not_ready,
+    )
+    providers = ProviderContext(llm=_DummyLLM(), search=_DummySearch())
+    app = create_app(settings=Settings(), providers=providers)
+    reconciler = app.state.container.upload_reconciler
+    assert reconciler is not None
+    with TestClient(app):
+        assert reconciler.running is True
+    assert reconciler.running is False
+    reconciler.close()

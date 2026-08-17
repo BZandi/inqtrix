@@ -33,6 +33,11 @@ log = logging.getLogger("inqtrix")
 TJob = TypeVar("TJob")
 
 _SOCKET_TIMEOUT_SECONDS = 30.0
+
+# A consumer entry quiet for longer than this window counts as
+# detached in group_info (entries are never auto-removed and worker
+# names are boot-unique, so the raw count only grows).
+_CONSUMER_RECENCY_MS = 60_000
 """Socket read timeout for the valkey client. MUST exceed the worker's
 blocking-claim duration (``BaseWorkerLoop._CLAIM_BLOCK_MS`` = 5 s): a
 blocking ``XREADGROUP ... BLOCK`` holds the socket open for the block
@@ -103,6 +108,40 @@ class StreamJobQueue(Generic[TJob]):
     ) -> TJob:
         """Build the concrete dispatch dataclass for this job kind."""
         raise NotImplementedError
+
+    def group_info(self) -> dict[str, int] | None:
+        """Consumer-group liveness snapshot for the runtime manifest.
+
+        Returns ``{'consumers': n, 'pending': m, 'depth': k}`` for this
+        queue's worker group — the honest someone-is-attached signal a
+        stuck-queued diagnosis needs — or ``None`` while the stream or
+        group does not exist yet (no worker ever attached).
+        """
+        try:
+            groups = self._client.xinfo_groups(self._stream)
+            for group in groups:
+                if group.get("name") != self._group:
+                    continue
+                # Consumer entries are never auto-removed and worker
+                # names are boot-unique, so the raw group count only
+                # ever grows. Filter by idle time: an entry quiet for
+                # longer than the recency window is a dead husk, not an
+                # attached worker.
+                active = 0
+                for consumer in self._client.xinfo_consumers(
+                    self._stream, self._group
+                ):
+                    idle_ms = int(consumer.get("idle", 0) or 0)
+                    if idle_ms < _CONSUMER_RECENCY_MS:
+                        active += 1
+                return {
+                    "consumers": active,
+                    "pending": int(group.get("pending", 0) or 0),
+                    "depth": int(self._client.xlen(self._stream)),
+                }
+        except Exception:  # noqa: BLE001 — degrade to None, never raise
+            return None
+        return None
 
     # -- producer side ---------------------------------------------------- #
 

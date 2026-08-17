@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import http.cookiejar
 import logging
 from collections.abc import AsyncIterator
+from contextlib import suppress
 
 import httpx
 from fastapi import FastAPI, Request
@@ -54,8 +56,14 @@ def _stateless_cookie_jar() -> http.cookiejar.CookieJar:
 async def _bounded_request_stream(
     request: Request,
     max_request_bytes: int,
+    body_done: asyncio.Event,
 ) -> AsyncIterator[bytes]:
-    """Relay chunks while enforcing a byte count independent of headers."""
+    """Relay chunks while enforcing a byte count independent of headers.
+
+    ``body_done`` is set only after the client body is fully relayed: the
+    disconnect watcher must not call ``receive()`` before then, or it
+    would steal body chunks from this stream.
+    """
     received = 0
     async for chunk in request.stream():
         received += len(chunk)
@@ -63,6 +71,59 @@ async def _bounded_request_stream(
             raise _RequestBodyTooLarge
         if chunk:
             yield chunk
+    body_done.set()
+
+
+async def _client_disconnected(
+    request: Request, body_done: asyncio.Event
+) -> None:
+    """Park until the client connection is gone.
+
+    Waits for the request body to be fully relayed first; after
+    exhaustion the next ``receive()`` only ever yields
+    ``http.disconnect`` (the same server mechanic the API's own
+    disconnect watcher relies on).
+    """
+    await body_done.wait()
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            return
+
+
+async def _send_watching_disconnect(
+    client: httpx.AsyncClient,
+    upstream: httpx.Request,
+    request: Request,
+    body_done: asyncio.Event,
+) -> httpx.Response | None:
+    """Await the upstream response, or ``None`` if the client left first.
+
+    While the proxy waits for upstream response headers nothing else
+    observes the client socket, so a browser abort would leave the
+    backend computing for the full request duration. Racing the send
+    against a disconnect watcher closes that gap. A cancelled send tears
+    down its upstream connection inside httpcore — a half-run HTTP/1.1
+    exchange can never return to the keep-alive pool.
+    """
+    send_task = asyncio.ensure_future(client.send(upstream, stream=True))
+    watch_task = asyncio.ensure_future(
+        _client_disconnected(request, body_done)
+    )
+    try:
+        done, _pending = await asyncio.wait(
+            {send_task, watch_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if send_task in done:
+            return send_task.result()
+        send_task.cancel()
+        with suppress(asyncio.CancelledError, httpx.HTTPError):
+            await send_task
+        return None
+    finally:
+        watch_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watch_task
 
 
 def _backend_limits(max_connections: int) -> httpx.Limits:
@@ -145,6 +206,9 @@ def register_http_routes(
             "content-length" in request.headers
             or "transfer-encoding" in request.headers
         )
+        body_done = asyncio.Event()
+        if not has_body:
+            body_done.set()
         upstream = client.build_request(
             method=request.method,
             url=httpx.URL(raw_path=target),
@@ -152,13 +216,17 @@ def register_http_routes(
                 request, public_origin, external_scheme
             ),
             content=(
-                _bounded_request_stream(request, max_request_bytes)
+                _bounded_request_stream(
+                    request, max_request_bytes, body_done
+                )
                 if has_body
                 else None
             ),
         )
         try:
-            response = await client.send(upstream, stream=True)
+            response = await _send_watching_disconnect(
+                client, upstream, request, body_done
+            )
         except _RequestBodyTooLarge:
             return JSONResponse(
                 {"detail": "Request body too large"},
@@ -188,6 +256,14 @@ def register_http_routes(
                 {"detail": "Backend unreachable"},
                 status_code=502,
             )
+        if response is None:
+            log.warning(
+                "Client disconnected while awaiting the upstream response "
+                "for %s %s — upstream request aborted.",
+                request.method,
+                _redact_guest_route_tokens(request.url.path),
+            )
+            return Response(status_code=499)
         relay = StreamingResponse(
             _relay_upstream(response),
             status_code=response.status_code,

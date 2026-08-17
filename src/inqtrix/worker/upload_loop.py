@@ -11,7 +11,11 @@ from inqtrix.services.upload_operation_service import (
     UploadBytesRequired,
     UploadExecutionDeferred,
 )
-from inqtrix.worker.loop import _RECONCILE_MIN_AGE_SECONDS, BaseWorkerLoop
+from inqtrix.worker.loop import (
+    _RECONCILE_MIN_AGE_SECONDS,
+    BaseWorkerLoop,
+    _count_worker_job,
+)
 
 if TYPE_CHECKING:
     from inqtrix.runs.upload_postgres import (
@@ -81,6 +85,8 @@ class UploadWorkerLoop(
                 # Both states were persisted before control reached here.
                 pass
             except UploadAttemptSuperseded:
+                # The message now belongs to the newer attempt's owner —
+                # acking OUR id would steal its crash-recovery entry.
                 log.info(
                     "Upload-Operation %s wurde von einem neueren Versuch uebernommen.",
                     job.operation_id,
@@ -94,7 +100,31 @@ class UploadWorkerLoop(
                     job.operation_id,
                     type(exc).__name__,
                 )
+            if self._store.is_attempt_current(
+                job.operation_id,
+                tenant_id=job.tenant_id,
+                fence_attempt=claimed.attempt,
+            ):
+                # No terminal/retry state landed for this attempt: the
+                # row is still running under this claim. Acking would
+                # orphan it until the stale-row reconciler — leave the
+                # message for redelivery instead.
+                log.warning(
+                    "Upload-Operation %s ohne persistierten Abschluss — "
+                    "Nachricht bleibt fuer Redelivery.",
+                    job.operation_id,
+                )
+                return
             self._queue.ack(job.message_id)
             ack = True
+        except Exception as final_exc:  # noqa: BLE001 — Futures here are unobserved
+            log.error(
+                "Worker %s: Abschlussphase fuer Upload-Operation %s "
+                "fehlgeschlagen (error_type=%s) — Redelivery uebernimmt.",
+                self._store.worker_id,
+                job.operation_id,
+                type(final_exc).__name__,
+            )
+            _count_worker_job("uploads", "finalization_failed")
         finally:
             self._finish_active(job, allow_successor=ack)

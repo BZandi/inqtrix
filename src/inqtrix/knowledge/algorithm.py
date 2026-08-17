@@ -25,7 +25,9 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from inqtrix.core.results import AgentResult, RunRequest
+from inqtrix.exceptions import AgentCancelled
 from inqtrix.execution_failures import RunExecutionFailure
+from inqtrix.providers.base import provider_cancel_scope
 from inqtrix.i18n import detect_ui_language, detect_ui_language_confident
 from inqtrix.knowledge.contextualize import contextualize_followup_question
 from inqtrix.knowledge.evidence import KnowledgeEvidenceProjector
@@ -471,11 +473,49 @@ class KnowledgeAlgorithm:
         runtime: "RuntimeContext",
         context: "RunContext",
     ) -> AgentResult:
-        """Execute retrieval + cited answer synthesis for one question."""
+        """Execute retrieval + cited answer synthesis for one question.
+
+        Binds the run's cancel probe for every provider call on this
+        thread — providers consult it at retry-attempt boundaries and
+        during backoff sleeps; an in-flight HTTP attempt still runs to
+        its transport timeout — then delegates to the pipeline, whose
+        stage checkpoints raise :class:`AgentCancelled` between stages.
+        """
+        probe = (
+            context.cancel_token.is_set
+            if context.cancel_token is not None
+            else None
+        )
+        with provider_cancel_scope(probe):
+            return self._run_pipeline(request, runtime=runtime, context=context)
+
+    def _run_pipeline(
+        self,
+        request: RunRequest,
+        *,
+        runtime: "RuntimeContext",
+        context: "RunContext",
+    ) -> AgentResult:
         knowledge = self._knowledge
         emit = context.event_sink or (lambda _event, _payload: None)
         started = time.monotonic()
         llm = context.providers.llm
+
+        def _check_cancel() -> None:
+            token = context.cancel_token
+            if token is not None and token.is_set():
+                raise AgentCancelled(
+                    "Wissensabfrage nach Abbruch-Anforderung gestoppt."
+                )
+
+        cancel_probe = (
+            context.cancel_token.is_set
+            if context.cancel_token is not None
+            else None
+        )
+        # Checkpoint BEFORE the first stage: a pre-set token must not pay
+        # for the contextualization call.
+        _check_cancel()
         collection_ids = _resolve_collection_ids(request)
         # Defense in depth: an authenticated ask MUST arrive pre-scoped —
         # the admission gate pins an omitted filter to the caller-visible set
@@ -524,6 +564,7 @@ class KnowledgeAlgorithm:
                     )
                 )
 
+        _check_cancel()
         raw_profile = request.knowledge_filters.get("profile")
         requested_profile = (
             parse_knowledge_profile(raw_profile)
@@ -592,6 +633,7 @@ class KnowledgeAlgorithm:
                     decompose_span.set_attribute(
                         "inqtrix.subquery_count", len(sub_queries)
                     )
+        _check_cancel()
 
         def _on_rerank_retry(notice: dict[str, Any]) -> None:
             # Rerank retries stay visible on the run's event surface (no
@@ -631,6 +673,9 @@ class KnowledgeAlgorithm:
         def _retrieve(
             query: str, k: int = top_k
         ) -> RetrievalCandidateBatch:
+            # Covers the initial, every sub-query, and every gate-rewrite
+            # retrieval with one checkpoint.
+            _check_cancel()
             # The research graph is synchronous (a node on a run-worker
             # thread); the knowledge store is async. Bridge per call.
             with operation_span(
@@ -650,6 +695,7 @@ class KnowledgeAlgorithm:
                         use_reranker=plan.rerank,
                         rerank_candidate_depth=plan.rerank_candidate_depth,
                         on_provider_retry=_on_rerank_retry,
+                        cancel_probe=cancel_probe,
                     )
                 )
                 if retrieve_span is not None:
@@ -776,6 +822,7 @@ class KnowledgeAlgorithm:
                 and decision.rewritten_query
                 and rounds_used < plan.gate_rewrite_rounds
             ):
+                _check_cancel()
                 rounds_used += 1
                 queries_run.append(decision.rewritten_query)
                 before = len(candidates)
@@ -926,6 +973,7 @@ class KnowledgeAlgorithm:
             failed_quote_texts: tuple[str, ...] = ()
             report: GroundingReport | None = None
             for attempt in range(1, _ANSWER_GROUNDING_ATTEMPTS + 1):
+                _check_cancel()
                 prompt = build_knowledge_answer_prompt(
                     request.question,
                     evidence_block,
@@ -941,6 +989,11 @@ class KnowledgeAlgorithm:
                         reasoning_effort=effort,
                         timeout=context.agent_settings.reasoning_timeout,
                     )
+                except AgentCancelled:
+                    # A run cancellation is not a provider failure — the
+                    # graceful-terminal fallback below must never turn a
+                    # cancelled run into a grounding verdict.
+                    raise
                 except Exception as exc:
                     if attempt == 1 or report is None:
                         raise

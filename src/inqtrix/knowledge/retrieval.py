@@ -19,7 +19,10 @@ from inqtrix.knowledge.stores.ports import (
     RetrievalCandidate,
     RetrievalCandidateBatch,
 )
-from inqtrix.providers.base import observe_provider_retries
+from inqtrix.providers.base import (
+    observe_provider_retries,
+    provider_cancel_scope,
+)
 
 
 def _project_final_batch(
@@ -53,6 +56,7 @@ async def retrieve(
     use_reranker: bool = True,
     rerank_candidate_depth: int | None = None,
     on_provider_retry: Callable[[dict[str, Any]], None] | None = None,
+    cancel_probe: Callable[[], bool] | None = None,
 ) -> RetrievalCandidateBatch:
     """Run the full retrieval pipeline for one query.
 
@@ -74,6 +78,10 @@ async def retrieve(
             Retries would otherwise only reach the server log; callers
             with an event surface forward them there (no silent
             fallbacks). ``None`` keeps the historical behaviour.
+        cancel_probe: Optional run-cancellation probe, re-bound on the
+            embed and rerank worker threads (the provider scope is
+            thread-local and does not travel through ``to_thread``).
+            ``None`` keeps the historical behaviour.
     """
     reranker = knowledge.reranker if use_reranker else None
     candidate_depth = (
@@ -111,9 +119,16 @@ async def retrieve(
 
     group_batches: list[RetrievalCandidateBatch] = []
     for embedding_model, scoped_ids in model_scopes.items():
-        query_embedding = await asyncio.to_thread(
-            knowledge.embeddings.embed_query, query, model=embedding_model
-        )
+
+        def _embed_scoped(model_name: str = embedding_model) -> Any:
+            # Bind the cancel probe on the worker thread itself — the
+            # provider scope is thread-local.
+            with provider_cancel_scope(cancel_probe):
+                return knowledge.embeddings.embed_query(
+                    query, model=model_name
+                )
+
+        query_embedding = await asyncio.to_thread(_embed_scoped)
         search_started = time.monotonic()
         if getattr(store, "supports_hybrid", False):
             candidates = await store.hybrid_search(
@@ -170,18 +185,22 @@ async def retrieve(
     candidate_texts = [candidate.chunk.text for candidate in batch]
 
     def _rerank_observed() -> list[Any]:
-        # Observer binding, the call, and the thread-local cleanup must all
-        # run on the SAME thread as the rerank (the mixin state is
-        # threading.local), hence one closure handed to to_thread.
-        with observe_provider_retries(reranker, on_provider_retry):
-            try:
-                return reranker.rerank(query, candidate_texts, top_n=top_k)
-            finally:
-                consume = getattr(reranker, "consume_retry_notices", None)
-                if callable(consume):
-                    # Clear leftover notices so a reused executor thread
-                    # cannot bleed them into a later request.
-                    consume()
+        # Observer binding, the cancel scope, the call, and the
+        # thread-local cleanup must all run on the SAME thread as the
+        # rerank (the mixin state is threading.local), hence one closure
+        # handed to to_thread.
+        with provider_cancel_scope(cancel_probe):
+            with observe_provider_retries(reranker, on_provider_retry):
+                try:
+                    return reranker.rerank(
+                        query, candidate_texts, top_n=top_k
+                    )
+                finally:
+                    consume = getattr(reranker, "consume_retry_notices", None)
+                    if callable(consume):
+                        # Clear leftover notices so a reused executor
+                        # thread cannot bleed them into a later request.
+                        consume()
 
     rerank_started = time.monotonic()
     results = await asyncio.to_thread(_rerank_observed)

@@ -597,14 +597,17 @@ async def test_bounded_stream_never_yields_the_over_limit_chunk() -> None:
             yield b"y" * 500
 
     forwarded: list[bytes] = []
+    body_done = asyncio.Event()
     with pytest.raises(http_proxy._RequestBodyTooLarge):
         async for chunk in http_proxy._bounded_request_stream(  # type: ignore[arg-type]
             ChunkedRequest(),
             1000,
+            body_done,
         ):
             forwarded.append(chunk)
 
     assert forwarded == [b"x" * 600]
+    assert not body_done.is_set()
 
 
 def test_request_body_limit_leaves_api_413_authoritative() -> None:
@@ -651,3 +654,179 @@ def test_build_app_wires_pool_policy_into_client(
     assert captured["timeout"].pool == 10.0
     assert captured["limits"].max_connections == 44
     assert captured["limits"].max_keepalive_connections == 20
+
+
+def _disconnect_scope(method: str, extra_headers: list | None = None) -> dict:
+    headers = [(b"host", b"testserver")]
+    headers.extend(extra_headers or [])
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions",
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+
+class _HangingTransport(httpx.AsyncBaseTransport):
+    """Upstream that never answers until cancelled (long non-stream call)."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.completed = asyncio.Event()
+
+    async def handle_async_request(
+        self, request: httpx.Request
+    ) -> httpx.Response:
+        await request.aread()
+        self.started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        self.completed.set()
+        return _json_response(200, {"never": "delivered"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "body"),
+    [("POST", b"{}"), ("GET", None)],
+    ids=["with-body", "without-body"],
+)
+async def test_client_disconnect_while_awaiting_upstream_aborts_upstream(
+    fake_dist: Path, method: str, body: bytes | None
+) -> None:
+    """A browser abort during the response wait must cancel the upstream
+    request instead of letting the backend compute to completion."""
+    transport = _HangingTransport()
+    app = gateway_app.build_app(
+        fake_dist, "http://backend.invalid", transport=transport
+    )
+
+    extra = (
+        [(b"content-type", b"application/json"),
+         (b"content-length", str(len(body)).encode())]
+        if body is not None
+        else []
+    )
+    scope = _disconnect_scope(method, extra)
+
+    body_messages = []
+    if body is not None:
+        body_messages.append(
+            {"type": "http.request", "body": body, "more_body": False}
+        )
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        if body_messages:
+            return body_messages.pop(0)
+        await transport.started.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    await asyncio.wait_for(app(scope, receive, send), timeout=5)
+
+    assert transport.cancelled.is_set()
+    assert not transport.completed.is_set()
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 499
+
+
+@pytest.mark.asyncio
+async def test_aborted_upstream_connection_is_never_reused(
+    fake_dist: Path,
+) -> None:
+    """A cancelled upstream exchange must close its connection: reusing a
+    half-run HTTP/1.1 socket from the keep-alive pool would desync every
+    following request on it."""
+    connections: list[asyncio.StreamWriter] = []
+
+    async def handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        connections.append(writer)
+        try:
+            while True:
+                line = await reader.readline()
+                if not line or line == b"\r\n":
+                    break
+            if len(connections) == 1:
+                # First request: never answer; wait for the abort (EOF).
+                await reader.read()
+                return
+            body = b'{"ok": true}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"content-type: application/json\r\n"
+                b"content-length: " + str(len(body)).encode() + b"\r\n"
+                b"\r\n" + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    host, port = server.sockets[0].getsockname()[:2]
+    app = gateway_app.build_app(
+        fake_dist, f"http://{host}:{port}", transport=None
+    )
+
+    sent_first: list[dict] = []
+
+    async def receive_abort() -> dict:
+        # Give the proxy time to open the upstream connection, then leave.
+        while not connections:
+            await asyncio.sleep(0.01)
+        return {"type": "http.disconnect"}
+
+    async def send_first(message: dict) -> None:
+        sent_first.append(message)
+
+    await asyncio.wait_for(
+        app(_disconnect_scope("GET"), receive_abort, send_first), timeout=5
+    )
+
+    sent_second: list[dict] = []
+    second_done = asyncio.Event()
+
+    async def receive_idle() -> dict:
+        await asyncio.sleep(30)
+        return {"type": "http.disconnect"}
+
+    async def send_second(message: dict) -> None:
+        sent_second.append(message)
+        if message["type"] == "http.response.body" and not message.get(
+            "more_body"
+        ):
+            second_done.set()
+
+    task = asyncio.ensure_future(
+        app(_disconnect_scope("GET"), receive_idle, send_second)
+    )
+    await asyncio.wait_for(second_done.wait(), timeout=5)
+    await asyncio.wait_for(task, timeout=5)
+    server.close()
+    await server.wait_closed()
+
+    aborted = next(
+        m for m in sent_first if m["type"] == "http.response.start"
+    )
+    assert aborted["status"] == 499
+    start = next(
+        m for m in sent_second if m["type"] == "http.response.start"
+    )
+    assert start["status"] == 200
+    assert len(connections) == 2

@@ -125,9 +125,19 @@ _WAITING_VALUES = tuple(status.value for status in WAITING_RUN_STATUSES)
 _ACTIVE_AGENT_SESSION_CONSTRAINT = "uq_runs_active_agent_session"
 
 _STUCK_ROW_MAX_AGE_SECONDS = 7 * 86_400.0
-"""Hard retention cap for rows that never reached a terminal state —
-request payloads carry user conversation content and must not live
-forever just because a worker died mid-run."""
+"""Age at which a never-terminal row is force-failed regardless of mode —
+the honest end of the line when every other recovery path missed it. The
+terminal write starts the ordinary completed-TTL retention clock, so
+request payloads (user conversation content) stay bounded: this cap plus
+the terminal retention, exactly like any ordinarily failed run."""
+
+_EXECUTION_LOST_ERROR = {
+    "message": (
+        "Die Ausfuehrung dieses Laufs ist verloren gegangen; kein Prozess "
+        "fuehrt ihn mehr aus."
+    ),
+    "type": "execution_lost",
+}
 
 _TERMINAL_EVENT_TYPES = frozenset(
     {"inqtrix.run.completed", "inqtrix.run.failed", "inqtrix.run.cancelled"}
@@ -298,6 +308,7 @@ class PostgresRunStore(DurableJobStoreBase):
         worker_id: str,
         audit: "AuditSink | None" = None,
         waiting_ttl_seconds: float = 7 * 24 * 3600.0,
+        queued_ttl_seconds: float = 24 * 3600.0,
         max_concurrent_per_user: int | None = None,
         restrict_to_workspace_members: bool = False,
         sharing_enabled: bool = True,
@@ -310,6 +321,10 @@ class PostgresRunStore(DurableJobStoreBase):
         if float(waiting_ttl_seconds) <= 0:
             raise ValueError(
                 f"waiting_ttl_seconds must be > 0, got {waiting_ttl_seconds}"
+            )
+        if float(queued_ttl_seconds) <= 0:
+            raise ValueError(
+                f"queued_ttl_seconds must be > 0, got {queued_ttl_seconds}"
             )
         # The engine/session/loop/dispatch plumbing lives in
         # DurableJobStoreBase; this store adds only its sizing,
@@ -328,6 +343,7 @@ class PostgresRunStore(DurableJobStoreBase):
         self._audit = audit
         self._audit_service_starts = bool(audit_service_starts)
         self._waiting_ttl_seconds = float(waiting_ttl_seconds)
+        self._queued_ttl_seconds = float(queued_ttl_seconds)
         self._sharing_enabled = sharing_enabled
         self._max_concurrent_per_user = max_concurrent_per_user
         self._restrict_to_workspace_members = restrict_to_workspace_members
@@ -348,6 +364,20 @@ class PostgresRunStore(DurableJobStoreBase):
         # (root_id, cascaded_child_ids), the calling mutator drains and
         # projects the cancellations into local work handles.
         self._failed_cascades: SimpleQueue[tuple[str, tuple[str, ...]]] = SimpleQueue()
+        # The restart sweep runs eagerly so orphans of the previous
+        # process are terminal before the first client read. A failure
+        # keeps the one-shot flag set — the lazy first-cleanup fallback
+        # remains, so startup gains no new hard dependency.
+        if self._sweep_orphans:
+            try:
+                self._call(self._startup_cleanup_db())
+                self._release_swept_locals()
+            except Exception:  # noqa: BLE001 — lazy cleanup remains
+                log.warning(
+                    "Start-Bereinigung fehlgeschlagen — sie wird beim "
+                    "naechsten Datenbankzugriff nachgeholt.",
+                    exc_info=True,
+                )
 
     def _release_swept_locals(self) -> None:
         """Apply post-commit handoffs produced by lazy cleanup.
@@ -493,6 +523,10 @@ class PostgresRunStore(DurableJobStoreBase):
                 execution slot is busy (queue-mode counts are
                 cluster-wide via the database).
         """
+        # Best-effort fence before admission (bounded by grace +
+        # throttle): a lost execution should stop holding a concurrency
+        # slot against new submissions within that window.
+        self._expire_lost_executions()
         durable_payload = dict(request_payload or {})
         # Carry the submitter's trace context in the run row (W3C
         # traceparent): the queue message stays (run_id, tenant_id), the
@@ -607,6 +641,7 @@ class PostgresRunStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> dict[str, Any]:
         """Return a public summary for *run_id*."""
+        self._expire_lost_executions()
         summary = self._call(self._summary_db(run_id, workspace_id, visible_to))
         self._release_swept_locals()
         return summary
@@ -618,6 +653,7 @@ class PostgresRunStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> list[dict[str, Any]]:
         """Return public summaries, newest first (unbounded)."""
+        self._expire_lost_executions()
         summaries = self._call(self._list_db(workspace_id, visible_to))
         self._release_swept_locals()
         return summaries
@@ -1779,6 +1815,7 @@ class PostgresRunStore(DurableJobStoreBase):
         visible_to: "UserContext | None" = None,
     ) -> PollingJobSubscription:
         """Subscribe to a run's event stream with full stored replay."""
+        self._expire_lost_executions()
         tenant_id, replay = self._call(
             self._replay_db(run_id, workspace_id, visible_to)
         )
@@ -2185,7 +2222,63 @@ class PostgresRunStore(DurableJobStoreBase):
     def _events_after(
         self, run_id: str, tenant_id: str, after_sequence: int
     ) -> list[dict[str, Any]]:
+        # The fence hook on the poll path is what lets an ALREADY
+        # ATTACHED stream self-heal: the next subscription poll
+        # terminalizes a lost run, reads its terminal event, and closes
+        # the stream.
+        self._expire_lost_executions()
         return self._call(self._events_after_db(run_id, tenant_id, after_sequence))
+
+    # -- lost-execution fence (no-queue mode) ----------------------------- #
+
+    def _expire_lost_executions(self) -> bool:
+        expired = super()._expire_lost_executions()
+        if expired:
+            # Post-commit handoffs (woken parents of fenced children)
+            # must dispatch immediately, even from the poller thread.
+            self._release_swept_locals()
+        return expired
+
+    async def _lost_execution_candidates_db(
+        self, grace_seconds: float
+    ) -> list[str]:
+        async with self._session(DEFAULT_TENANT) as session:
+            return list(
+                (
+                    await session.execute(
+                        select(runs.c.run_id).where(
+                            runs.c.status.in_(
+                                (
+                                    RunStatus.QUEUED.value,
+                                    RunStatus.RUNNING.value,
+                                )
+                            ),
+                            func.coalesce(
+                                runs.c.active_started_at,
+                                runs.c.queued_since,
+                                runs.c.created_at,
+                            )
+                            < time.time() - grace_seconds,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    async def _expire_lost_executions_db(self, entity_ids: list[str]) -> bool:
+        async with self._session(DEFAULT_TENANT) as session:
+            woken = await self._recover_orphans_db(
+                session,
+                candidate_ids=entity_ids,
+                error=_EXECUTION_LOST_ERROR,
+            )
+            self._register_cleanup_handoffs(
+                session,
+                swept_run_ids=[],
+                woken_parent_ids=woken,
+            )
+            return True
 
     # -- async database operations ----------------------------------------- #
 
@@ -4309,6 +4402,86 @@ class PostgresRunStore(DurableJobStoreBase):
                     session, run_id=run_id
                 )
                 row = None
+            elif bool(_locked["cancel_requested"]) and str(
+                _locked["status"]
+            ) in (
+                (RunStatus.QUEUED.value, RunStatus.RUNNING.value)
+                if allow_takeover
+                else (RunStatus.QUEUED.value,)
+            ):
+                # A cancel arrived while no live worker was watching this
+                # row (its owner crashed before the poller observed it, or
+                # the run re-queued with the request pending). Resolve the
+                # cancel here instead of opening a doomed attempt that
+                # would re-execute cancelled work. The RUNNING half is
+                # takeover-only: without takeover authority this claim
+                # must not touch a row a live owner still resolves.
+                now = time.time()
+                cancel_statuses = (
+                    (RunStatus.QUEUED.value, RunStatus.RUNNING.value)
+                    if allow_takeover
+                    else (RunStatus.QUEUED.value,)
+                )
+                cancelled = (
+                    await session.execute(
+                        update(runs)
+                        .where(
+                            runs.c.run_id == run_id,
+                            runs.c.status.in_(cancel_statuses),
+                        )
+                        .values(
+                            status=RunStatus.CANCELLED.value,
+                            finished_at=now,
+                            **_terminal_timing_values(now),
+                        )
+                        .returning(
+                            runs.c.kind,
+                            runs.c.parent_run_id,
+                            runs.c.request_payload,
+                            runs.c.snapshot,
+                            runs.c.attempt,
+                        )
+                    )
+                ).first()
+                if cancelled is not None:
+                    # The true reason lives on the cancel_requested event
+                    # (a cascade may have set the flag, e.g.
+                    # parent_failed/session_deleting) — read it back so
+                    # the terminal event never relabels a cascade as a
+                    # client action.
+                    requested_reason = (
+                        await session.execute(
+                            select(run_events.c.data)
+                            .where(
+                                run_events.c.run_id == run_id,
+                                run_events.c.type
+                                == "inqtrix.run.cancel_requested",
+                            )
+                            .order_by(run_events.c.sequence.desc())
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    reason = (
+                        str((requested_reason or {}).get("reason") or "")
+                        or "client_requested_cancel"
+                    )
+                    woken_parent = await self._record_terminal_run_db(
+                        session,
+                        run_id=run_id,
+                        tenant_id=tenant_id,
+                        kind=str(cancelled[0] or "standard"),
+                        parent_run_id=cancelled[1],
+                        request_payload=dict(cancelled[2] or {}),
+                        status=RunStatus.CANCELLED.value,
+                        event_type="inqtrix.run.cancelled",
+                        payload={
+                            "status": "cancelled",
+                            "reason": reason,
+                        },
+                        snapshot=dict(cancelled[3] or {}),
+                        attempt=int(cancelled[4] or 0) or None,
+                    )
+                row = None
             else:
                 previous_status = str(_locked["status"])
                 now = time.time()
@@ -4469,11 +4642,26 @@ class PostgresRunStore(DurableJobStoreBase):
                 await session.execute(
                     select(runs.c.run_id, runs.c.tenant_id).where(
                         runs.c.status == RunStatus.QUEUED.value,
-                        runs.c.created_at < time.time() - older_than_seconds,
+                        # Age since the row last ENTERED the queue, not
+                        # since submission: a resumed segment is fresh
+                        # again, only rows predating the column fall back.
+                        func.coalesce(
+                            runs.c.queued_since, runs.c.created_at
+                        )
+                        < time.time() - older_than_seconds,
                     )
                 )
             ).all()
             return [(row[0], row[1]) for row in rows]
+
+    async def _startup_cleanup_db(self) -> None:
+        """Run the run store's lazy cleanup once in its own transaction.
+
+        Covers the restart sweep plus this store's waiting-TTL sweep,
+        terminal retention, and the stuck-row failsafe.
+        """
+        async with self._session(DEFAULT_TENANT) as session:
+            await self._cleanup_db(session)
 
     async def _cleanup_db(self, session: "AsyncSession") -> None:
         woken_parents: list[str] = []
@@ -4588,6 +4776,66 @@ class PostgresRunStore(DurableJobStoreBase):
             swept_run_ids=[row[0] for row, _reason in timed_out],
             woken_parent_ids=woken_parents,
         )
+        # Queued-TTL failsafe: a run nobody consumed within the generous
+        # window fails with a typed error instead of waiting for the
+        # hard age cap. This sweep runs inline on API paths, so it fires
+        # precisely in the deployment shape that has ZERO workers; the
+        # window is sized far above any legitimate backlog wait.
+        queued_expired = list(
+            (
+                await session.execute(
+                    select(runs.c.run_id).where(
+                        runs.c.status == RunStatus.QUEUED.value,
+                        # Fresh submits leave queued_since NULL (only a
+                        # resume or child-wake sets it), so the age falls
+                        # back to created_at — otherwise the sweep would
+                        # be blind to exactly its target case. Historical
+                        # NULL rows older than the window are swept too,
+                        # deliberately: they ARE the stuck shape.
+                        func.coalesce(
+                            runs.c.queued_since, runs.c.created_at
+                        )
+                        < time.time() - self._queued_ttl_seconds,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if queued_expired:
+            log.warning(
+                "%d Runs warteten laenger als %d Sekunden auf einen "
+                "Ausfuehrungs-Worker — werden als fehlgeschlagen "
+                "beendet: %s",
+                len(queued_expired),
+                int(self._queued_ttl_seconds),
+                ", ".join(queued_expired[:5]),
+            )
+            queued_woken = await self._recover_orphans_db(
+                session,
+                candidate_ids=queued_expired,
+                error={
+                    "message": (
+                        "Der Lauf wartete laenger als "
+                        f"{int(self._queued_ttl_seconds)} Sekunden auf "
+                        "einen Ausfuehrungs-Worker und wurde beendet."
+                    ),
+                    "type": "queued_timeout",
+                },
+                # Re-assert the TTL predicate under the row lock: a run a
+                # worker claimed (or re-queued) since the select above
+                # must survive this pass.
+                candidate_guard=and_(
+                    runs.c.status == RunStatus.QUEUED.value,
+                    func.coalesce(runs.c.queued_since, runs.c.created_at)
+                    < time.time() - self._queued_ttl_seconds,
+                ),
+            )
+            self._register_cleanup_handoffs(
+                session,
+                swept_run_ids=[],
+                woken_parent_ids=queued_woken,
+            )
         await self._delete_retained_runs_db(
             session,
             criteria=(
@@ -4597,29 +4845,48 @@ class PostgresRunStore(DurableJobStoreBase):
             ),
             action="run.retention_deleted",
         )
-        # Retention failsafe: rows stuck non-terminal (dead worker,
-        # lost dispatch, operator error) must not retain request
-        # payloads — user conversation content — indefinitely. Waiting
-        # rows are NOT stuck: they are excluded here because they have
-        # their own, VISIBLE lifecycle end (the waiting-TTL sweep above
-        # cancels them, then the terminal TTL deletes them) — this
-        # DELETE keying on created_at would otherwise fire first and
-        # erase a parked run without any event.
-        stuck = await self._delete_retained_runs_db(
-            session,
-            criteria=(
-                runs.c.status.notin_(_TERMINAL_VALUES),
-                runs.c.status.notin_(_WAITING_VALUES),
-                runs.c.created_at < time.time() - _STUCK_ROW_MAX_AGE_SECONDS,
-            ),
-            action="run.stuck_deleted",
+        # Stuck-row failsafe: rows still non-terminal after the hard age
+        # cap are force-FAILED, in every queue mode — after this long no
+        # worker legitimately owns them, and attempt fencing absorbs any
+        # zombie write. The terminal write emits the terminal event an
+        # attached stream has been waiting for and starts the ordinary
+        # completed-TTL retention clock that deletes the payload later.
+        # Waiting rows are NOT stuck: the waiting-TTL sweep above is
+        # their visible lifecycle end.
+        stuck_ids = list(
+            (
+                await session.execute(
+                    select(runs.c.run_id).where(
+                        runs.c.status.notin_(_TERMINAL_VALUES),
+                        runs.c.status.notin_(_WAITING_VALUES),
+                        runs.c.created_at
+                        < time.time() - _STUCK_ROW_MAX_AGE_SECONDS,
+                    )
+                )
+            )
+            .scalars()
+            .all()
         )
-        if stuck:
+        if stuck_ids:
+            # Announcement of the pass, not its outcome: the per-row
+            # warnings below report what actually landed (the status CAS
+            # may skip rows that turned terminal in the meantime).
             log.warning(
-                "%d Run-Zeilen nach %d Tagen ohne Abschluss geloescht: %s",
-                len(stuck),
+                "%d Run-Zeilen aelter als %d Tage ohne Abschluss — "
+                "werden als fehlgeschlagen beendet: %s",
+                len(stuck_ids),
                 int(_STUCK_ROW_MAX_AGE_SECONDS // 86_400),
-                ", ".join(stuck[:5]),
+                ", ".join(stuck_ids[:5]),
+            )
+            stuck_woken = await self._recover_orphans_db(
+                session,
+                candidate_ids=stuck_ids,
+                error=_EXECUTION_LOST_ERROR,
+            )
+            self._register_cleanup_handoffs(
+                session,
+                swept_run_ids=[],
+                woken_parent_ids=stuck_woken,
             )
 
     async def _delete_retained_runs_db(
@@ -4690,37 +4957,65 @@ class PostgresRunStore(DurableJobStoreBase):
             deleted.extend(child["run_id"] for child in subtree)
         return deleted
 
-    async def _recover_orphans_db(self, session: "AsyncSession") -> list[str]:
-        """Fail queued/running rows left behind by a previous process.
+    async def _recover_orphans_db(
+        self,
+        session: "AsyncSession",
+        *,
+        candidate_ids: list[str] | None = None,
+        error: dict[str, str] | None = None,
+        candidate_guard: Any | None = None,
+    ) -> list[str]:
+        """Fail active rows that no process will ever execute again.
 
-        Only meaningful in no-queue mode: in-process execution cannot
-        survive a restart (the work closures are gone), so the rows
-        would otherwise count against admission capacity forever and
-        present as eternally running to clients. Queue mode never
-        sweeps — workers own those rows. Runs inside the caller's
-        transaction (the first lazy cleanup).
+        Two callers share this per-candidate lock → CAS → terminal-event
+        path: the once-per-process restart sweep (``candidate_ids=None``
+        selects every queued/running row — in-process closures did not
+        survive the restart) and the pre-filtered id lists of the
+        lost-execution fence and the stuck-row failsafe. The status CAS
+        is the true guard: a candidate that finished or got claimed in
+        the meantime is skipped silently.
 
-        Assumes a SINGLE API process in no-queue durable mode (the
-        documented deployment shape): a second process sharing the
-        database would have its in-flight runs swept here. Multi
-        replica deployments use the queue backend.
+        The blanket restart selection assumes a SINGLE API process in
+        no-queue durable mode (the documented deployment shape): a
+        second process sharing the database would have its in-flight
+        runs swept here. Multi replica deployments use the queue
+        backend.
         """
-        error = {
-            "message": "Ein Server-Neustart hat den Lauf unterbrochen.",
-            "type": "server_restarted",
-        }
+        if error is None:
+            error = {
+                "message": "Ein Server-Neustart hat den Lauf unterbrochen.",
+                "type": "server_restarted",
+            }
+        if candidate_ids is None:
+            status_filter = runs.c.status.in_(
+                (
+                    RunStatus.QUEUED.value,
+                    RunStatus.RUNNING.value,
+                )
+            )
+        else:
+            # Explicit candidates were pre-filtered by their caller; the
+            # broader non-terminal/non-waiting predicate additionally
+            # covers stray states nothing here writes (retention parity
+            # with the historical stuck delete). ``candidate_guard`` lets
+            # a caller whose selection can be OUTRACED (the queued-TTL: a
+            # worker may claim between select and this pass) re-assert
+            # its own predicate so a freshly claimed row survives.
+            status_filter = and_(
+                runs.c.status.notin_(_TERMINAL_VALUES),
+                runs.c.status.notin_(_WAITING_VALUES),
+                runs.c.run_id.in_(candidate_ids),
+                *([candidate_guard] if candidate_guard is not None else []),
+            )
+        # One canonical, lineage-grouped ordering for BOTH branches: the
+        # per-candidate path locks root before descendants, and every
+        # concurrent maintenance pass must acquire cross-lineage locks in
+        # this same order or two passes deadlock.
         candidate_ids = (
             (
                 await session.execute(
                     select(runs.c.run_id)
-                    .where(
-                        runs.c.status.in_(
-                            (
-                                RunStatus.QUEUED.value,
-                                RunStatus.RUNNING.value,
-                            )
-                        )
-                    )
+                    .where(status_filter)
                     .order_by(
                         func.coalesce(runs.c.root_run_id, runs.c.run_id),
                         runs.c.root_run_id.isnot(None),
@@ -4743,11 +5038,12 @@ class PostgresRunStore(DurableJobStoreBase):
                     update(runs)
                     .where(
                         runs.c.run_id == candidate_id,
-                        runs.c.status.in_(
-                            (
-                                RunStatus.QUEUED.value,
-                                RunStatus.RUNNING.value,
-                            )
+                        runs.c.status.notin_(_TERMINAL_VALUES),
+                        runs.c.status.notin_(_WAITING_VALUES),
+                        *(
+                            [candidate_guard]
+                            if candidate_guard is not None
+                            else []
                         ),
                     )
                     .values(
@@ -4773,8 +5069,9 @@ class PostgresRunStore(DurableJobStoreBase):
         for row in rows:
             run_id = row[0]
             log.warning(
-                "Verwaister Run %s nach Neustart als fehlgeschlagen " "markiert.",
+                "Verwaister Run %s als fehlgeschlagen markiert (%s).",
                 run_id,
+                error["type"],
             )
             payload = {
                 "status": "failed",

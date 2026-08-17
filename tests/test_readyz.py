@@ -135,3 +135,33 @@ async def test_dead_object_store_degrades_but_stays_ready() -> None:
     assert status_code == 200
     assert payload["status"] == "degraded"
     assert payload["checks"]["object_store"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_valkey_queue_down_is_not_ready(monkeypatch) -> None:
+    """A dead dispatch queue must take the pod out of rotation (503)."""
+    import inqtrix.services.system_runtime as runtime_module
+
+    monkeypatch.setattr(
+        runtime_module, "_ping_valkey", lambda _url: False
+    )
+    status_code, payload = await readiness_payload(
+        _container(queue_backend="valkey")
+    )
+    assert status_code == 503
+    assert payload["status"] == "not_ready"
+    assert payload["checks"]["queue"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_valkey_queue_up_is_ready(monkeypatch) -> None:
+    import inqtrix.services.system_runtime as runtime_module
+
+    monkeypatch.setattr(
+        runtime_module, "_ping_valkey", lambda _url: True
+    )
+    status_code, payload = await readiness_payload(
+        _container(queue_backend="valkey")
+    )
+    assert status_code == 200
+    assert payload["checks"]["queue"] == "ok"

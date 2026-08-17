@@ -22,6 +22,7 @@ from dataclasses import replace
 from typing import Any, Callable
 
 from inqtrix.agents.control_ports import (
+    TERMINAL_APPROVAL_SETTLE_NOTE,
     APPROVAL_STATUS_BY_DECISION,
     ApprovalAlreadyDecided,
     ApprovalNotFound,
@@ -641,6 +642,44 @@ class MemoryAgentControlStore:
                     artifact.artifact_id,
                 ),
             )
+
+    async def settle_terminal_control_rows(
+        self, run_id: str
+    ) -> tuple[int, int]:
+        """Memory twin of the Postgres settle (idempotent CAS pair)."""
+        now = time.time()
+        with self._lock:
+            has_candidates = any(
+                artifact.run_id == run_id and artifact.status == "writing"
+                for artifact in self._artifacts.values()
+            ) or any(
+                approval.run_id == run_id and approval.status == "pending"
+                for approval in self._approvals.values()
+            )
+        if not has_candidates:
+            # Settled steady state pays no authority guard per poll —
+            # mirror of the Postgres probe-first short circuit.
+            return 0, 0
+        released = 0
+        settled = 0
+        with self._runtime_write_guard(run_id), self._lock:
+            for artifact_id, artifact in list(self._artifacts.items()):
+                if artifact.run_id == run_id and artifact.status == "writing":
+                    self._artifacts[artifact_id] = replace(
+                        artifact, status="ready", updated_at=now
+                    )
+                    released += 1
+            for approval_id, approval in list(self._approvals.items()):
+                if approval.run_id == run_id and approval.status == "pending":
+                    self._approvals[approval_id] = replace(
+                        approval,
+                        status="rejected",
+                        decision="",
+                        note=TERMINAL_APPROVAL_SETTLE_NOTE,
+                        decided_at=now,
+                    )
+                    settled += 1
+        return released, settled
 
     async def list_artifacts(
         self,

@@ -57,3 +57,35 @@ def test_storage_settings_bundle_matches_engine_kwargs() -> None:
         assert engine.pool._timeout == 11.0
     finally:
         engine.sync_engine.dispose()
+
+
+def test_command_timeout_travels_through_the_settings_bundle() -> None:
+    settings = StorageSettings(
+        INQTRIX_DATABASE_COMMAND_TIMEOUT_SECONDS=42.0,
+    )
+    assert settings.pool_kwargs()["command_timeout"] == 42.0
+    engine = build_engine(_URL, **settings.pool_kwargs())
+    try:
+        assert isinstance(engine.pool.size(), int)
+    finally:
+        engine.sync_engine.dispose()
+
+
+def test_command_timeout_zero_disables_the_ceiling() -> None:
+    settings = StorageSettings(
+        INQTRIX_DATABASE_COMMAND_TIMEOUT_SECONDS=0,
+    )
+    assert settings.pool_kwargs()["command_timeout"] is None
+    engine = build_engine(_URL, **settings.pool_kwargs())
+    try:
+        assert isinstance(engine.pool.size(), int)
+    finally:
+        engine.sync_engine.dispose()
+
+
+def test_null_pool_branch_accepts_the_ceiling() -> None:
+    engine = build_engine(_URL, null_pool=True, command_timeout=42.0)
+    try:
+        assert isinstance(engine.pool, NullPool)
+    finally:
+        engine.sync_engine.dispose()

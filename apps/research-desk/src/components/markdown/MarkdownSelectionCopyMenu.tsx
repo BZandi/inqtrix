@@ -13,6 +13,7 @@ import { useLocale } from '@/i18n/LocaleProvider'
 import { AI_PRODUCER } from '@/lib/aiDisclosure'
 import { cn } from '@/lib/utils'
 import { markdownForVisibleSelection } from './selectionCopy'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 type SelectionMenuState = {
   markdownText: string | null
@@ -108,7 +109,9 @@ export function MarkdownSelectionCopyMenu({
     const value = mode === 'markdown' ? menu?.markdownText : menu?.plainText
     if (!value) return
     try {
-      await navigator.clipboard.writeText(value)
+      if (!(await copyTextToClipboard(value))) {
+        throw new Error('Zwischenablage nicht verfügbar')
+      }
       setCopiedMode(mode)
       if (copiedTimeoutRef.current !== null) {
         window.clearTimeout(copiedTimeoutRef.current)

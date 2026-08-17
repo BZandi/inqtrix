@@ -34,6 +34,7 @@ import {
   knowledgeRetrievalDegradationText,
   knowledgeSearchWarningNotice,
 } from './retrievalDegradation'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 type CitationPreview = {
   title: string
@@ -105,7 +106,9 @@ export function AnswerCard({
 
   async function copy(mode: AnswerCopyMode) {
     try {
-      await navigator.clipboard.writeText(formatAnswerForCopy(answer, mode, copyLabels))
+      if (!(await copyTextToClipboard(formatAnswerForCopy(answer, mode, copyLabels)))) {
+        throw new Error('Zwischenablage nicht verfügbar')
+      }
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1200)
     } catch (error) {

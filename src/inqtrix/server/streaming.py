@@ -8,6 +8,7 @@ import logging
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager, suppress
 from functools import partial
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any, AsyncIterator
@@ -63,7 +64,7 @@ def make_chunk(
     return f"data: {json.dumps(chunk)}\n\n"
 
 
-async def _watch_disconnect(
+async def watch_disconnect(
     request: Request,
     cancel_event: threading.Event,
 ) -> None:
@@ -80,6 +81,10 @@ async def _watch_disconnect(
     miss it and allow a long-running request to complete after the client
     has already aborted.
 
+    The mechanism is transport-generic: after a JSON route has consumed
+    its request body, the next ``receive()`` parks the same way until
+    connection loss, so non-streaming handlers use this watcher too.
+
     Args:
         request: The Starlette/FastAPI request whose receive channel we
             listen on. Must be the live request object the route handler
@@ -92,9 +97,10 @@ async def _watch_disconnect(
 
     Notes:
         * The task exits as soon as the disconnect is observed. The
-          calling generator is responsible for cancelling this task on
-          normal completion (``task.cancel()`` + ``await task`` with
-          ``CancelledError`` swallowed) so it does not leak.
+          caller — normally :func:`disconnect_watch`, or the streaming
+          generator's own shutdown — is responsible for cancelling this
+          task on normal completion (``task.cancel()`` + ``await task``
+          with ``CancelledError`` swallowed) so it does not leak.
         * Any exception inside ``request.receive()`` (e.g. underlying
           transport torn down by uvicorn) also signals the cancel — we
           treat unexpected receive errors as "client gone" rather than
@@ -116,6 +122,29 @@ async def _watch_disconnect(
             type(exc).__name__,
         )
         cancel_event.set()
+
+
+@asynccontextmanager
+async def disconnect_watch(request: Any) -> "AsyncIterator[threading.Event]":
+    """Run :func:`watch_disconnect` for the enclosed block.
+
+    Yields the cancel event the watcher flips on client disconnect. The
+    watcher task is cancelled and awaited on EVERY exit path — routes may
+    return from inside the block without leaking the task. A request
+    object without a ``receive`` channel (library smoke tests) yields an
+    event nobody ever sets.
+    """
+    cancel_event = threading.Event()
+    watcher: "asyncio.Task | None" = None
+    if request is not None and hasattr(request, "receive"):
+        watcher = asyncio.create_task(watch_disconnect(request, cancel_event))
+    try:
+        yield cancel_event
+    finally:
+        if watcher is not None and not watcher.done():
+            watcher.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher
 
 
 async def stream_response(
@@ -147,7 +176,7 @@ async def stream_response(
     (the rich progress surface for those is native ``/v1/runs`` SSE).
 
     When ``request`` is supplied (server route path), a background
-    :func:`_watch_disconnect` task is spawned. It blocks on
+    :func:`watch_disconnect` task is spawned. It blocks on
     ``await request.receive()`` and sets ``cancel_event`` as soon as
     uvicorn delivers ``http.disconnect`` — the only ASGI signal that
     actually fires when an SSE client closes the socket mid-stream.
@@ -231,7 +260,7 @@ async def stream_response(
     disconnect_watcher: asyncio.Task | None = None
     if request is not None and hasattr(request, "receive"):
         disconnect_watcher = asyncio.create_task(
-            _watch_disconnect(request, cancel_event),
+            watch_disconnect(request, cancel_event),
         )
 
     async def _shutdown_watcher() -> None:

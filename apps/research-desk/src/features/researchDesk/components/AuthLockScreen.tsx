@@ -321,8 +321,7 @@ export function AuthLockScreen({
               </li>
             ))}
           </ul>
-          <div className="mt-3.5 flex flex-col gap-3 border-t border-border pt-3 t-meta-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-            <p>{t.authLock.copyright}</p>
+          <div className="mt-3.5 flex flex-col gap-3 border-t border-border pt-3 t-meta-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-end">
             <div className="flex flex-wrap gap-2 font-medium">
               <a
                 className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-muted-foreground transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

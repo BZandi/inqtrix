@@ -24,6 +24,7 @@ import type {
   AgentExecutionSnapshot,
   AgentSourcePolicy,
 } from './executionPolicy'
+import { kernelToolLabel } from './activityPresentation'
 import { resolveAgentExecutionDisplay } from './executionPolicy'
 
 /**
@@ -391,6 +392,15 @@ export function AgentStatusMenu({
                       : approvalValue(row, o))}
                   />
                 ))}
+                {execution && execution.toolGrants.length > 0 ? (
+                  <StatusRow
+                    label={o.rowRunGrants}
+                    tone="success"
+                    value={execution.toolGrants
+                      .map((tool) => kernelToolLabel(tool, t))
+                      .join(', ')}
+                  />
+                ) : null}
               </SummaryGroup>
               <div className="px-2.5 pb-1 pt-1.5 t-meta-sm text-muted-foreground">
                 {autonomyHint}

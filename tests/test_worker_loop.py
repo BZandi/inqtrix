@@ -11,11 +11,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from concurrent.futures import Future
 from typing import Any
 
 import pytest
 
+from inqtrix.storage.migration_contract import SchemaHeadMismatch
 from inqtrix.exceptions import (
     AgentRateLimited,
     AgentTimeout,
@@ -130,6 +132,7 @@ def make_loop(
     *,
     claim_guard=None,
     answer_publisher=None,
+    concurrency=1,
 ) -> WorkerLoop:
     def fake_graph(question, **kwargs):
         return minimal_agent_result()
@@ -147,7 +150,7 @@ def make_loop(
         resolver=container.resolver,
         registry=container.registry,
         runtime=container.runtime,
-        concurrency=1,
+        concurrency=concurrency,
         max_attempts=3,
         heartbeat_seconds=15,
         claim_idle_seconds=90,
@@ -426,37 +429,133 @@ def test_database_claim_guard_immediate_probe_bypasses_success_cache(
     ]
 
 
-def test_queue_claim_is_rechecked_after_blocking_read(monkeypatch):
-    store = StubStore(claim_result=claimed())
+def test_schema_fence_after_blocking_read_latches_and_never_acks(monkeypatch):
+    """The staleness window behind the blocking read is now fenced IN the
+    claim transaction, not by a forced pre-probe.
 
-    class GuardedQueue(StubQueue):
-        def claim_new(self, *, block_ms):
-            assert block_ms > 0
+    A schema head that moved while ``claim_new`` blocked surfaces as
+    SchemaHeadMismatch from the store's own claim write. The loop must
+    latch the shared guard (one domain's detection is a verdict about the
+    whole process), escalate as a guard failure, and never ack the entry
+    -- it belongs to an upgraded worker.
+    """
+
+    class FencedStore(StubStore):
+        def claim_for_execution(self, run_id, tenant_id, *, allow_takeover):
+            self.calls.append(("claim_blocked", run_id))
+            raise SchemaHeadMismatch("Schema-Kopf bewegt: 0079 statt 0078")
+
+    class OneJobQueue(StubQueue):
+        loop: WorkerLoop | None = None
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.claims = 0
+
+        def ensure_group(self):
+            self.calls.append(("ensure_group",))
+
+        def claim_pending(self):
+            return []
+
+        def reclaim(self, *, min_idle_ms, count=10):
+            return []
+
+        def claim_new(self, *, block_ms, count=1):
+            assert block_ms > 0 and count >= 1
+            self.claims += 1
+            if self.claims > 3:
+                # Regression guard: without the SchemaHeadMismatch clause
+                # the loop would treat the fence hit as a transient outage
+                # and retry forever on this endless queue. Stop it so the
+                # test FAILS (DID NOT RAISE) instead of hanging the suite.
+                assert self.loop is not None
+                self.loop.request_stop()
+                return []
             return [job()]
 
     class Guard:
         def __init__(self) -> None:
-            self.periodic_calls = 0
-            self.immediate_calls = 0
+            self.latched: list[str] = []
 
         def __call__(self) -> None:
-            self.periodic_calls += 1
+            return None
 
-        def verify_now(self) -> None:
-            self.immediate_calls += 1
-            raise WorkerClaimGuardError("schema changed while queue blocked")
+        def latch_failure(self, message: str) -> None:
+            self.latched.append(message)
 
     guard = Guard()
-    loop = make_loop(store, GuardedQueue(), monkeypatch, claim_guard=guard)
+    store = FencedStore(claim_result=None)
+    queue = OneJobQueue()
+    loop = make_loop(store, queue, monkeypatch, claim_guard=guard)
     loop._last_reclaim = float("inf")
     loop._last_reconcile = float("inf")
+    queue.loop = loop
+    # Keep the bounded regression path fast: the transient-outage handler
+    # sleeps this long between retries before the queue stops the loop.
+    monkeypatch.setattr("inqtrix.worker.loop._ERROR_BACKOFF_SECONDS", 0.01)
 
-    with pytest.raises(WorkerClaimGuardError, match="while queue blocked"):
-        loop._tick()
+    with pytest.raises(WorkerClaimGuardError, match="Schema-Kopf"):
+        loop.run_forever()
 
-    assert guard.periodic_calls == 1
-    assert guard.immediate_calls == 1
-    assert store.calls == []
+    assert guard.latched, "the fence hit must stick the shared guard shut"
+    assert ("ack", job().message_id) not in queue.calls, (
+        "the entry belongs to an upgraded worker; acking it loses the job"
+    )
+
+
+def test_schema_fence_on_successor_claim_latches_the_shared_guard(monkeypatch):
+    """The successor-activation path must honour the same process verdict.
+
+    _activate_successor runs on an executor-finally thread where raising
+    would be unobserved; the invariant is that a fence hit there still
+    latches the shared guard so every loop stops claiming -- not that it
+    silently becomes a generic redelivery warning.
+    """
+
+    class FencedStore(StubStore):
+        def claim_for_execution(self, run_id, tenant_id, *, allow_takeover):
+            self.calls.append(("claim_blocked", run_id))
+            raise SchemaHeadMismatch("Schema-Kopf bewegt: 0079 statt 0078")
+
+    class Guard:
+        def __init__(self) -> None:
+            self.latched: list[str] = []
+
+        def __call__(self) -> None:
+            return None
+
+        def latch_failure(self, message: str) -> None:
+            self.latched.append(message)
+
+    guard = Guard()
+    store = FencedStore(claim_result=None)
+    queue = StubQueue()
+    loop = make_loop(store, queue, monkeypatch, claim_guard=guard)
+    from inqtrix.worker.loop import _ActiveJob
+
+    old = job()
+    successor = successor_job()
+    with loop._lock:
+        loop._active[old.run_id] = _ActiveJob(
+            job=old,
+            cancel_event=threading.Event(),
+            successor=successor,
+        )
+
+    loop._finish_active(old, allow_successor=True)
+
+    assert guard.latched, (
+        "a fence hit on the successor claim is a verdict about the process "
+        "and must stick the shared guard shut"
+    )
+    assert ("ack", successor.message_id) not in queue.calls, (
+        "the successor entry belongs to an upgraded worker"
+    )
+    with loop._lock:
+        assert old.run_id not in loop._active, (
+            "the placeholder must not survive a failed activation"
+        )
 
 
 def test_stop_during_contract_probe_never_mutates_or_claims(monkeypatch):
@@ -467,9 +566,9 @@ def test_stop_during_contract_probe_never_mutates_or_claims(monkeypatch):
         loop: WorkerLoop | None = None
 
         def __call__(self) -> None:
-            return None
-
-        def verify_now(self) -> None:
+            # The pre-claim check is the coalesced guard now -- the hard
+            # fence lives inside the claim transaction itself. A stop
+            # arriving during this check must still prevent any claim.
             assert self.loop is not None
             self.loop.request_stop()
 
@@ -489,8 +588,9 @@ def test_blocking_queue_return_after_stop_never_claims(monkeypatch):
     class StoppingQueue(StubQueue):
         loop: WorkerLoop | None = None
 
-        def claim_new(self, *, block_ms):
+        def claim_new(self, *, block_ms, count=1):
             assert block_ms > 0
+            assert count >= 1
             assert self.loop is not None
             self.loop.request_stop()
             return [job()]
@@ -513,9 +613,8 @@ def test_held_successor_rechecks_contract_before_database_claim(monkeypatch):
 
     class Guard:
         def __call__(self) -> None:
-            return None
-
-        def verify_now(self) -> None:
+            # A latched guard surfaces here cheaply; the hard fence sits in
+            # the claim transaction. Either way: no successor claim.
             raise WorkerClaimGuardError("worker revision is stale")
 
     loop = make_loop(store, queue, monkeypatch, claim_guard=Guard())
@@ -572,9 +671,7 @@ def test_stop_during_successor_contract_probe_never_mutates_or_claims(
         loop: WorkerLoop | None = None
 
         def __call__(self) -> None:
-            return None
-
-        def verify_now(self) -> None:
+            # Coalesced pre-check; the hard fence is in the claim itself.
             assert self.loop is not None
             self.loop.request_stop()
 
@@ -1197,3 +1294,123 @@ def test_fenced_out_attempt_does_not_ack_the_message(monkeypatch):
 
     assert ("complete", "run_w1", 1) in store.calls
     assert ("ack", "1-0") not in queue.calls
+
+
+def test_a_tick_claims_up_to_the_free_capacity_not_one_job(monkeypatch):
+    """Filling N slots must cost one round trip, not N of them.
+
+    Every claim is a queue read plus a durable claim write. Claiming one
+    job per tick makes the time to reach full concurrency scale with the
+    concurrency itself: a worker sized for a hundred runs spent most of a
+    minute getting there while the work sat queued, so raising
+    INQTRIX_WORKER_CONCURRENCY bought far less than it appeared to.
+    """
+    seen: list[int] = []
+
+    class CountingQueue(StubQueue):
+        def claim_new(self, *, block_ms, count=1):
+            seen.append(count)
+            return []
+
+        def reclaim(self, *, min_idle_ms, count=10):
+            return []
+
+    queue = CountingQueue()
+    loop = make_loop(
+        StubStore(claim_result=None), queue, monkeypatch, concurrency=25
+    )
+    # Skip the reclaim and reconcile branches; the claim is what is under
+    # test, and both are exercised by their own tests above.
+    loop._last_reclaim = loop._last_reconcile = time.monotonic()
+    loop._tick()
+
+    assert seen, "the tick must attempt a claim"
+    assert seen[0] == 25, (
+        "an idle worker must ask for every slot it can fill; asking for one "
+        "makes the ramp to full concurrency scale with the concurrency"
+    )
+
+
+def test_a_worker_never_claims_more_than_it_can_start(monkeypatch):
+    """The bound that keeps a greedy batch from stranding work.
+
+    A claimed entry is owned by this consumer: claiming past capacity
+    would leave it pending here, running nowhere, and invisible to the
+    other workers that had room for it.
+    """
+    seen: list[int] = []
+
+    class CountingQueue(StubQueue):
+        def claim_new(self, *, block_ms, count=1):
+            seen.append(count)
+            return []
+
+        def reclaim(self, *, min_idle_ms, count=10):
+            return []
+
+    queue = CountingQueue()
+    loop = make_loop(
+        StubStore(claim_result=None), queue, monkeypatch, concurrency=4
+    )
+    # Skip the reclaim and reconcile branches; the claim is what is under
+    # test, and both are exercised by their own tests above.
+    loop._last_reclaim = loop._last_reconcile = time.monotonic()
+    # Three of four slots already taken.
+    loop._active.update({"a": object(), "b": object(), "c": object()})
+    loop._tick()
+
+    assert seen == [1], f"expected exactly the one free slot, got {seen}"
+
+
+def test_worker_rehydrates_canvas_context(monkeypatch):
+    """Durable replay reconstructs the canvas attachment typed (P4).
+
+    The rehydration list in worker/loop.py is the one place an additive
+    request field can silently vanish between API and worker — this pin
+    fails the moment ``canvas_context`` is dropped from it.
+    """
+    captured = []
+
+    def fake_execute(handle, *, run_request, **kwargs):
+        captured.append(run_request)
+        handle.complete(minimal_agent_result())
+
+    monkeypatch.setattr("inqtrix.worker.loop.execute_run_request", fake_execute)
+    context = {
+        "artifact_id": "art_ctx1",
+        "revision": 3,
+        "comments": [
+            {
+                "artifact_id": "art_ctx1",
+                "revision": 3,
+                "quote": "Der Umsatz stieg.",
+                "quote_before": "",
+                "quote_after": "",
+                "comment": "Bitte Zahl ergaenzen.",
+            }
+        ],
+    }
+    store = StubStore(
+        claim_result=claimed(
+            payload={
+                "question": "Arbeite die Kommentare ein.",
+                "history": "",
+                "messages": [],
+                "body": {
+                    "mode": "research",
+                    "agent_overrides": {},
+                    "knowledge_filters": {},
+                    "canvas_context": context,
+                },
+            },
+            workspace_id="ws-agent",
+        )
+    )
+    queue = StubQueue()
+
+    run_one(store, queue, monkeypatch)
+
+    assert len(captured) == 1
+    rehydrated = captured[0].canvas_context
+    assert rehydrated is not None
+    assert rehydrated.model_dump(mode="json") == context

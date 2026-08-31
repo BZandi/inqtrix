@@ -380,6 +380,11 @@ def create_multi_stack_app(
             )
             if collaboration_service is not None:
                 await collaboration_service.aclose()
+            # Same release as the single-stack factory: request code still
+            # unwinding above may hand work to a lane, so this goes last.
+            lanes = getattr(container, "execution_lanes", None)
+            if lanes is not None:
+                lanes.close()
 
     app_router = create_router()
 

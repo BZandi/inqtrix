@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { acknowledgeAgentTaskCancellation, applyAgentRunEvent } from './events'
+import {
+  acknowledgeAgentTaskCancellation,
+  applyAgentRunEvent,
+  nextOpenChildTasks,
+} from './events'
 import { agentRunFromSummary } from './model'
 import type { ResearchRunEvent, ResearchRunSummary } from '@/features/researchRuns/types'
 
@@ -967,6 +971,33 @@ describe('stepLog (transcript lines)', () => {
     )
   })
 
+  it('preserves catch-up versus live provenance on transcript entries', () => {
+    let record = agentRunFromSummary(summary())
+    record = applyAgentRunEvent(
+      record,
+      event(1, 'inqtrix.agent.narration', {
+        narration_id: 'n-discovery',
+        text: 'Persistierte Zwischenmeldung.',
+      }),
+      { arrivedLive: false },
+    )
+    expect(record.stepLog[0].arrivedLive).toBe(false)
+
+    record = applyAgentRunEvent(
+      record,
+      event(2, 'inqtrix.agent.narration', {
+        narration_id: 'n-discovery',
+        text: 'Neue Live-Fortsetzung.',
+      }),
+      { arrivedLive: true },
+    )
+    expect(record.stepLog[0]).toMatchObject({
+      arrivedLive: true,
+      seq: 1,
+      text: 'Neue Live-Fortsetzung.',
+    })
+  })
+
   it('upserts a re-emitted narration id in place instead of duplicating', () => {
     // The critic replan loop re-runs synthesis and re-emits the stable
     // narration_id 'n-synthesis' with a FRESH higher sequence — the
@@ -1064,5 +1095,321 @@ describe('model_resolution events (R5-light)', () => {
       }),
     )
     expect(record.modelResolution?.effort).toBe('high')
+  })
+})
+
+/**
+ * P4 file chips: artifact.created/updated events (kinds memo|deliverable)
+ * collect into the turn's touchedArtifacts — deduped by artifact, first
+ * touch keeps its position and its `created` provenance, an update
+ * refreshes revision/title in place. Everything else never chips.
+ */
+describe('touchedArtifacts (P4 file chips)', () => {
+  it('collects a created memo and dedupes its later update in place', () => {
+    const base = agentRunFromSummary(summary())
+    const created = applyAgentRunEvent(
+      base,
+      event(1, 'inqtrix.agent.artifact.created', {
+        artifact_id: 'art_memo',
+        kind: 'memo',
+        revision: 1,
+        updated_by: 'agent',
+      }),
+      { arrivedLive: true },
+    )
+    expect(created.touchedArtifacts).toHaveLength(1)
+    expect(created.touchedArtifacts[0]).toMatchObject({
+      arrivedLive: true,
+      artifactId: 'art_memo',
+      created: true,
+      kind: 'memo',
+      revision: 1,
+    })
+
+    const withDeliverable = applyAgentRunEvent(
+      created,
+      event(2, 'inqtrix.agent.artifact.created', {
+        artifact_id: 'art_report',
+        kind: 'deliverable',
+        revision: 1,
+        title: 'Marktbericht',
+      }),
+      { arrivedLive: true },
+    )
+    const updated = applyAgentRunEvent(
+      withDeliverable,
+      event(3, 'inqtrix.agent.artifact.updated', {
+        artifact_id: 'art_memo',
+        kind: 'memo',
+        revision: 2,
+        updated_by: 'agent',
+      }),
+      { arrivedLive: true },
+    )
+    // Still two chips; the memo kept its FIRST position and its created
+    // provenance while the revision advanced.
+    expect(updated.touchedArtifacts.map((item) => item.artifactId)).toEqual([
+      'art_memo',
+      'art_report',
+    ])
+    expect(updated.touchedArtifacts[0].revision).toBe(2)
+    expect(updated.touchedArtifacts[0].created).toBe(true)
+    expect(updated.touchedArtifacts[1].title).toBe('Marktbericht')
+  })
+
+  it('never chips other kinds, kindless user PUTs, or conflict markers', () => {
+    const base = agentRunFromSummary(summary())
+    let record = applyAgentRunEvent(
+      base,
+      event(1, 'inqtrix.agent.artifact.created', {
+        artifact_id: 'art_evidence',
+        kind: 'evidence_bundle',
+        revision: 1,
+      }),
+      { arrivedLive: true },
+    )
+    // A user PUT emits artifact.updated WITHOUT a kind field.
+    record = applyAgentRunEvent(
+      record,
+      event(2, 'inqtrix.agent.artifact.updated', {
+        artifact_id: 'art_memo',
+        revision: 5,
+        updated_by: 'user',
+      }),
+      { arrivedLive: true },
+    )
+    record = applyAgentRunEvent(
+      record,
+      event(3, 'inqtrix.agent.artifact.edit_conflict', {
+        artifact_id: 'art_memo',
+        kind: 'memo',
+      }),
+      { arrivedLive: true },
+    )
+    expect(record.touchedArtifacts).toEqual([])
+    // The invalidation signal itself still fired (rule R1 untouched).
+    expect(record.artifactsStale).toBe(true)
+  })
+
+  it('marks replayed chips as not live (no entrance motion)', () => {
+    const base = agentRunFromSummary(summary())
+    const replayed = applyAgentRunEvent(
+      base,
+      event(1, 'inqtrix.agent.artifact.created', {
+        artifact_id: 'art_memo',
+        kind: 'memo',
+        revision: 1,
+      }),
+      { arrivedLive: false },
+    )
+    expect(replayed.touchedArtifacts[0].arrivedLive).toBe(false)
+  })
+
+  it('accumulates the server line delta and keeps from_revision sticky (P9)', () => {
+    const base = agentRunFromSummary(summary())
+    const first = applyAgentRunEvent(
+      base,
+      event(1, 'inqtrix.agent.artifact.updated', {
+        artifact_id: 'art_doc',
+        from_revision: 3,
+        kind: 'deliverable',
+        lines_added: 4,
+        lines_removed: 1,
+        revision: 4,
+        title: 'Bericht',
+      }),
+      { arrivedLive: true },
+    )
+    expect(first.touchedArtifacts[0]).toMatchObject({
+      created: false,
+      fromRevision: 3,
+      linesAdded: 4,
+      linesRemoved: 1,
+      revision: 4,
+    })
+    const second = applyAgentRunEvent(
+      first,
+      event(2, 'inqtrix.agent.artifact.updated', {
+        artifact_id: 'art_doc',
+        from_revision: 4,
+        kind: 'deliverable',
+        lines_added: 2,
+        lines_removed: 5,
+        revision: 5,
+        title: 'Bericht',
+      }),
+      { arrivedLive: true },
+    )
+    // The turn diff spans FIRST touch -> latest revision; numbers sum.
+    expect(second.touchedArtifacts[0]).toMatchObject({
+      fromRevision: 3,
+      linesAdded: 6,
+      linesRemoved: 6,
+      revision: 5,
+    })
+  })
+
+  it('drops the sum honestly when one contributor carries no numbers (P9)', () => {
+    const base = agentRunFromSummary(summary())
+    const counted = applyAgentRunEvent(
+      base,
+      event(1, 'inqtrix.agent.artifact.updated', {
+        artifact_id: 'art_doc',
+        from_revision: 1,
+        kind: 'deliverable',
+        lines_added: 4,
+        lines_removed: 1,
+        revision: 2,
+      }),
+      { arrivedLive: true },
+    )
+    const degraded = applyAgentRunEvent(
+      counted,
+      // A pre-P9 row or the size guard: revision advances, no numbers.
+      event(2, 'inqtrix.agent.artifact.updated', {
+        artifact_id: 'art_doc',
+        kind: 'deliverable',
+        revision: 3,
+      }),
+      { arrivedLive: true },
+    )
+    expect(degraded.touchedArtifacts[0].revision).toBe(3)
+    expect(degraded.touchedArtifacts[0].fromRevision).toBe(1)
+    expect(degraded.touchedArtifacts[0].linesAdded).toBeUndefined()
+    expect(degraded.touchedArtifacts[0].linesRemoved).toBeUndefined()
+
+    // A HALF payload (only one side present) is just as unsummable —
+    // never a NaN, never a partial number (MP9-4 surfaced this hole).
+    const half = applyAgentRunEvent(
+      base,
+      event(1, 'inqtrix.agent.artifact.updated', {
+        artifact_id: 'art_half',
+        kind: 'deliverable',
+        lines_removed: 2,
+        revision: 2,
+      }),
+      { arrivedLive: true },
+    )
+    expect(half.touchedArtifacts[0].linesAdded).toBeUndefined()
+    expect(half.touchedArtifacts[0].linesRemoved).toBeUndefined()
+  })
+
+  it('derives from_revision for pre-P9 events (revision - 1)', () => {
+    const base = agentRunFromSummary(summary())
+    const legacy = applyAgentRunEvent(
+      base,
+      event(1, 'inqtrix.agent.artifact.updated', {
+        artifact_id: 'art_doc',
+        kind: 'memo',
+        revision: 4,
+      }),
+      { arrivedLive: true },
+    )
+    expect(legacy.touchedArtifacts[0].fromRevision).toBe(3)
+  })
+
+  it('rebuilds the sent-comments record from the attached event (P9d)', () => {
+    const base = agentRunFromSummary(summary())
+    const attached = applyAgentRunEvent(
+      base,
+      event(1, 'inqtrix.agent.canvas_context.attached', {
+        artifact_id: 'art_doc',
+        comments: [
+          { comment: 'Bitte kuerzen.', quote_preview: 'Erster Satz\u2026' },
+          { comment: 'Zahl ergaenzen.', quote_preview: 'Umsatz stieg' },
+        ],
+        revision: 3,
+      }),
+      { arrivedLive: false },
+    )
+    expect(attached.canvasContextMeta).toEqual({
+      artifactId: 'art_doc',
+      comments: [
+        { comment: 'Bitte kuerzen.', quotePreview: 'Erster Satz\u2026' },
+        { comment: 'Zahl ergaenzen.', quotePreview: 'Umsatz stieg' },
+      ],
+      revision: 3,
+    })
+  })
+
+  it('never chips a kind-less rename signal despite its title (P9)', () => {
+    const base = agentRunFromSummary(summary())
+    const renamed = applyAgentRunEvent(
+      base,
+      event(1, 'inqtrix.agent.artifact.updated', {
+        artifact_id: 'art_doc',
+        renamed: true,
+        revision: 2,
+        title: 'Neuer Titel',
+        updated_by: 'user',
+      }),
+      { arrivedLive: true },
+    )
+    expect(renamed.touchedArtifacts).toEqual([])
+    // The staleness signal still refreshes names everywhere.
+    expect(renamed.artifactsStale).toBe(true)
+  })
+})
+
+describe('nextOpenChildTasks', () => {
+  it('collects a mission’s whole parallel wave', () => {
+    let open = nextOpenChildTasks(undefined, 'inqtrix.agent.task.started', 0)
+    for (const ordinal of [1, 2, 4, 3]) {
+      open = nextOpenChildTasks(open, 'inqtrix.agent.task.started', ordinal)
+    }
+    expect(open).toEqual([0, 1, 2, 3, 4])
+  })
+
+  it('closes exactly the task that finished, keeping the straggler', () => {
+    let open: number[] | undefined = [0, 1, 2, 3, 4]
+    for (const ordinal of [1, 2, 4, 0]) {
+      open = nextOpenChildTasks(open, 'inqtrix.agent.task.finished', ordinal)
+    }
+    expect(open).toEqual([3])
+  })
+
+  it('leaves the set alone for an unrelated event', () => {
+    expect(
+      nextOpenChildTasks([2], 'inqtrix.agent.phase.changed', undefined),
+    ).toEqual([2])
+  })
+
+  it('has nothing to say before the first task', () => {
+    expect(
+      nextOpenChildTasks(undefined, 'inqtrix.agent.phase.changed', undefined),
+    ).toBeUndefined()
+  })
+})
+
+describe('answer.started announces the citation labels', () => {
+  it('keeps them so the STREAMED text can render its citations', () => {
+    // Without them the body streams with plain `[W1]` and is rewritten
+    // wholesale the moment the answer settles — which reads as the
+    // message being re-inserted.
+    let record = agentRunFromSummary(summary())
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.answer.started', {
+      artifact_id: 'art-answer',
+      publication_id: 'pub-answer',
+      reference_labels: ['W1', 'W2', 'W3'],
+      status: 'writing',
+    }))
+    expect(record.artifacts['art-answer']?.publicationRefLabels).toEqual([
+      'W1',
+      'W2',
+      'W3',
+    ])
+  })
+
+  it('stays undefined when an older server announces none', () => {
+    // Degrade to the previous behaviour, never invent links.
+    let record = agentRunFromSummary(summary())
+    record = applyAgentRunEvent(record, event(1, 'inqtrix.answer.started', {
+      artifact_id: 'art-answer',
+      publication_id: 'pub-answer',
+      status: 'writing',
+    }))
+    expect(
+      record.artifacts['art-answer']?.publicationRefLabels,
+    ).toBeUndefined()
   })
 })

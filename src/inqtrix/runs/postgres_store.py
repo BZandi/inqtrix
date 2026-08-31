@@ -51,6 +51,9 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
+from inqtrix.storage.migration_contract import (
+    assert_schema_head,
+)
 from inqtrix.auth.log_redaction import log_authorization_denial
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.auth.principal import Principal, UserContext
@@ -66,6 +69,7 @@ from inqtrix.runs.durable_store import (
 from inqtrix.pagination import encode_cursor
 from inqtrix.runs.ports import RunStoreMetrics
 from inqtrix.runs.shared import (
+    clipped_question,
     CHILD_PROGRESS_EVENT,
     access_annotation as _access_annotation,
     build_child_progress_payload,
@@ -334,9 +338,9 @@ class PostgresRunStore(DurableJobStoreBase):
             app_role=app_role,
             worker_id=worker_id,
             queue=queue,
-            max_concurrent=max_concurrent,
             recover_orphans=recover_orphans,
         )
+        self._max_concurrent = max_concurrent
         self._dispatch_queue = dispatch_queue if dispatch_queue is not None else queue
         self._max_queue_size = max_queue_size
         self._completed_ttl_seconds = completed_ttl_seconds
@@ -539,7 +543,7 @@ class PostgresRunStore(DurableJobStoreBase):
         summary, created = self._call(
             self._submit_db(
                 tenant_id=DEFAULT_TENANT,
-                question=question[:500],
+                question=clipped_question(question),
                 stack_name=stack_name,
                 agent_overrides=dict(agent_overrides or {}),
                 mode=mode,
@@ -616,7 +620,7 @@ class PostgresRunStore(DurableJobStoreBase):
             self._import_completed_run_db(
                 tenant_id=DEFAULT_TENANT,
                 source_run_id=source_run_id,
-                question=question[:500],
+                question=clipped_question(question),
                 stack_name=stack_name,
                 result=result,
                 status=status,
@@ -1813,8 +1817,14 @@ class PostgresRunStore(DurableJobStoreBase):
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
+        stream: bool = True,
     ) -> PollingJobSubscription:
-        """Subscribe to a run's event stream with full stored replay."""
+        """Subscribe to a run's event stream with full stored replay.
+
+        ``stream=False`` serves a one-shot replay read (the JSON polling
+        fallback): same visibility check and replay, but no poller
+        thread, no registration, no viewer-metric observation.
+        """
         self._expire_lost_executions()
         tenant_id, replay = self._call(
             self._replay_db(run_id, workspace_id, visible_to)
@@ -1827,6 +1837,7 @@ class PostgresRunStore(DurableJobStoreBase):
             replay,
             terminal_events=_TERMINAL_EVENT_TYPES,
             thread_label="inqtrix-run-events",
+            stream=stream,
         )
 
     def unsubscribe(self, run_id: str, queue: Queue) -> None:
@@ -3479,7 +3490,14 @@ class PostgresRunStore(DurableJobStoreBase):
                     ),
                     active_started_at=None,
                 )
-                .returning(runs.c.snapshot, runs.c.tenant_id)
+                .returning(
+                    runs.c.snapshot,
+                    runs.c.tenant_id,
+                    runs.c.kind,
+                    runs.c.parent_run_id,
+                    runs.c.request_payload,
+                    runs.c.attempt,
+                )
             )
             if fence_attempt is not None:
                 # Queue-worker park: a reclaimed zombie must not park a
@@ -3492,12 +3510,34 @@ class PostgresRunStore(DurableJobStoreBase):
             row = (await session.execute(query)).first()
             if row is not None:
                 parked = True
+                waiting_payload = {
+                    "status": waiting.value,
+                    "snapshot": dict(row[0] or {}),
+                }
                 _, events = expand_run_event(
                     "inqtrix.run.waiting",
-                    {"status": waiting.value, "snapshot": dict(row[0] or {})},
+                    waiting_payload,
                     status=waiting.value,
                 )
                 await self._append_events_db(session, run_id, row[1], events)
+                # A CHILD's park is the parent's gate signal
+                # (F-P0-CHILDGATE): the waiting event is on the
+                # projection whitelist, and the memory twin projects it
+                # through its emit chokepoint — this write path appends
+                # directly, so it must project explicitly or a parked
+                # child stays invisible on every parent surface.
+                await self._project_child_progress_db(
+                    session,
+                    child_run_id=run_id,
+                    kind=str(row[2] or "standard"),
+                    parent_run_id=row[3],
+                    request_payload=dict(row[4] or {}),
+                    run_status=waiting.value,
+                    event_type="inqtrix.run.waiting",
+                    payload=waiting_payload,
+                    snapshot=dict(row[0] or {}),
+                    attempt=int(row[5]),
+                )
                 if waiting is RunStatus.WAITING_FOR_CHILDREN:
                     # Lost-wakeup self-heal, in the SAME transaction as
                     # the park: the last child may have gone terminal
@@ -4391,6 +4431,13 @@ class PostgresRunStore(DurableJobStoreBase):
         woken_parent: str | None = None
         claimed: ClaimedRun | None = None
         async with self._session(tenant_id) as session:
+            # Cutover fence, FIRST statement of the claim transaction: a
+            # worker whose image predates a completed migration must not
+            # take a durable claim -- nor run this transaction's other
+            # writes -- against a schema its code no longer matches. Rides
+            # in the same transaction, so a mismatch rolls everything back
+            # and the queue entry stays unacked for an upgraded worker.
+            await assert_schema_head(session)
             try:
                 _locked, _root, access = await self._lock_execution_path_db(
                     session, run_id

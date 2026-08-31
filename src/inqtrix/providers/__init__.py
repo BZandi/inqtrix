@@ -162,6 +162,17 @@ def instrument_providers(
     return ProviderContext(llm=llm, search=search)
 
 
+def _field_default(attr: str) -> Any:
+    """Read a provider field's own default instead of restating it.
+
+    A literal repeated at a call site is a second default: it keeps the old
+    value silently the day the field changes.
+    """
+    from inqtrix.settings import ProviderSettings
+
+    return ProviderSettings.model_fields[attr].default
+
+
 def _sel(providers_cfg: "ProviderSettings | None", attr: str, default: Any) -> Any:
     """Read a provider-settings field, defaulting when the group is absent.
 
@@ -458,7 +469,9 @@ def _make_azure_foundry(
         ),
         "timeout": settings.agent.search_timeout,
         "max_concurrency": _sel(
-            providers_cfg, "azure_foundry_max_concurrency", 6
+            providers_cfg,
+            "azure_foundry_max_concurrency",
+            _field_default("azure_foundry_max_concurrency"),
         ),
     }
     agent_version = _sel(providers_cfg, "web_search_agent_version", "")

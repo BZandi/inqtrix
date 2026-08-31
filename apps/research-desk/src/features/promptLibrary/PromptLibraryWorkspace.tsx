@@ -12,6 +12,7 @@ import {
   Library,
   ListOrdered,
   MessagesSquare,
+  Sparkles,
   Paperclip,
   Plus,
   Save,
@@ -121,7 +122,7 @@ const emptyDraft: PromptDraft = {
   selectedRuleId: null,
   sourceTemplateId: null,
   title: '',
-  visibility: { chat: true, editor: true },
+  visibility: { agent: false, chat: true, editor: true },
 }
 
 export function PromptLibraryWorkspace({
@@ -228,7 +229,7 @@ export function PromptLibraryWorkspace({
   const contextChips = chatAttachmentChipsFromRefs(state, draft.linkedContextRefs)
   const filteredRules = rules.filter((rule) => {
     const normalized = normalizeChatRule(rule)
-    const visibility = normalized.visibility ?? { chat: true, editor: true }
+    const visibility = normalized.visibility ?? { agent: false, chat: true, editor: true }
     const isAutocompleteVisible = normalized.includeInAutocomplete !== false
     const haystack = [
       normalized.label,
@@ -242,7 +243,7 @@ export function PromptLibraryWorkspace({
     const matchesVisibility = visibilityFilter === 'all'
       || (visibilityFilter === 'chat' && isAutocompleteVisible && visibility.chat)
       || (visibilityFilter === 'editor' && isAutocompleteVisible && visibility.editor)
-      || (visibilityFilter === 'hidden' && (!isAutocompleteVisible || (!visibility.chat && !visibility.editor)))
+      || (visibilityFilter === 'hidden' && (!isAutocompleteVisible || (!visibility.chat && !visibility.editor && !visibility.agent)))
     return matchesQuery && matchesCategory && matchesVisibility
   })
   const groupedRules = chatRuleCategories
@@ -320,7 +321,8 @@ export function PromptLibraryWorkspace({
   function setVisibility(key: keyof ChatRuleVisibility, value: boolean) {
     const visibility = { ...draft.visibility, [key]: value }
     updateDraft({
-      includeInAutocomplete: visibility.chat || visibility.editor,
+      includeInAutocomplete:
+        visibility.chat || visibility.editor || visibility.agent,
       visibility,
     })
   }
@@ -965,6 +967,12 @@ function VisibilityPanel({
           label={t.promptLibrary.editorVisible}
           onClick={() => onVisibilityChange('editor', !draft.visibility.editor)}
         />
+        <VisChip
+          active={draft.visibility.agent}
+          icon={Sparkles}
+          label={t.promptLibrary.agentVisible}
+          onClick={() => onVisibilityChange('agent', !draft.visibility.agent)}
+        />
       </div>
     </section>
   )
@@ -1202,7 +1210,7 @@ function PromptListItem({
   const category = normalized.category ?? 'instruction'
   const tone = categoryToTone[category]
   const Icon = categoryIcon(category)
-  const visibility = normalized.visibility ?? { chat: true, editor: true }
+  const visibility = normalized.visibility ?? { agent: false, chat: true, editor: true }
   const isAutocompleteVisible = normalized.includeInAutocomplete !== false
   const hidden = !isAutocompleteVisible || (!visibility.chat && !visibility.editor)
   return (
@@ -1364,7 +1372,7 @@ function draftFromRule(rule: ChatRuleRecord | null): PromptDraft {
     selectedRuleId: normalized.id,
     sourceTemplateId: normalized.serverTemplateId ?? null,
     title: normalized.title,
-    visibility: normalized.visibility ?? { chat: true, editor: true },
+    visibility: normalized.visibility ?? { agent: false, chat: true, editor: true },
   }
 }
 

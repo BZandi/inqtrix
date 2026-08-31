@@ -88,6 +88,9 @@ export type AgentApprovalWire = {
   subject_id: string
   payload: Record<string, unknown>
   decision: string
+  /** Decision-scoped keys (edited actions/plan, `approval_scope: 'run'`
+   * for a run-wide tool grant). Older servers omit it. */
+  decision_payload?: Record<string, unknown>
   note: string
   decided_by_user_id: string | null
   created_at: number
@@ -106,6 +109,13 @@ export type AgentApprovalDecisionRequest = {
   /** Decision-scoped user guidance for the report (structure, focus,
    * audience) — rendered into the synthesis prompts server-side. */
   report_guidance?: string
+  /** Prompt-library rule ids; the server resolves their text. */
+  report_rule_ids?: string[]
+  /** Only with `decision: 'approve'` on a `tool` gate: `'run'` grants
+   * the gated tools for the rest of the run (balanced mode only —
+   * strict stays per-call and `propose_editor_patch` is never
+   * grantable); `'once'`/omitted approves this call alone. */
+  approval_scope?: 'once' | 'run'
 }
 
 /** One pickable option of a structured clarification question. */

@@ -29,6 +29,9 @@ export type AgentExecutionSnapshot = {
   consentReason: string | null
   toolUseCounts: { web: number; knowledge: number }
   limits: Record<string, AgentExecutionLimit>
+  /** Tools the user approved run-wide (`approval_scope: 'run'`);
+   * empty when nothing is granted or the server predates P6B. */
+  toolGrants: string[]
 }
 
 export type AgentExecutionDisplay = {
@@ -204,6 +207,11 @@ export function normalizeAgentExecutionSnapshot(
           : 0,
     },
     limits,
+    toolGrants: Array.isArray(record.tool_grants)
+      ? record.tool_grants.filter(
+        (value): value is string => typeof value === 'string' && value.length > 0,
+      )
+      : [],
   }
 }
 

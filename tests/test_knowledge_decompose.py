@@ -23,7 +23,6 @@ from inqtrix.knowledge.stores.ports import DocumentChunk, RetrievalCandidate
 from inqtrix.providers.base import LLMResponse
 
 from tests.test_knowledge_algorithm_profiles import (
-    REWRITE,
     SUFFICIENT,
     ScriptedLLM,
     make_algorithm,

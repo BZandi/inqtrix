@@ -74,7 +74,20 @@ _CHILD_PROJECTED_EVENTS = frozenset(
         "inqtrix.knowledge.retrieval.warning",
         "inqtrix.knowledge.answer.retry",
         "inqtrix.knowledge.grounding.checked",
+        # A delegated MISSION reports its progress under `agent.*`, not in
+        # the research vocabulary above. Without these three a kernel
+        # parent saw ONLY lifecycle transitions — eleven events while a
+        # whole mission with five research children ran beneath it, and
+        # nothing at all about what was being worked on.
+        "inqtrix.agent.phase.changed",
+        "inqtrix.agent.task.started",
+        "inqtrix.agent.task.finished",
     }
+)
+
+#: Mission task events whose bounded identifiers cross to the parent.
+_CHILD_TASK_EVENTS = frozenset(
+    {"inqtrix.agent.task.started", "inqtrix.agent.task.finished"}
 )
 
 
@@ -155,6 +168,22 @@ def access_permits_edit(access: Mapping[str, Any] | None) -> bool:
         return SharePermission(access.get("permission")).at_least(SharePermission.EDIT)
     except ValueError:
         return False
+
+
+QUESTION_COLUMN_LIMIT = 500
+
+
+def clipped_question(question: str) -> str:
+    """Bounded summary/row question with a VISIBLE cut (no silent caps).
+
+    The full text always survives in ``request_payload`` for execution
+    and replay; this bound only keeps list/summary rows small. A cut
+    that hides itself made a delegated assignment end mid-word on the
+    gate card (P3.5) — the marker tells every consumer that more exists.
+    """
+    if len(question) <= QUESTION_COLUMN_LIMIT:
+        return question
+    return question[:QUESTION_COLUMN_LIMIT] + "…"
 
 
 def build_run_summary(
@@ -355,6 +384,16 @@ def build_child_progress_payload(
         projected["message"] = message
     if metrics:
         projected["metrics"] = metrics
+    if event_type in _CHILD_TASK_EVENTS:
+        # Which unit of work the mission is on — nothing more. The
+        # payload also carries `result_summary`, the child's whole
+        # executive summary with source URLs: that belongs to the child's
+        # own record, never to the parent's live feed. Its `child_run_id`
+        # names a GRANDCHILD and must not clobber the projected one, so
+        # both stay off this list by construction.
+        for key in ("ordinal", "tool_kind", "status"):
+            if clean.get(key) is not None:
+                projected[key] = clean[key]
     if event_type == "inqtrix.knowledge.grounding.checked":
         # A delegated mission's child stream owns the full event.  The parent
         # receives only the bounded verdict/count projection needed to explain

@@ -31,7 +31,6 @@ import {
   X,
   type LucideIcon,
 } from '@/components/icons'
-import { motion } from 'motion/react'
 import {
   type FormEvent,
   type ReactNode,
@@ -93,7 +92,6 @@ import type {
   StackDiscoveryStatus,
 } from '@/features/researchRuns/types'
 import { cn } from '@/lib/utils'
-import { appMotion } from '@/motion/transitions'
 import {
   useTheme,
   type ThemeMode,
@@ -141,7 +139,6 @@ type SettingsWorkspaceProps = {
   /** One-shot deep link: when set, the workspace focuses this
    * section on mount/changes (the avatar menu's settings entry). */
   requestedSection?: 'security' | null
-  reduceMotion: boolean | null
   selectedStack: string
   stackDiscoveryStatus: StackDiscoveryStatus
   stackOptions: string[]
@@ -211,7 +208,6 @@ export default function SettingsWorkspace({
   onSsoLogout,
   onStackChange,
   onOpenSharedResource,
-  reduceMotion,
   requestedSection = null,
   selectedStack,
   sharing = null,
@@ -507,7 +503,7 @@ export default function SettingsWorkspace({
     ) ?? navGroups[0].items[0]
 
   return (
-    <SettingsShell reduceMotion={reduceMotion}>
+    <SettingsShell>
       <SettingsSidebar
         activeSection={activeSection}
         groups={navGroups}
@@ -565,23 +561,15 @@ export default function SettingsWorkspace({
   )
 }
 
-function SettingsShell({
-  children,
-  reduceMotion,
-}: {
-  children: ReactNode
-  reduceMotion: boolean | null
-}) {
+function SettingsShell({ children }: { children: ReactNode }) {
   return (
+    // Settings has no structural wait, so its complete shell swaps directly.
+    // Mount-wide motion is reserved for bounded regions that are genuinely
+    // waiting on data or layout.
     <div className="flex min-h-0 w-full bg-canvas lg:h-full">
-      <motion.section
-        animate={{ opacity: 1, y: 0 }}
-        className="grid min-h-[calc(100svh-var(--header-h))] w-full grid-rows-[auto_minmax(0,1fr)] lg:h-full lg:min-h-0 lg:grid-cols-[224px_minmax(0,1fr)] lg:grid-rows-1"
-        initial={reduceMotion ? false : { opacity: 0, y: 8 }}
-        transition={appMotion.panel}
-      >
+      <section className="grid min-h-[calc(100svh-var(--header-h))] w-full grid-rows-[auto_minmax(0,1fr)] lg:h-full lg:min-h-0 lg:grid-cols-[224px_minmax(0,1fr)] lg:grid-rows-1">
         {children}
-      </motion.section>
+      </section>
     </div>
   )
 }

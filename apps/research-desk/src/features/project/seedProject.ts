@@ -5,6 +5,7 @@ import { parseChatRule, parseChatThread, parseResearchRun } from './markdown'
 import { EMPTY_CANVAS_STATE } from '@/features/canvas/types'
 import { createBootstrapKnowledgeSession } from './knowledgeSessionDefaults'
 import { DEFAULT_PANEL_LAYOUT } from './panelLayout'
+import { defaultExplorerSortState } from './explorerSort'
 import type {
   EditorCommentThreadRecord,
   EditorDocumentRecord,
@@ -185,6 +186,7 @@ export function createEmptyProjectState(): ProjectState {
     knowledgeSessions: { [defaultKnowledgeSession.id]: defaultKnowledgeSession },
     selectedKnowledgeSessionId: defaultKnowledgeSession.id,
     agentRuns: {},
+    agentSessionArtifacts: {},
     agentSessionGroupOrder: [],
     agentSessionGroups: {},
     agentSessionOrder: [],
@@ -230,6 +232,7 @@ export function createEmptyProjectState(): ProjectState {
       panelLayout: DEFAULT_PANEL_LAYOUT,
       pendingChatAttachmentRefs: [],
       pendingChatReportRunId: null,
+      explorerSort: defaultExplorerSortState(),
       pinnedExplorer: emptyPinnedExplorer,
       selectedAgentEffort: null,
       selectedAgentModel: null,
@@ -358,6 +361,7 @@ export function createSeedProjectState(): ProjectState {
     knowledgeSessions: { [knowledgeSession.id]: knowledgeSession },
     selectedKnowledgeSessionId: knowledgeSession.id,
     agentRuns: {},
+    agentSessionArtifacts: {},
     agentSessionGroupOrder: [],
     agentSessionGroups: {},
     agentSessionOrder: [],
@@ -406,6 +410,7 @@ export function createSeedProjectState(): ProjectState {
       panelLayout: DEFAULT_PANEL_LAYOUT,
       pendingChatAttachmentRefs: [],
       pendingChatReportRunId: null,
+      explorerSort: defaultExplorerSortState(),
       pinnedExplorer: {
         chatThreadIds: chatThreadOrder.slice(0, 1),
         editorDocumentIds: editorDocumentOrder.slice(0, 1),

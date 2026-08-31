@@ -79,6 +79,8 @@ class _DatabaseClaimGuard:
         self._interval_seconds = interval_seconds
         self._lock = threading.Lock()
         self._next_check = 0.0
+        self._probe_count = 0
+        self._probe_seconds = 0.0
         self._failure: str | None = None
         self._unavailable: str | None = None
 
@@ -86,8 +88,51 @@ class _DatabaseClaimGuard:
         """Verify when due, or fail immediately after any prior violation."""
         self._verify(force=False)
 
+    _PROBE_REPORT_EVERY = 50
+
+    def _record_probe(self, seconds: float) -> None:
+        """Say what the probe costs at its remaining call sites.
+
+        The probe runs at worker start and on the coalesced interval (one
+        shared guard across all loops) -- NOT per claimed job; per-job
+        protection is the in-transaction schema fence (assert_schema_head)
+        inside every durable-claim transaction. Each probe still opens its
+        own connection, runs the schema and grant checks, and disposes the
+        engine again under a process-wide lock, so the counter grows with
+        wall-clock intervals: a rapidly growing count or a rising mean
+        signals probe contention, not claim traffic.
+        """
+        self._probe_count += 1
+        self._probe_seconds += seconds
+        if self._probe_count % self._PROBE_REPORT_EVERY:
+            return
+        log.info(
+            "Claim-Contract-Sonde: %d Laeufe, im Mittel %.0f ms, "
+            "zusammen %.1f s seit Prozessstart.",
+            self._probe_count,
+            1000 * self._probe_seconds / self._probe_count,
+            self._probe_seconds,
+        )
+
+    def latch_failure(self, message: str) -> None:
+        """Stick the guard shut from outside the probe.
+
+        The in-transaction schema fence fires inside a store's claim
+        transaction, not inside this guard's own probe -- but its verdict
+        is about the PROCESS (stale code), so it must stop every loop
+        sharing this guard, exactly as a failed probe does. Idempotent;
+        the first message wins.
+        """
+        with self._lock:
+            if self._failure is None:
+                self._failure = message
+
     def verify_now(self) -> None:
-        """Verify immediately before a durable queue item may be claimed."""
+        """Force an uncoalesced probe; used only by the startup waits.
+
+        The durable claim boundary itself is fenced in-transaction via
+        assert_schema_head, so no per-claim forced probe exists anymore.
+        """
         self._verify(force=True)
 
     def _verify(self, *, force: bool) -> None:
@@ -110,6 +155,7 @@ class _DatabaseClaimGuard:
             if not force and now < self._next_check:
                 return
             try:
+                probe_started = time.monotonic()
                 run_coro_sync(
                     verify_database_url_runtime_contract(
                         self._database_url,
@@ -117,6 +163,7 @@ class _DatabaseClaimGuard:
                         login_policy=self._login_policy,
                     )
                 )
+                self._record_probe(time.monotonic() - probe_started)
             except DatabaseRuntimeUnavailableError as exc:
                 self._unavailable = sanitize_log_message(exc)
                 self._next_check = now + self._interval_seconds
@@ -326,6 +373,75 @@ def _start_object_orphan_sweep_thread(
     )
 
 
+# Loop class name -> (display name, settings group, field name). Keyed by the
+# class actually constructed, so a ceiling is only ever reported for a loop
+# this process really runs. The environment-variable name is read from the
+# field itself rather than spelled again here, or renaming the alias would
+# leave this message pointing at a variable that no longer exists.
+_DOMAIN_CEILINGS = {
+    "IndexingWorkerLoop": ("Indexing", "knowledge", "reindex_max_concurrent"),
+    "UploadWorkerLoop": ("Upload", "server", "upload_max_concurrent"),
+    "DeletionWorkerLoop": ("Deletion", "server", "deletion_max_concurrent"),
+}
+
+
+def _ceiling_alias(group: object, field: str) -> str:
+    """The environment-variable name a settings field is bound to."""
+    return type(group).model_fields[field].alias or field
+
+
+def _effective_loop_widths(settings: "Settings", loops: "list") -> "list[int]":
+    """The width each constructed loop actually runs at.
+
+    Not the process-wide value: a loop bound by its own domain ceiling has
+    fewer jobs in flight and therefore asks for fewer connections. Counting
+    the process-wide value for all of them would overstate the budget and
+    warn on deployments that fit.
+    """
+    process_wide = settings.queue.worker_concurrency
+    widths = []
+    for loop in loops:
+        entry = _DOMAIN_CEILINGS.get(type(loop).__name__)
+        if entry is None:
+            widths.append(process_wide)
+            continue
+        _, group_name, field = entry
+        widths.append(
+            min(process_wide, getattr(getattr(settings, group_name), field))
+        )
+    return widths
+
+
+def _report_binding_ceilings(settings: "Settings", loops: "list") -> None:
+    """Name every constructed loop whose ceiling sits below the worker-wide one.
+
+    Each loop runs at the LOWER of ``INQTRIX_WORKER_CONCURRENCY`` and its
+    domain ceiling. Raising only the former therefore leaves some loops
+    where they were, which looks like the raise did not take effect.
+
+    Only loops this process actually built are named: a worker without the
+    knowledge profile runs no indexing loop, and reporting a ceiling for it
+    would describe work that cannot happen here.
+    """
+    process_wide = settings.queue.worker_concurrency
+    built = {type(loop).__name__ for loop in loops}
+    binding = []
+    for key, (name, group_name, field) in _DOMAIN_CEILINGS.items():
+        if key not in built:
+            continue
+        group = getattr(settings, group_name)
+        value = getattr(group, field)
+        if value < process_wide:
+            binding.append(f"{name} {value} ({_ceiling_alias(group, field)})")
+    if binding:
+        log.info(
+            "Worker-Fachgrenzen unter INQTRIX_WORKER_CONCURRENCY=%d: %s. "
+            "Diese Schleifen laufen mit dem niedrigeren Wert.",
+            process_wide,
+            ", ".join(binding),
+        )
+
+
 def main() -> None:
     """Run one worker process until SIGTERM/SIGINT."""
     logging_env = read_logging_env()
@@ -420,11 +536,14 @@ def main() -> None:
         # only a few minutes.
         completed_ttl_seconds=settings.server.run_durable_retention_seconds,
         worker_id=worker_id,
-        # The per-user cap is an ADMISSION bound and fires only in
-        # submit(), which the worker never calls (it claims and executes
-        # already-admitted runs). Passed for construction symmetry with
-        # the API store; held inertly here — re-checking a per-user cap on
-        # an already-admitted run would be the wrong layer.
+        # The per-user cap is an ADMISSION bound firing in submit() --
+        # and the worker DOES call submit(): a workspace agent running
+        # here submits its child runs through this very store
+        # (kernel/tools.py delegate paths -> run_service.submit). Child
+        # runs count against the parent's user, so the cap governs
+        # worker-side child submission exactly as it does API-side
+        # submission. It does NOT re-check already-admitted runs the
+        # worker merely claims and executes.
         max_concurrent_per_user=settings.server.run_max_concurrent_per_user,
         restrict_to_workspace_members=(
             settings.sharing.restrict_to_workspace_members
@@ -510,7 +629,6 @@ def main() -> None:
         app_role=settings.storage.app_role,
         queue=None,
         recover_orphans=False,
-        max_concurrent=settings.queue.worker_concurrency,
         worker_id=worker_id,
     )
     upload_queue = ValkeyUploadQueue(
@@ -607,7 +725,10 @@ def main() -> None:
                 store=index_store,
                 queue=index_queue,
                 knowledge_service=container.knowledge_service,
-                concurrency=settings.queue.worker_concurrency,
+                concurrency=min(
+                    settings.queue.worker_concurrency,
+                    settings.knowledge.reindex_max_concurrent,
+                ),
                 max_attempts=settings.queue.worker_max_attempts,
                 heartbeat_seconds=settings.queue.worker_heartbeat_seconds,
                 claim_idle_seconds=settings.queue.worker_claim_idle_seconds,
@@ -650,7 +771,10 @@ def main() -> None:
                 store=upload_store,
                 queue=upload_queue,
                 service=container.upload_operation_service,
-                concurrency=settings.queue.worker_concurrency,
+                concurrency=min(
+                    settings.queue.worker_concurrency,
+                    settings.server.upload_max_concurrent,
+                ),
                 max_attempts=settings.queue.worker_max_attempts,
                 heartbeat_seconds=settings.queue.worker_heartbeat_seconds,
                 claim_idle_seconds=settings.queue.worker_claim_idle_seconds,
@@ -687,7 +811,8 @@ def main() -> None:
             stop_event.set()
 
     log.info(
-        "Inqtrix worker starting | worker_id=%s | loops=%d | concurrency=%d "
+        "Inqtrix worker starting | worker_id=%s | loops=%d "
+        "| worker_concurrency=%d "
         "| max_attempts=%d | heartbeat=%.0fs | claim_idle=%.0fs",
         worker_id,
         len(loops),
@@ -696,18 +821,41 @@ def main() -> None:
         settings.queue.worker_heartbeat_seconds,
         settings.queue.worker_claim_idle_seconds,
     )
-    # Reviewable connection budget: run + deletion stores and the optional
-    # reindex store each own one loop-affine engine.
-    pooled_engines = 3 if index_store is not None else 2
-    log.info(
-        "Postgres-Verbindungsbudget | pool_size=%d max_overflow=%d | %d "
-        "gepoolte Engines -> worst case %d persistente Verbindungen pro "
-        "Worker-Prozess.",
-        settings.storage.pool_size,
-        settings.storage.pool_max_overflow,
-        pooled_engines,
-        pooled_engines
-        * (settings.storage.pool_size + settings.storage.pool_max_overflow),
+    # A domain ceiling that binds below the process-wide one changes how much
+    # work this replica actually does, so it is said rather than inferred from
+    # throughput later.
+    _report_binding_ceilings(settings, loops)
+    # The engines exist by now, so the budget comes from what was built
+    # rather than from a count kept by hand alongside them.
+    from inqtrix.storage.connection_budget import report_connection_budget
+
+    run_coro_sync(
+        report_connection_budget(
+            database_url=settings.storage.database_url,
+            process_label="Worker-Prozess",
+            pool_size=settings.storage.pool_size,
+            pool_max_overflow=settings.storage.pool_max_overflow,
+            # Every loop this process runs drives a NullPool bundle: one
+            # connection per operation, none while a job waits. They hold
+            # nothing at rest, so no pool count sees them -- but each loop
+            # can ask for one per job it has in flight, and the sum is what
+            # the server has to survive. The ceilings are the effective
+            # ones, so a bound loop is counted at its real width.
+            # The worker executes agent runs too: the checkpointer's own
+            # psycopg pool holds connections no engine count can see --
+            # same line item the API process reports.
+            extra_connections=(
+                container.agent_checkpointer.max_connections
+                if container.agent_checkpointer is not None
+                else 0
+            ),
+            extra_label="Agent-Checkpointer",
+            transient_peak=sum(_effective_loop_widths(settings, loops)),
+            transient_label="Worker-Schleifen, NullPool",
+            # In the worker the run lane is sized by execution, not
+            # admission: RUN_MAX_CONCURRENT never fires here.
+            transient_knob="INQTRIX_WORKER_CONCURRENCY",
+        )
     )
     # Metrics holder BEFORE the claim loops start: jobs claimed in the
     # startup window (including the immediate crash-recovery drain)

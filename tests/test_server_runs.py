@@ -145,6 +145,37 @@ def test_submit_summary_includes_run_mode() -> None:
     assert store.get(summary["run_id"])["mode"] == "direct_llm"
 
 
+def test_submit_clips_the_question_column_visibly() -> None:
+    """The 500-char question bound must SHOW its cut (no silent caps).
+
+    The full text keeps living in request_payload for execution/replay;
+    the summary column is a display bound — a cut that hides itself made
+    a delegated assignment end mid-word on the gate card (P3.5)."""
+    store = _store(max_concurrent=1, max_queue_size=1)
+    long_question = "Erstelle ein sehr ausfuehrliches Memo. " * 30
+
+    summary = store.submit(
+        question=long_question,
+        stack_name="default",
+        work=lambda handle: handle.complete({"answer": "done"}),
+        request_payload={"question": long_question, "body": {}},
+    )
+
+    shown = summary["question"]
+    assert shown.endswith("…")
+    assert len(shown) == 501
+    assert shown[:-1] == long_question[:500]
+    _wait_until(lambda: store.get(summary["run_id"])["status"] == "completed")
+
+    short = store.submit(
+        question="kurz",
+        stack_name="default",
+        work=lambda handle: handle.complete({"answer": "done"}),
+    )
+    assert short["question"] == "kurz"
+    _wait_until(lambda: store.get(short["run_id"])["status"] == "completed")
+
+
 def test_submit_retries_run_id_collision(monkeypatch: pytest.MonkeyPatch) -> None:
     ids = iter(["run_duplicate", "run_duplicate", "run_unique"])
     monkeypatch.setattr(runs_module, "new_run_id", lambda: next(ids))

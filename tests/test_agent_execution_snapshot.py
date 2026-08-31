@@ -21,6 +21,7 @@ def test_build_run_snapshot_preserves_canonical_agent_execution() -> None:
         "consent_reason": "permission_policy",
         "tool_use_counts": {"web": 0, "knowledge": 2},
         "limits": {},
+        "tool_grants": [],
     }
 
     snapshot = build_run_snapshot(

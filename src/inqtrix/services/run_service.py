@@ -15,7 +15,12 @@ import time
 from typing import TYPE_CHECKING, Any, Callable
 
 from inqtrix.core.context import RunContext, RuntimeContext
-from inqtrix.core.results import RunRequest, SourcePolicy, WebRecency
+from inqtrix.core.results import (
+    CanvasContext,
+    RunRequest,
+    SourcePolicy,
+    WebRecency,
+)
 from inqtrix.execution_authority import AuthorizationRevoked, guard_provider_context
 from inqtrix.execution_failures import RunExecutionFailure
 from inqtrix.quota.models import QuotaDimension, QuotaSubject, consumed_tokens
@@ -276,6 +281,7 @@ def execute_run_request(
         authority_check()
     mode = str(getattr(run_request, "mode", "") or "")
     if mode in {"agent_kernel", "workspace_agent"}:
+        _prune_uncollected_agent_metrics(payload)
         if answer_publisher is None:
             raise RunExecutionFailure(
                 "answer_publication_unavailable",
@@ -306,6 +312,35 @@ def execute_run_request(
             last_message="completed",
         ),
     )
+
+
+#: Research metrics an AGENT run genuinely produces. Everything else in
+#: ``ResearchMetrics`` is computed by the research-desk graph, which an
+#: agent run never executes.
+_AGENT_REAL_METRIC_KEYS = frozenset(
+    {"elapsed_seconds", "prompt_tokens", "completion_tokens"}
+)
+
+
+def _prune_uncollected_agent_metrics(payload: dict[str, Any]) -> None:
+    """Drop research metrics an agent run never measured (P10-K6).
+
+    Agent results ride the shared research serialization, so every
+    research counter reached the wire as a hard zero: a mission with
+    sixteen knowledge searches and seven citations reported
+    ``total_queries: 0`` and ``total_citations: 0``. Zeros are a claim,
+    not an absence — omitting the keys says "not measured here", which
+    is the truth. What an agent run does measure (wall clock, tokens)
+    stays.
+    """
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, dict):
+        return
+    payload["metrics"] = {
+        key: value
+        for key, value in metrics.items()
+        if key in _AGENT_REAL_METRIC_KEYS
+    }
 
 
 def _effective_budget(run_cap: int, override: int | None) -> int:
@@ -397,6 +432,9 @@ class RunService:
         source_policy: dict[str, str] | SourcePolicy | None = None,
         web_recency: WebRecency | None = None,
         execution_directive: str = "",
+        canvas_context: "CanvasContext | None" = None,
+        report_requirement: str = "",
+        attached_reports: list[dict[str, Any]] | None = None,
         parent_task_id: str = "",
         parent_task_attempt: int = 0,
     ) -> dict[str, Any]:
@@ -453,6 +491,19 @@ class RunService:
             execution_directive: Optional one-shot server-enforced route
                 (``quick_web`` or ``knowledge_only``). Empty uses normal
                 routing.
+            report_requirement: Server-composed result requirement set
+                before the run (free text plus attached library rules,
+                each with its origin marker). Empty when none was set.
+            attached_reports: Research reports the user attached,
+                already resolved server-side to
+                ``{report_id, title, reference_count}``. Only the names
+                travel; the kernel tool fetches the bodies.
+            canvas_context: Router-validated canvas attachment of an
+                agent-kernel submission (open document + queued selection
+                comments). Persisted in the replay body, injected into
+                the kernel user message, frozen with the first segment's
+                checkpoint. Never inherited by child runs and never part
+                of summaries; ``None`` everywhere else.
             parent_task_id: Internal plan-task correlation for an agent
                 child. Persisted only in the durable replay payload so the
                 run store can project child progress onto the parent task.
@@ -511,6 +562,9 @@ class RunService:
             source_policy=normalized_source_policy,
             web_recency=web_recency,
             execution_directive=execution_directive,
+            canvas_context=canvas_context,
+            report_requirement=report_requirement,
+            attached_reports=tuple(attached_reports or ()),
         )
 
         def _work(handle: "RunHandle") -> None:
@@ -613,6 +667,29 @@ class RunService:
                 **(
                     {"execution_directive": execution_directive}
                     if execution_directive
+                    else {}
+                ),
+                **(
+                    {
+                        "canvas_context": canvas_context.model_dump(
+                            mode="json"
+                        )
+                    }
+                    if canvas_context is not None
+                    else {}
+                ),
+                **(
+                    {"report_requirement": report_requirement}
+                    if report_requirement
+                    else {}
+                ),
+                **(
+                    {
+                        "attached_reports": [
+                            dict(report) for report in attached_reports
+                        ]
+                    }
+                    if attached_reports
                     else {}
                 ),
                 **(

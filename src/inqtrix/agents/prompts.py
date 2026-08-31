@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from inqtrix.agents.plan_collections import CollectionCatalogEntry
+    from inqtrix.core.results import CanvasContext
 
 # -- workspace-agent phase prompts (M5, German like all LLM templates) ---- #
 
@@ -29,13 +30,25 @@ _AGENT_PLANNER_SYSTEM = (
     "praezise Task-Liste. Waehle immer das KLEINSTE ausreichende Werkzeug."
 )
 
+NO_MODEL_SOURCE_SECTIONS = (
+    "Erzeuge KEINEN eigenen Quellen-, Referenz- oder Linkabschnitt und "
+    "schreibe keine Roh-URLs in den Text — die Quellenleiste rendert "
+    "Inqtrix systemseitig aus dem Belegledger."
+)
+"""THE source-display boundary (F-P0-QUELLEN), word-identical on every
+answer surface: chat answer, memo section, kernel, deep revision and the
+quick-web lane. Sources appear exactly once — as the curated reference
+list the UI renders — never as model-authored sections or raw URLs.
+Same policy language as the research engine's ZITATIONS-REGELN."""
+
 _AGENT_SYNTHESIS_SYSTEM = (
     "Du schreibst praezise deutsche Memo-Abschnitte. Jede faktische "
     "Aussage traegt mindestens ein Belege-Label ([K1], [W2], ...). "
     "Nutze dafuer die kleinste hinreichende, nicht redundante Auswahl "
     "passender Belege (typischerweise 1-3 Labels pro faktischer Aussage "
     "oder Absatz), niemals pauschal alle verfuegbaren Labels. "
-    "Unbelegtes gehoert in den Abschnitt 'Offene Punkte'."
+    "Unbelegtes gehoert in den Abschnitt 'Offene Punkte'. "
+    + NO_MODEL_SOURCE_SECTIONS
 )
 # The shared rendering block is appended via agent_synthesis_system_prompt
 # (defined after _RENDERING_CAPABILITIES below) — one SSOT for what the
@@ -76,6 +89,8 @@ _AGENT_ANSWER_SYSTEM = (
     "(typischerweise 1-3 Labels pro Aussage oder Absatz), nicht alle "
     "verfuegbaren Labels; "
     "Unbelegtes wird als offener Punkt benannt. "
+    + NO_MODEL_SOURCE_SECTIONS
+    + " "
     + _RENDERING_CAPABILITIES
 )
 
@@ -187,7 +202,8 @@ def build_agent_analyst_prompt(
         "Leite daraus ab: (1) bereits bekannte Fakten mit Referenz und "
         "Frische-Einschaetzung, (2) Wissensluecken mit Art (missing/"
         "outdated/contradictory/insufficient_detail/unknown_scope), "
-        "empfohlenem Werkzeug und Suchvorschlaegen, (3) NUR solche "
+        "empfohlenem Werkzeug und eigenstaendigen, natuerlich formulierten "
+        "Evidenzfragen als Suchvorschlaegen, (3) NUR solche "
         "Nutzerfragen, ohne deren Antwort keine Planung moeglich ist — "
         "stelle KEINE Frage, deren Antwort unter 'Bereits geklaert' "
         "steht, auch nicht umformuliert — "
@@ -389,7 +405,9 @@ def _planner_web_rule(
         )
         return (
             "Plane Web-Luecken ausschliesslich als web_instant: eine "
-            "eigenstaendige Frage pro Task. web_research ist in diesem "
+            "eigenstaendige, natuerlich formulierte Evidenzfrage (mit "
+            "Gegenstand, Zeitraum und gesuchter Evidenz) pro Task. "
+            "web_research ist in diesem "
             f"Lauf nicht erlaubt. {budget}"
             "Falsifikation wird als separate "
             "Instant-Frage nach Gegenbelegen geplant."
@@ -417,7 +435,8 @@ def _planner_web_rule(
         "web_instant bleibt fuer einzelne Evidenzfragen geeignet. Fuer "
         "eine ausdruecklich mehrstufige Recherche darf web_research mit "
         f"profile={profile} verwendet werden.{ceiling} Seine queries sind "
-        "Leitfragen EINES Child-Auftrags; der Child plant seine internen "
+        "Leitfragen EINES Child-Auftrags — jede eigenstaendig und "
+        "natuerlich formuliert; der Child plant seine internen "
         "Suchaufrufe selbst."
     )
 
@@ -427,23 +446,57 @@ def agent_synthesis_system_prompt() -> str:
     return _AGENT_SYNTHESIS_SYSTEM + " " + _RENDERING_CAPABILITIES
 
 
-def _user_guidance_section(user_guidance: str) -> str:
-    """Decision-scoped report guidance from the plan gate (P6)."""
-    if not user_guidance.strip():
+def _output_requirements_section(
+    *, skills_block: str = "", user_guidance: str = ""
+) -> str:
+    """The ONE section stating how the result has to look.
+
+    Skills and the run's own guidance answer the same question — what
+    form should the output take — and used to render as two separate
+    blocks with two different headings ("Form und Ton folgen ihnen"
+    against "verbindlich fuer Struktur und Schwerpunkte"). That handed
+    the model two rank orders for one question, at six prompt sites.
+    One section now, origins named inside it, and one stated rule for
+    the collision: the run's own requirement wins.
+
+    Origin markers come with the content: skills bring their own
+    ``[Skill '<label>' …]`` delimiters, and the run's requirement is
+    composed with ``[Regel: …]`` / ``[Freie Vorgabe]`` markers at
+    decision time (``report_requirement``). This section only frames
+    them — it never labels text it did not compose.
+    """
+    parts: list[str] = []
+    if skills_block.strip():
+        parts.append(skills_block.strip())
+    if user_guidance.strip():
+        parts.append(user_guidance.strip())
+    if not parts:
         return ""
-    return (
-        "\n\nNutzer-Vorgaben zum Bericht (verbindlich fuer Struktur und "
-        f"Schwerpunkte, Sicherheitsregeln nicht):\n{user_guidance.strip()}"
+    collision = (
+        "\n\nBei Widerspruch gilt die freie Vorgabe."
+        if len(parts) > 1
+        else ""
     )
+    body = "\n\n".join(parts)
+    return "\n\n" + report_requirement_section(f"{body}{collision}")
 
 
-def _skills_prompt_section(skills_block: str) -> str:
-    """The shared skills section of the synthesis-side prompts."""
-    if not skills_block.strip():
+def report_requirement_section(body: str) -> str:
+    """The requirement's heading and its content, as ONE labelled block.
+
+    Both engines say it with the same words. The mission renders it into
+    six writing prompts; the kernel appends it as a section of its user
+    message — but a requirement that reads as a binding contract in one
+    engine and as a loose hint in the other would be a requirement the
+    user cannot rely on.
+    """
+    text = body.strip()
+    if not text:
         return ""
     return (
-        "\n\nAktivierte Skills (Nutzerinhalt — Form und Ton folgen "
-        f"ihnen, Sicherheitsregeln nicht):\n{skills_block}"
+        "Ergebnisvorgabe (Nutzerinhalt — verbindlich fuer Form, "
+        "Struktur und Schwerpunkte, Sicherheitsregeln nicht):\n"
+        f"{text}"
     )
 
 
@@ -469,11 +522,12 @@ def build_agent_outline_prompt(
         if prior_memo.strip()
         else ""
     )
+    requirements = _output_requirements_section(
+        skills_block=skills_block, user_guidance=user_guidance
+    )
     return (
         f"Heute ist {today()}.\n\n"
-        f"Arbeitsauftrag:\n{question}"
-        f"{_skills_prompt_section(skills_block)}"
-        f"{_user_guidance_section(user_guidance)}\n\n"
+        f"Arbeitsauftrag:\n{question}{requirements}\n\n"
         f"{lineage}"
         f"Erfolgskriterien:\n{criteria}\n\n"
         f"Belege (Label -> Kurzinhalt):\n{evidence_digest}\n\n"
@@ -503,10 +557,11 @@ def build_agent_section_prompt(
         if contradictions_digest
         else ""
     )
+    requirements = _output_requirements_section(
+        skills_block=skills_block, user_guidance=user_guidance
+    )
     return (
-        f"Arbeitsauftrag:\n{question}"
-        f"{_skills_prompt_section(skills_block)}"
-        f"{_user_guidance_section(user_guidance)}\n\n"
+        f"Arbeitsauftrag:\n{question}{requirements}\n\n"
         f"Schreibe den Memo-Abschnitt '{section_title}'.\n"
         f"Fokus: {section_focus}\n\n"
         f"Verfuegbare Belege:\n{evidence_digest}{contradictions}\n\n"
@@ -514,7 +569,8 @@ def build_agent_section_prompt(
         "faktische Aussage mit Belege-Label, woertliche Zitate in "
         "Anfuehrungszeichen. Zitiere die kleinste hinreichende, nicht "
         "redundante Auswahl (typischerweise 1-3 passende Labels pro "
-        "faktischer Aussage oder Absatz), niemals alle verfuegbaren Labels."
+        "faktischer Aussage oder Absatz), niemals alle verfuegbaren "
+        "Labels. " + NO_MODEL_SOURCE_SECTIONS
     )
 
 
@@ -576,12 +632,13 @@ def build_agent_answer_prompt(
         if contradictions_digest
         else ""
     )
-    skills = _skills_prompt_section(skills_block)
-    guidance = _user_guidance_section(user_guidance)
+    requirements = _output_requirements_section(
+        skills_block=skills_block, user_guidance=user_guidance
+    )
     return (
         f"Heute ist {today()}.\n\n"
-        f"Arbeitsauftrag:\n{question}{history_block}{memo_block}{skills}"
-        f"{guidance}\n\n"
+        f"Arbeitsauftrag:\n{question}{history_block}{memo_block}"
+        f"{requirements}\n\n"
         f"Verfuegbare Belege:\n{evidence_digest}{contradictions}\n\n"
         "Beantworte den Auftrag direkt und konversationell als Markdown "
         "(die Antwort erscheint als Chat-Nachricht): kompakt, auf den "
@@ -590,7 +647,8 @@ def build_agent_answer_prompt(
         "traegt ein Belege-Label; nutze die kleinste hinreichende, nicht "
         "redundante Auswahl (typischerweise 1-3 passende Labels pro "
         "Aussage oder Absatz), niemals alle verfuegbaren Labels. "
-        "Unbelegtes als offenen Punkt benennen, nicht erfinden."
+        "Unbelegtes als offenen Punkt benennen, nicht erfinden. "
+        + NO_MODEL_SOURCE_SECTIONS
     )
 
 
@@ -605,17 +663,28 @@ def build_agent_critic_prompt(
     precomputed_facts: str,
     *,
     user_guidance: str = "",
+    skills_block: str = "",
 ) -> str:
     """Critic verdict over the memo (Phase 9).
 
     ``user_guidance`` is the decision-scoped report guidance from the
     plan gate: the critic must judge compliance with it, so a memo that
     ignores the user's stated structure/audience is a finding.
+
+    ``skills_block`` is the same activated-skill text the writing
+    prompts receive. It belongs here for the same reason: a skill
+    states the form the user wants, and the writing prompts already
+    call it binding ("Form und Ton folgen ihnen"). Without it the
+    critic cannot see that instruction, so a memo could ignore an
+    attached skill and still pass — the skill would be a suggestion
+    while the guidance field is a contract.
     """
     criteria = "\n".join(f"- {c}" for c in success_criteria) or "- (keine)"
-    guidance = _user_guidance_section(user_guidance)
+    requirements = _output_requirements_section(
+        skills_block=skills_block, user_guidance=user_guidance
+    )
     return (
-        f"Memo:\n{memo_markdown}{guidance}\n\n"
+        f"Memo:\n{memo_markdown}{requirements}\n\n"
         f"Erfolgskriterien:\n{criteria}\n\n"
         f"Vorberechnete Fakten (deterministisch gemessen):\n"
         f"{precomputed_facts}\n\n"
@@ -706,8 +775,11 @@ _KERNEL_OUTPUT_ROUTING = (
     "diese Kriterien immer. Folgeauftraege, die sich auf ein bestehendes "
     "Dokument beziehen, AKTUALISIEREN genau dieses Dokument (write_canvas "
     "mit artifact_id und expected_revision aus dem Sitzungskontext) — im "
-    "Chat gibst du dann nur eine kurze Aenderungsnotiz. Bei Unklarheit, "
-    "welches Dokument gemeint ist: frage mit ask_user nach."
+    "Chat gibst du dann nur eine kurze Aenderungsnotiz. Gegenueber dem "
+    "Nutzer nennst du Canvas-Dokumente immer bei ihrem Dateinamen aus "
+    "dem Sitzungskontext (z. B. marktbericht.md), nie bei der "
+    "artifact_id — sie ist ein internes Werkzeugargument. Bei "
+    "Unklarheit, welches Dokument gemeint ist: frage mit ask_user nach."
 )
 
 _KERNEL_CLARIFICATION_RULES = (
@@ -727,12 +799,11 @@ _KERNEL_TOOL_DISCIPLINE = (
     "Werkzeugdisziplin: Nutze das kleinste Werkzeug, das den Zweck "
     "erfuellt — search_project_knowledge fuer internes Wissen, "
     "read_project_document fuer den Volltext eines Treffers, web_instant "
-    "fuer EINE gezielte externe Suche. An web_instant uebergibst du eine "
-    "praezise SUCHQUERY, keine Gespraechsfrage: die wichtigsten "
-    "Entitaeten und Schluesselwoerter, EIN Suchziel pro Aufruf, ohne "
-    "Fuellwoerter; einen Zeitbezug (Jahr, 'aktuell') nur bei "
-    "Aktualitaetsfragen. Diese Query wird dem Nutzer woertlich zur "
-    "Freigabe angezeigt und exakt so gesucht. "
+    "fuer EINE gezielte externe Suche. An web_instant uebergibst du GENAU "
+    "EINE eigenstaendige, natuerlich formulierte Evidenzfrage mit "
+    "Gegenstand, Region (falls relevant), Zeitraum und gesuchter Evidenz "
+    "— keine Keyword-Kette, kein Gespraechston. Diese Frage wird dem "
+    "Nutzer woertlich zur Freigabe angezeigt und exakt so gesucht. "
     "Die zusammenhaengende Antwort des Azure-Websuchdienstes bildet "
     "gemeinsam mit dessen Quellenliste den Websuchbeleg. Verwende diese "
     "Information vollstaendig; verwerfe sie nicht wegen einer unbekannten "
@@ -760,6 +831,11 @@ _KERNEL_TOOL_DISCIPLINE = (
     "Aenderungen an Editor-Dokumenten des Nutzers "
     "schlaegst du ausschliesslich ueber propose_editor_patch vor — sie "
     "werden nie direkt angewendet, der Nutzer prueft sie im Editor. "
+    "Vorher liest du das Dokument IMMER in diesem Lauf: "
+    "read_editor_document fuer den Volltext, search_editor_document fuer "
+    "byte-genaue Ankerstellen (uebernimm dessen find-/quote-Kandidaten "
+    "unveraendert) — ein Vorschlag ohne vorheriges Lesen wird abgelehnt, "
+    "und nach einem Revisionskonflikt liest du erneut. "
     "Vor der Ueberarbeitung eines bestehenden Canvas-Dokuments liest du "
     "mit read_canvas immer dessen aktuellen Inhalt, Revision und Belege. "
     "An write_canvas gibst du nur reference_ids weiter, die ein Inqtrix-"
@@ -771,13 +847,26 @@ _KERNEL_TOOL_DISCIPLINE = (
     "Wenn eine Provider-Antwort als naechsten Schritt genau eine Information "
     "anbietet, die der Nutzer bereits verlangt hat, darfst du dieses Angebot "
     "nicht an den Nutzer zurueckreichen: Fuehre den fehlenden Schritt mit "
-    "einer auf das Ergebnis gerichteten Query aus oder delegiere die "
+    "einer auf das Ergebnis gerichteten Evidenzfrage aus oder delegiere die "
     "mehrstufige Recherche. Suche dabei nach der fehlenden Antwort, nicht nur "
     "nach einer Seite oder Domain. "
     "Wird ein Werkzeug abgelehnt oder ist nicht verfuegbar, erkennst du "
     "das an und benennst die Luecke in der Antwort — erfinde niemals "
     "Ergebnisse. Bei Auftraegen mit drei oder mehr Schritten pflegst du "
-    "write_todos."
+    "write_todos. Bevor du einen Unterauftrag startest, stellst du die "
+    "Liste weiter: der Punkt, den der Unterauftrag erledigt, steht auf "
+    "in_progress, abgeschlossene Punkte auf completed. Eine Delegation "
+    "ist EIN Werkzeugaufruf, der den Lauf viele Minuten halten kann — "
+    "was die Liste vorher sagt, bleibt dem Nutzer bis zu ihrem Ende als "
+    "aktueller Stand stehen."
+)
+
+_KERNEL_CITATIONS = (
+    "Zitierweise: Im Chat- und Canvas-Text zitierst du faktische "
+    "Aussagen ausschliesslich mit den Belege-Labels der Werkzeugausgaben "
+    "([K1], [W2], ...), direkt hinter der gestuetzten Aussage; mehrere "
+    "Labels trennst du mit einem Leerzeichen ([K1] [W2], nie [K1][W2]). "
+    + NO_MODEL_SOURCE_SECTIONS
 )
 
 _KERNEL_RECENCY = (
@@ -786,9 +875,10 @@ _KERNEL_RECENCY = (
     "Auftragskontext). Nutze web_instant fuer alles Zeitkritische — "
     "aktuelle Ereignisse, Ergebnisse, Versionen, Preise, Formulierungen "
     "wie 'aktuell' oder 'neueste', und Zahlen, die sich seit deinem "
-    "Training geaendert haben koennten. Beantworte solche Fragen nie "
-    "allein aus dem Gedaechtnis; zeitlose Fakten brauchen dagegen keine "
-    "Suche."
+    "Training geaendert haben koennten; nimm den gemeinten Zeitraum "
+    "dabei ausdruecklich in die Evidenzfrage auf. Beantworte solche "
+    "Fragen nie allein aus dem Gedaechtnis; zeitlose Fakten brauchen "
+    "dagegen keine Suche."
 )
 
 _KERNEL_THINKING_VS_SPEAKING = (
@@ -859,11 +949,39 @@ def build_agent_kernel_system_prompt() -> str:
             _KERNEL_OUTPUT_ROUTING,
             _KERNEL_CLARIFICATION_RULES,
             _KERNEL_TOOL_DISCIPLINE,
+            _KERNEL_CITATIONS,
             _KERNEL_RECENCY,
             _KERNEL_THINKING_VS_SPEAKING,
             _KERNEL_LIMITS,
             _KERNEL_SECURITY,
         )
+    )
+
+
+def quick_web_answer_rules() -> str:
+    """Instruction head of the quick-web answer synthesis (F-P0-QUELLEN).
+
+    Lives here (not inline in the kernel algorithm) so the citation
+    policy is pinned word-identically against the other answer
+    surfaces: labels only, no model-authored source sections — the
+    curated Quellenleiste is rendered by Inqtrix from the ledger.
+    """
+    return (
+        "Beantworte die Nutzerfrage knapp und direkt in ihrer Sprache. "
+        "Verwende ausschliesslich das abgegrenzte Azure-Websuchergebnis "
+        "und die von Azure gelieferten Quellen. Die Provider-Antwort ist "
+        "das geerdete Ergebnis dieser Suche und darf einschliesslich "
+        "darin genannter Zahlen, Preise und Daten verwendet werden. "
+        "Erfinde nichts hinzu. Zitiere Aussagen ausschliesslich mit den "
+        "Quellen-Labels aus dem Quellenblock ([W1], [W2], ...), direkt "
+        "hinter der gestuetzten Aussage; mehrere Labels trennst du mit "
+        "einem Leerzeichen. " + NO_MODEL_SOURCE_SECTIONS + " "
+        "Wenn Azure mehrere Links einem gemeinsamen Antwortabschnitt "
+        "zuordnet, behaupte keine exklusive Eins-zu-eins-Herkunft. "
+        "Benenne echte Luecken oder Widersprueche offen, aber entferne "
+        "vorhandene Providerinformationen nicht allein wegen einer "
+        "Quellenklassifikation. Leite aus fehlenden Treffern niemals "
+        "Abwesenheit ab."
     )
 
 
@@ -881,8 +999,8 @@ def build_deep_review_prompt(
         "Pruefe ALLE Outputs gegen diese Rubrik und melde NUR konkrete, "
         "behebbare Maengel:\n"
         "1. Vollstaendigkeit: Beantwortet sie den Auftrag vollstaendig?\n"
-        "2. Belegbarkeit: Tragen faktische Aussagen Belege-Labels oder "
-        "Quellen, und ist Unbelegtes ehrlich als offen benannt?\n"
+        "2. Belegbarkeit: Tragen faktische Aussagen Belege-Labels, und "
+        "ist Unbelegtes ehrlich als offen benannt?\n"
         "3. Widersprueche: Sind Unsicherheiten und Gegenpositionen "
         "benannt, wo sie relevant sind?\n\n"
         "Jeder Befund zielt auf chat oder auf eine konkrete, im Bundle "
@@ -913,7 +1031,8 @@ def build_deep_revision_prompt(
         "zu aendernde artifact_ids mit ihrer EXAKTEN bisherigen Revision "
         "und dem vollstaendigen neuen Markdown. Behebe nur die genannten "
         "Maengel; Payloads und Beleg-Referenzen duerfen nicht veraendert "
-        "werden."
+        "werden. Zitiere weiterhin ausschliesslich mit Belege-Labels. "
+        + NO_MODEL_SOURCE_SECTIONS
     )
 
 
@@ -923,22 +1042,51 @@ def build_agent_session_context_sections(
     artifact_registry: tuple[dict, ...] | list[dict] = (),
     last_response_form: str = "",
     prior_evidence_count: int = 0,
+    collection_catalog: "Sequence[dict] | None" = None,
 ) -> str:
     """Render the shared K1-K4 session context for both agent engines."""
     sections: list[str] = []
     if history_block:
         sections.append(f"Bisheriger Verlauf der Sitzung:\n{history_block}")
     if artifact_registry:
+        # P9 (K4): documents lead with their derived file name so the
+        # model resolves "erweitere marktbericht.md" itself; diagnostics
+        # kinds carry no name and keep the plain rendering.
         lines = "\n".join(
-            f"- {item.get('title', '(ohne Titel)')} "
-            f"(artifact_id {item.get('artifact_id')}, Revision "
+            (
+                f"- {item['name']} — {item.get('title', '(ohne Titel)')} "
+                if item.get("name")
+                else f"- {item.get('title', '(ohne Titel)')} "
+            )
+            + f"(artifact_id {item.get('artifact_id')}, Revision "
             f"{item.get('revision')}, zuletzt durch "
             f"{item.get('updated_by')})"
             for item in artifact_registry
         )
         sections.append(
             "Vorhandene Canvas-Dokumente dieser Sitzung (fuer Updates "
-            f"artifact_id + Revision verwenden):\n{lines}"
+            "artifact_id + Revision verwenden; gegenueber dem Nutzer "
+            f"nennst du Dokumente beim Dateinamen):\n{lines}"
+        )
+    # P10-K3: the run's knowledge boundary, NAMED. Without it the kernel
+    # searched blind while its tool docstring promised a project-wide
+    # sweep the pinned scope contradicts. ``None`` means the catalog was
+    # unreadable — the block stays out rather than asserting an empty
+    # knowledge base.
+    if collection_catalog is not None:
+        listing = "\n".join(
+            f"- {entry.get('name', '')} -> {entry.get('collection_id', '')}"
+            f" ({entry.get('document_count', 0)} Dokumente)"
+            for entry in collection_catalog
+        ) or "- (keine Sammlung fuer diesen Lauf freigegeben)"
+        sections.append(
+            "Freigegebene Wissens-Sammlungen dieses Laufs (Name -> ID):\n"
+            f"{listing}\n"
+            "Regel: ohne collection_ids durchsucht "
+            "search_project_knowledge GENAU diese Freigabe; setze IDs nur "
+            "zum bewussten Verengen und ausschliesslich aus dieser Liste. "
+            "Ist die Liste leer, hat dieser Lauf KEIN Projektwissen — sage "
+            "das offen, statt weiter zu suchen."
         )
     if last_response_form:
         sections.append(
@@ -950,6 +1098,42 @@ def build_agent_session_context_sections(
             "unterschiedliche Belege in Canvas-Artefakten verfuegbar."
         )
     return "\n\n".join(sections)
+
+
+def build_canvas_context_section(context: "CanvasContext") -> str:
+    """The kernel user-message section for a canvas attachment (P4).
+
+    Trust split: the USER'S comment text is a first-class instruction
+    (typed in the composer, same trust as the question itself) and stays
+    outside the fence; the QUOTED document excerpts are canvas content —
+    potentially web-derived — and are fenced as data. Fencing the
+    comments would tell the model to ignore the very instructions it
+    must address.
+    """
+    lines = [
+        f"Angeheftetes Canvas-Dokument: {context.artifact_id} "
+        f"(Revision {context.revision}). Lies bei Bedarf den aktuellen "
+        "Inhalt mit read_canvas."
+    ]
+    if context.comments:
+        lines.append(
+            f"Der Nutzer hat {len(context.comments)} Kommentar(e) zu "
+            "markierten Stellen dieses Dokuments hinterlassen — gehe "
+            "nachweislich auf jeden ein:"
+        )
+        for index, comment in enumerate(context.comments, start=1):
+            excerpt = comment.quote
+            if comment.quote_before or comment.quote_after:
+                excerpt = (
+                    f"[davor: {comment.quote_before}]\n{comment.quote}\n"
+                    f"[danach: {comment.quote_after}]"
+                )
+            lines.append(
+                f"Kommentar {index} des Nutzers: {comment.comment}\n"
+                "Bezieht sich auf diesen Dokumentauszug (Daten):\n"
+                + untrusted_fence(excerpt, "canvas-auszug")
+            )
+    return "\n\n".join(lines)
 
 
 def build_kernel_user_message(
@@ -966,6 +1150,11 @@ def build_kernel_user_message(
     tier: str = "",
     skills_block: str = "",
     tool_directives_line: str = "",
+    canvas_context_section: str = "",
+    target_document_id: str = "",
+    report_requirement: str = "",
+    attached_reports: "Sequence[dict] | None" = None,
+    collection_catalog: "Sequence[dict] | None" = None,
 ) -> str:
     """The per-run user message: session context + assignment (K1-K5)."""
     # The run date leads every kernel turn so the model
@@ -978,6 +1167,7 @@ def build_kernel_user_message(
         artifact_registry=artifact_registry,
         last_response_form=last_response_form,
         prior_evidence_count=prior_evidence_count,
+        collection_catalog=collection_catalog,
     )
     if session_context:
         sections.append(session_context)
@@ -1030,7 +1220,54 @@ def build_kernel_user_message(
         )
     if skills_block:
         sections.append(skills_block)
+    if report_requirement:
+        # Set at submit time — the kernel has no plan gate, so this is
+        # its ONLY entry point for a result requirement. After the
+        # skills block, before the assignment: it is a requirement ON
+        # the assignment, not session context.
+        sections.append(report_requirement_section(report_requirement))
     if tool_directives_line:
         sections.append(tool_directives_line)
+    if attached_reports:
+        # NAME them, do not inline them. A real research report has a
+        # median of ~54k characters, so two of them would freeze ~107k
+        # characters into the first user message and ride along in every
+        # model turn of the loop. The registry line plus
+        # read_research_report is the same split the canvas registry
+        # already uses — and the tool is what imports the report's
+        # sources into this run's evidence ledger, which inlining could
+        # never do.
+        listed = "\n".join(
+            f"- {str(report.get('report_id') or '')}: "
+            f"{str(report.get('title') or '(ohne Titel)')}"
+            + (
+                f" ({int(report.get('reference_count') or 0)} Quellen)"
+                if report.get("reference_count")
+                else ""
+            )
+            for report in attached_reports
+        )
+        sections.append(
+            "Angehaengte Recherche-Berichte (der Nutzer hat sie diesem "
+            "Auftrag beigelegt; der Text steht NICHT hier — lies jeden "
+            "mit read_research_report, bevor du ihn verwendest):\n"
+            f"{listed}"
+        )
+    if canvas_context_section:
+        # Directly before the assignment: the attachment IS part of the
+        # current instruction, not session history.
+        sections.append(canvas_context_section)
+    if target_document_id:
+        # P7-E1: the attached editor document is the run's binding work
+        # target — the editor tools refuse every other document, and
+        # propose_editor_patch additionally requires a prior read.
+        sections.append(
+            "Ziel-Dokument im Editor: "
+            f"document_id={target_document_id}. Lies es mit "
+            "read_editor_document, finde exakte Ankerstellen mit "
+            "search_editor_document, und schlage Aenderungen "
+            "ausschliesslich an diesem Dokument mit propose_editor_patch "
+            "vor."
+        )
     sections.append(f"Auftrag:\n{question}")
     return "\n\n".join(sections)

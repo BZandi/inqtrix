@@ -299,6 +299,7 @@ export function detachProjectResourceGraph(
     agentCanvas: EMPTY_CANVAS_STATE,
     agentPlanDrafts: {},
     agentRuns: {},
+    agentSessionArtifacts: {},
     agentSessionGroupOrder: state.agentSessionGroupOrder.map((id) => (
       replace(maps.agentGroups, id)
     )),

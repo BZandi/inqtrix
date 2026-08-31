@@ -27,6 +27,8 @@ import {
 } from '@tiptap/y-tiptap'
 import { EditorSuggestionBlockCard, type EditorSuggestionBlockCardProps } from './EditorSuggestionBlockCard'
 import { SlashCommandExtension, type SlashCommandConfig } from './slashCommand'
+import { CodeBlockHighlightExtension } from './codeBlockHighlight'
+import { CodeBlockViewExtension } from './codeBlockView'
 
 export type CollaborationPresenceUser = {
   color: string
@@ -53,6 +55,9 @@ type CommentDecorationOptions = {
   teamCommentLabel?: string
   /** Localized config for the `/` slash command menu. Omit to disable the menu. */
   slash?: SlashCommandConfig
+  /** Localized labels for the code-block header (picker + copy). Omit to
+   * render code blocks without header chrome (schema/test contexts). */
+  codeBlockLabels?: import('./codeBlockView').CodeBlockViewLabels
 }
 
 export type CollaborationReviewDisplay = 'all' | 'final' | 'original' | 'simple'
@@ -1780,6 +1785,10 @@ export function createEditorExtensions(
     CommentDecorationExtension.configure(options),
     SuggestionDecorationExtension.configure(options),
     SyntaxMarkerRevealExtension.configure({ removeLabel: options.syntaxMarkerRemoveLabel ?? '' }),
+    CodeBlockHighlightExtension,
+    ...(options.codeBlockLabels
+      ? [CodeBlockViewExtension.configure({ labels: options.codeBlockLabels })]
+      : []),
     ...(options.slash ? [SlashCommandExtension.configure({ config: options.slash })] : []),
   ]
 }
@@ -1807,6 +1816,18 @@ export function serializeEditorFinalProjectionMarkdown(editor: Editor): string {
   return serializeEditorJson(editor.getJSON(), 'final')
 }
 
+/** FREMDE Markdown fuer den Editor aufbereiten: LLM-Vorschlaege, Einfuegen
+ * aus der Zwischenablage, Import. Wendet die LaTeX-Einfuhr-Regel an. */
 export function normalizeEditorMarkdownForTiptap(markdown: string) {
   return normalizeEditorMarkdown(markdown)
+}
+
+/** EIGENE, bereits gespeicherte Markdown fuer den Editor aufbereiten.
+ *
+ * Ohne Einfuhr-Regel: die Bedeutung war beim Schreiben entschieden. Wurde
+ * hier normalisiert, verwandelte sich der eigene escapte Klammertext
+ * (`\[Marke\]`) beim Laden in einen Formelblock und riss den Absatz
+ * auseinander — der naechste Speichervorgang schrieb den Schaden fest. */
+export function editorMarkdownForTiptap(markdown: string) {
+  return sanitizeSerializedEditorMarkdown(markdown)
 }

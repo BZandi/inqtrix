@@ -973,6 +973,78 @@ async def test_artifact_matrix_and_revisions(service, run_store, control_store):
 
 
 @pytest.mark.asyncio
+async def test_line_delta_and_rename_lockstep_postgres(
+    service, run_store, control_store
+):
+    """P9 on the REAL SQL paths: the upsert returns the write's line
+    delta (reads stay None), the batch CAS counts per row, and the
+    rename is metadata-only (no revision, no revision row)."""
+    run_id = _parked_agent_run(run_store)
+    created = await control_store.upsert_artifact(
+        run_id=run_id,
+        kind="deliverable",
+        session_id="sess-pg-p9",
+        title="Bericht",
+        status="ready",
+        content_markdown="eins\nzwei",
+        payload={},
+        refs=[],
+        updated_by="agent",
+        artifact_id="art_pg_p9",
+    )
+    assert (created.lines_added, created.lines_removed) == (2, 0)
+    updated = await control_store.upsert_artifact(
+        run_id=run_id,
+        kind="deliverable",
+        session_id="sess-pg-p9",
+        title="Bericht",
+        status="ready",
+        content_markdown="eins\ndrei\nvier",
+        payload={},
+        refs=[],
+        updated_by="agent",
+        artifact_id="art_pg_p9",
+        expected_revision=1,
+    )
+    assert (updated.lines_added, updated.lines_removed) == (2, 1)
+    read, _ = await control_store.get_artifact(run_id, "art_pg_p9")
+    assert read.lines_added is None and read.lines_removed is None
+
+    rows = await control_store.revise_session_artifacts_atomically(
+        run_id=run_id,
+        session_id="sess-pg-p9",
+        revisions=[
+            ArtifactBatchRevision(
+                artifact_id="art_pg_p9",
+                expected_revision=2,
+                content_markdown="eins\ndrei\nvier\nfuenf",
+            )
+        ],
+    )
+    assert (rows[0].lines_added, rows[0].lines_removed) == (1, 0)
+
+    renamed = await service.rename_artifact(
+        run_id=run_id,
+        artifact_id="art_pg_p9",
+        title="Bericht V2",
+        principal=None,
+    )
+    assert renamed.title == "Bericht V2"
+    assert renamed.revision == 3
+    row, revisions = await control_store.get_artifact(run_id, "art_pg_p9")
+    assert row.title == "Bericht V2"
+    assert row.revision == 3
+    assert len(revisions) == 3
+    with pytest.raises(ArtifactNotFound):
+        await service.rename_artifact(
+            run_id=run_id,
+            artifact_id="art_pg_unbekannt",
+            title="X",
+            principal=None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_revoked_editor_cannot_update_artifact_postgres(
     service, run_store, control_store
 ) -> None:

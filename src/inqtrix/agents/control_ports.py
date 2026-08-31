@@ -677,8 +677,12 @@ class ApprovalRecord:
             is fetched via its own endpoint).
         decision: The verb that resolved it (``approve``/``reject``/
             ``edit``), empty while pending.
-        decision_payload: The edited plan for ``edit`` decisions; empty
-            otherwise.
+        decision_payload: The edited plan/actions for ``edit`` decisions;
+            decision-scoped keys may ride it (``report_guidance`` on
+            plan gates, ``approval_scope: "run"`` on tool gates — a
+            plain approve-once stays ``{}`` so its replay identity is
+            unchanged). Part of replay identity: a retry with a
+            different payload conflicts.
         note: Optional free-text the decider attached.
         decided_by_user_id: Verified subject that decided.
         interrupt_key: Checkpoint correlation key for the M5 resume
@@ -779,6 +783,12 @@ class ArtifactRecord:
         refs: Evidence references backing the content (citation label ->
             source descriptor).
         created_at/updated_at: Unix seconds.
+        lines_added/lines_removed: Line delta of THIS write against the
+            previous revision, computed once at the write (P9) and
+            carried only on the record a write RETURNS — reads always
+            yield ``None`` (both stores, deliberately symmetric).
+            ``None`` also means "not counted" (size guard, or a write
+            path that does not count).
     """
 
     artifact_id: str
@@ -794,6 +804,33 @@ class ArtifactRecord:
     refs: tuple[dict[str, Any], ...] = ()
     created_at: float = 0.0
     updated_at: float = 0.0
+    lines_added: int | None = None
+    lines_removed: int | None = None
+
+
+def artifact_event_payload(record: ArtifactRecord) -> dict[str, Any]:
+    """Uniform ``artifact.created/updated`` payload of an agent write (P9).
+
+    ONE builder for every agent-side emitter (kernel write_canvas,
+    mission memo flush, deep-revision batch, answer publisher) so the
+    durable payloads never drift apart again: they all carry title and
+    updated_by, plus the write's line delta when the store counted it —
+    absent fields mean "honestly not counted", never zero. The user PUT
+    keeps its own deliberately kind-less payload (it must not chip).
+    """
+    payload: dict[str, Any] = {
+        "artifact_id": record.artifact_id,
+        "kind": record.kind,
+        "revision": record.revision,
+        "title": record.title,
+        "status": record.status,
+        "updated_by": record.updated_by,
+        "from_revision": record.revision - 1,
+    }
+    if record.lines_added is not None and record.lines_removed is not None:
+        payload["lines_added"] = record.lines_added
+        payload["lines_removed"] = record.lines_removed
+    return payload
 
 
 @dataclass(frozen=True)
@@ -1123,6 +1160,26 @@ class AgentControlStore(Protocol):
         Raises :class:`ArtifactNotFound`, :class:`ArtifactLocked` (status
         ``writing``), or :class:`ArtifactRevisionConflict` (revision CAS
         miss, carries the current revision).
+        """
+        ...
+
+    async def rename_artifact(
+        self,
+        *,
+        run_id: str,
+        artifact_id: str,
+        title: str,
+        authorize: Any,
+    ) -> ArtifactRecord:
+        """Metadata-only user rename (P9, K3): sets ``title`` +
+        ``updated_at`` and NOTHING else — no revision bump, no revision
+        row, so a rename never pollutes the content history or fakes a
+        change badge. Same authorization boundary as
+        :meth:`user_update_artifact`.
+
+        Raises :class:`ArtifactNotFound` or :class:`ArtifactLocked`
+        (status ``writing``). Title conflicts are last-write-wins by
+        design (the name is display, the id is identity).
         """
         ...
 

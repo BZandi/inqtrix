@@ -14,13 +14,14 @@ from dataclasses import replace
 
 from inqtrix.pagination import keyset_page
 from inqtrix.project.asset_records_ports import (
-    DEFAULT_ASSET_SECTION_SPECS,
     AssetDeletionInProgress,
     AssetGroup,
     AssetNotFound,
     AssetRecord,
     AssetSection,
     AssetUploadConflict,
+    DEFAULT_ASSET_SECTION_SPECS,
+    ensure_initial_upload_status,
     GroupNotFound,
     SectionNotFound,
 )
@@ -217,7 +218,13 @@ class MemoryAssetStore:
         origin, page_count, parse_status, parse_warning, text_truncated,
         size_bytes, server_file_id, parser_id=None, extracted_text, created_at,
         updated_at, created_by_user_id: uuid.UUID | None, workspace_id,
+        initial_upload_status: str = "ready",
     ) -> AssetRecord:
+        # Validate BEFORE touching the source authority: active_write with
+        # create_if_missing registers a lifecycle that has no rollback, so
+        # a garbage value must fall here -- same placement and error
+        # precedence as the Postgres backend.
+        ensure_initial_upload_status(initial_upload_status)
         guard = (
             self._source_authority.active_write(
                 SourceScope(
@@ -254,6 +261,7 @@ class MemoryAssetStore:
                     updated_at=updated_at,
                     created_by_user_id=created_by_user_id,
                     workspace_id=workspace_id,
+                    initial_upload_status=initial_upload_status,
                 )
         except SourceLifecycleConflict as exc:
             raise AssetDeletionInProgress(id) from exc
@@ -263,6 +271,7 @@ class MemoryAssetStore:
         origin, page_count, parse_status, parse_warning, text_truncated,
         size_bytes, server_file_id, parser_id=None, extracted_text, created_at,
         updated_at, created_by_user_id: uuid.UUID | None, workspace_id,
+        initial_upload_status: str = "ready",
     ) -> AssetRecord:
         if id in self._asset_tombstones:
             raise AssetDeletionInProgress(id)
@@ -325,7 +334,13 @@ class MemoryAssetStore:
         else:
             asset = AssetRecord(
                 id=id, created_at=created_at, created_by_user_id=created_by_user_id,
-                workspace_id=workspace_id, **mutable,
+                workspace_id=workspace_id,
+                # INSERT-only, mirroring the Postgres upsert exactly: the
+                # caller's intent decides the initial status; an existing
+                # row above keeps its stored one (replace() without
+                # upload_status in `mutable`).
+                upload_status=initial_upload_status,
+                **mutable,
             )
         self._assets[id] = asset
         return asset

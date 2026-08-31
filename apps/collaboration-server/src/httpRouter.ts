@@ -106,18 +106,35 @@ export class InternalHttpRouter {
         operation,
         status: mapped.reason,
       })
+      // Der urspruengliche Grund muss Log UND Antwort erreichen, sonst
+      // kann weder Betreiber noch Nutzer feststellen, warum abgelehnt wurde.
+      const upstream = mapped.upstreamReason && mapped.upstreamReason !== mapped.reason
+        ? { upstream_reason: mapped.upstreamReason }
+        : {}
+      // Die Korrelations-Id des Aufrufers, damit eine Ablehnung hier und die
+      // Zeile im API-Log nachweislich DASSELBE Ereignis sind statt nur
+      // ungefaehr dieselbe Sekunde. Fehlt sie, bleibt das Feld weg -- eine
+      // leere Id waere schlimmer als keine, weil sie zusammenfuehrt, was
+      // nicht zusammengehoert.
+      const correlation = correlationField(request)
       if (mapped.httpStatus >= 500) {
         this.logger.error('internal_http_operation_failed', {
           operation,
           reason: mapped.reason,
+          ...correlation,
+          ...upstream,
         })
       } else {
         this.logger.warn('internal_http_operation_rejected', {
           operation,
           reason: mapped.reason,
+          ...correlation,
+          ...upstream,
         })
       }
-      this.json(response, mapped.httpStatus, { error: { reason: mapped.reason } })
+      this.json(response, mapped.httpStatus, {
+        error: { reason: mapped.reason, ...upstream },
+      })
     }
   }
 
@@ -180,4 +197,35 @@ function requestTooLarge(): CollaborationError {
     closeCode: CloseCodes.messageTooLarge,
     httpStatus: 413,
   })
+}
+
+/** Die Korrelations-Id des Aufrufers als Logfeld -- oder gar nichts.
+ *
+ * Ohne mitgereichte Id lassen sich die Logzeilen eines Klicks nur ueber
+ * Zeitstempel raten, und bei zwei gleichzeitigen Nutzern gar nicht mehr.
+ * Die API setzt den Kopf seit `_correlation_headers`; hier wird er gelesen.
+ *
+ * Verbunden werden damit ZWEI Stationen, Gateway und Sidecar. Der Rueckweg
+ * dieses Dienstes zur internen API traegt die Id NICHT weiter -- siehe den
+ * Docstring auf der Python-Seite. Die Luecke ist benannt, nicht uebersehen.
+ *
+ * Ein fehlender oder leerer Kopf liefert KEIN Feld. Eine leere Id waere
+ * schlimmer als keine: sie sammelte alle unkorrelierten Zeilen unter
+ * demselben Wert und behauptete damit einen Zusammenhang. */
+export function correlationField(
+  request: IncomingMessage,
+): { request_id: string } | Record<string, never> {
+  const raw = request.headers['x-request-id']
+  // Node verwirft doppelte Koepfe dieses Namens NICHT, sondern fuegt sie mit
+  // ", " zu EINEM String zusammen -- ein Array kommt hier nie an. Haengt ein
+  // Ingress seine eigene Id an die der API, entstuende sonst ein Wert wie
+  // "7f3a…c1, mesh-9942", der gegen KEIN Log greppt: die Korrelation waere
+  // still falsch statt schlicht abwesend. Massgeblich ist der erste Wert,
+  // denn der stammt vom urspruenglichen Aufrufer.
+  const joined = Array.isArray(raw) ? raw[0] : raw
+  const first = typeof joined === 'string' ? joined.split(',', 1)[0] : undefined
+  const trimmed = first?.trim() ?? ''
+  // Gedeckelt, weil ein Kopf aus dem Netz kommt und ungebremst ins Log
+  // liefe; die Id des Gateways ist ein 32-stelliger Hex-String.
+  return trimmed ? { request_id: trimmed.slice(0, 128) } : {}
 }

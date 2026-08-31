@@ -228,6 +228,57 @@ final-confidence counts without echoing raw URLs or secrets.
 
 See [Iteration log](iteration-log.md) for the structured marker view and [Debugging runs](debugging-runs.md) for the typical recovery flows.
 
+## Worker claim safety markers
+
+The worker's durable-claim path emits two operator-relevant line families:
+
+- `Claim-Contract-Sonde: N Laeufe, im Mittel X ms, zusammen Y s seit
+  Prozessstart.` — cumulative cost of the full database-contract probe
+  (schema revision, role shape, RLS policy function). The probe runs at
+  worker start and periodically (coalesced, one shared guard across all
+  loops). It does NOT run per claimed job: the per-job protection is the
+  in-transaction schema fence below, so under a healthy process this
+  counter grows slowly regardless of job throughput. A rapidly growing
+  count or a rising mean indicates probe contention and is worth a look.
+- `Schema-Kopf hat sich unter dem Prozess bewegt — keine weiteren Claims.`
+  (log level ERROR) — the in-transaction fence (`assert_schema_head`,
+  first statement of every durable-claim transaction across the run,
+  indexing, deletion and upload stores) found the installed Alembic
+  revision differing from the packaged head. The claim rolled back, the
+  triggering queue entry stays unacked for an upgraded worker, and the
+  shared claim guard latches shut: every loop of the process stops
+  claiming. Recovery is deploying a worker image matching the installed
+  schema (or completing the migration); the process does not resume
+  claims on its own. This fence detects a COMPLETED cutover; a migration
+  still in flight carries the old revision and is governed by the
+  canonical migration workflow, which stops clients first.
+
+## API product-gate markers (`/readyz`)
+
+The API side of the same taxonomy: the readiness probe distinguishes a
+confirmed contract violation from a merely unreachable database and logs
+the product gate's decisions as three line families:
+
+- `readyz: bestaetigter Datenbank-Kontraktbruch — Produkt-Gate schliesst.`
+  (log level ERROR, per probe poll while the violation persists) — the
+  contract probe REACHED the database and found it violating the packaged
+  schema contract. Product routes gate closed immediately; integrity over
+  availability.
+- `readyz: Datenbank-Sonde unerreichbar (seit Ns) — Produkt-Gate behaelt
+  seinen Zustand (offen|geschlossen).` (log level WARNING) — the probe
+  could not reach the database, which proves nothing about the contract.
+  The gate keeps its last verdict instead of turning a transient blip
+  into a full-healthcheck-interval outage.
+- `readyz: Datenbank seit Ns durchgehend unerreichbar — Produkt-Gate
+  schliesst (Integritaet vor Verfuegbarkeit).` (log level ERROR, once at
+  the transition) — the keep-state window is bounded (120 s): after
+  sustained unreachability the gate fails closed until a probe confirms
+  a healthy contract again.
+
+The gate's current verdict is also visible without log access: the
+`/readyz` payload carries a `database_contract` field
+(`ok | unavailable | violation | skipped`).
+
 ## The `force=False` rule for the server
 
 `create_app(...)` and `create_multi_stack_app(...)` call `configure_logging(..., force=False)`. This preserves the example-script configuration when a user starts uvicorn from a script that already configured the `inqtrix` file handler. If you build your own bootstrap path, preserve that invariant so your file handler is not replaced by a later server default.

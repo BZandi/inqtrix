@@ -58,3 +58,16 @@ prompt_templates = Table(
     ),
     Index("ix_prompt_templates_owner", "tenant_id", "owner_user_id"),
 )
+
+prompt_template_seed_markers = Table(
+    "prompt_template_seed_markers",
+    prompt_template_metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("user_id", UUID(as_uuid=True), primary_key=True),
+    Column("seeded_at", Float, nullable=False),
+)
+"""One row per (tenant, user): the stock prompts were offered exactly
+once. Claimed atomically WITH the template inserts (revision 0082), so a
+deleted default stays deleted and concurrent first listings cannot
+double-seed."""
+

@@ -103,10 +103,17 @@ expand the permission vocabulary of other resource types. Workspace roles do
 not imply resource rights, and files are owner-bound. Services re-check the
 resource owner, active user, current share, permission, and optional
 common-workspace restriction at the access boundary.
-Long-running work repeats those checks at safepoints, and run, indexing, and
-user SSE streams re-check immediately before each data frame. This bounds a
-revocation without claiming that bytes already sent to a browser or an
-external provider can be recalled.
+Long-running work repeats those checks at safepoints. The run and indexing
+SSE streams gate every data frame and quiet keepalive on a commit-ordered
+per-user authorization generation: every permission-relevant mutation
+(share change, workspace membership, user disable, password reset, session
+deletion, PAT revocation) advances it inside its own transaction, and a
+moved value re-runs the full authorization chain before the next frame.
+Session or PAT EXPIRY writes no mutation, so a bounded time ceiling (well
+below a minute) re-runs the full chain on time alone — that ceiling is the
+revocation bound for expiry. The per-user event stream re-checks before
+each data frame as before. None of this claims that bytes already sent to
+a browser or an external provider can be recalled.
 
 Postgres mutations that combine authorization, a resource write, audit, and
 cache invalidation perform them in one transaction. Security invariants use

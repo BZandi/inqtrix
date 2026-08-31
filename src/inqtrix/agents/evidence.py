@@ -307,16 +307,33 @@ def run_sufficiency_judgement(
     model: str | None,
     reasoning_effort: str | None,
     timeout: float,
+    clarified_context: str = "",
 ) -> StructuredOutcome:
-    """The fast-tier three-way coverage verdict (gate semantics)."""
+    """The fast-tier three-way coverage verdict (gate semantics).
+
+    ``clarified_context`` carries what the user already answered when the
+    agent asked back. Without it the judge weighs the evidence against
+    the ORIGINAL wording and reports a gap the user has long since
+    closed — observed live: after naming both options, the verdict still
+    read "da keine zwei konkreten Optionen genannt sind", and the run
+    kept searching a goal it had been given.
+    """
     criteria = "\n".join(f"- {c}" for c in success_criteria) or "- (keine)"
+    clarified = (
+        f"Bereits vom Nutzer praezisiert:\n{clarified_context.strip()}\n\n"
+        if clarified_context.strip()
+        else ""
+    )
     return structured_call(
         llm,
         prompt=(
             f"Erfolgskriterien:\n{criteria}\n\n"
+            f"{clarified}"
             f"Vorliegende Belege:\n{evidence_digest}\n\n"
             "Beurteile die Abdeckung: covered, partial oder uncovered, "
-            "plus die Kriterien ohne ausreichende Belege."
+            "plus die Kriterien ohne ausreichende Belege. Was der Nutzer "
+            "bereits praezisiert hat, gilt als gegeben und darf NICHT als "
+            "fehlend gemeldet werden."
         ),
         model_cls=SufficiencyJudgement,
         node="agent_sufficiency",

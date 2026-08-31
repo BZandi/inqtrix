@@ -43,6 +43,17 @@ describe('openCanvasTab (user)', () => {
     )
   })
 
+  it('keys a document by its artifact alone (P4 — anchors move)', () => {
+    // The same session document under a NEW run anchor must land in the
+    // SAME tab: an artifact update re-parents its run_id server-side,
+    // and a runId in the key split one document across dead tabs.
+    expect(canvasTabKey(DOC)).toBe('document:a1')
+    expect(canvasTabKey({ ...DOC, runId: 'r2' })).toBe(canvasTabKey(DOC))
+    const first = openCanvasTab(EMPTY_CANVAS_STATE, DOC, 'user')
+    const rerouted = openCanvasTab(first, { ...DOC, runId: 'r2' }, 'user')
+    expect(rerouted.tabs).toHaveLength(1)
+  })
+
   it('opens a new pinned tab, focuses it and pins follow-mode', () => {
     const state = openCanvasTab(EMPTY_CANVAS_STATE, PLAN, 'user')
     expect(state.open).toBe(true)

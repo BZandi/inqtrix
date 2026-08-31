@@ -234,8 +234,15 @@ class RunStorePort(Protocol):
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
+        stream: bool = True,
     ) -> RunSubscriptionPort:
-        """Event subscription with stored replay plus live tail."""
+        """Event subscription with stored replay plus live tail.
+
+        ``stream=False`` requests a one-shot replay read (the JSON
+        polling fallback): identical visibility semantics, but no live
+        tail — implementations must not register the subscriber or
+        count it as a stream viewer.
+        """
         ...
 
     def owner_user_id(self, run_id: str) -> uuid.UUID | None:

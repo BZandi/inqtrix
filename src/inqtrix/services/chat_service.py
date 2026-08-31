@@ -32,6 +32,7 @@ from inqtrix.urls import sanitize_error
 if TYPE_CHECKING:
     from inqtrix.auth.principal import Principal
     from inqtrix.core.algorithms import AlgorithmRegistry
+    from inqtrix.server.execution import ExecutionLanes
 
 log = logging.getLogger("inqtrix")
 
@@ -65,6 +66,7 @@ class ChatService:
         resolved: ResolvedAgentContext,
         chat_agent_settings: AgentSettings,
         semaphore: asyncio.Semaphore,
+        lanes: "ExecutionLanes",
         principal: "Principal | None" = None,
         cancel_event: "threading.Event | None" = None,
     ) -> JSONResponse | dict[str, Any]:
@@ -77,6 +79,9 @@ class ChatService:
             resolved: Stack/override/mode resolution for this request.
             chat_agent_settings: Settings after the direct-chat
                 question-length adjustment.
+            lanes: Named thread lanes; the AI call runs on the lane
+                sized to match *semaphore*, so an admitted request never
+                waits for a thread.
             semaphore: The shared concurrency limiter; held for the
                 duration of the agent execution.
             principal: Verified request identity, threaded into the
@@ -119,7 +124,7 @@ class ChatService:
             try:
                 agent_result = await asyncio.wait_for(
                     loop.run_in_executor(
-                        None,
+                        lanes.ai,
                         chat_thread_call(
                             partial(
                                 algorithm.run,

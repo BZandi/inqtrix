@@ -695,7 +695,39 @@ reference. The knobs you will reach for most:
 | `postgres.enabled`, `qdrant.enabled`, `valkey.enabled`, `s3.enabled` | `false` | Bundle a demo backing service in-cluster (`s3.enabled` = MinIO object store). Each enabled service requires an explicit credential; no `change-me` fallback is rendered. qdrant/valkey/s3 are OpenShift-capable; postgres is vanilla-k8s only. |
 | `valkey.engine` | `valkey` | Engine of the bundled broker (`valkey` or `redis`); selects the server/CLI binaries. A foreign engine must bring its own pinned `valkey.image`. See [Queue broker](#queue-broker). |
 | `postgres.enabled` (side effect) | `false` | Also **derives** `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY`: `true` renders `bundled_legacy` (the image's superuser login), `false` renders `restricted` (your own unprivileged login). With an external database, `postgres.auth.*` is ignored entirely. See [Bundled versus external databases](database-migrations.md#bundled-versus-external-databases). |
+| `api.resources`, `worker.resources` | `250m` / `768Mi` request, `2` / `2Gi` limit | Sized for the shipped run cap. At a hundred concurrent runs the api sits around 620 MB and the worker around 700 MB resident, so a smaller memory request would leave each pod burstable at its own design load and first in line under node pressure. CPU stays at `250m` because that same load draws roughly a quarter of a core: a research run spends its thread waiting on a provider, not computing. Lower `MAX_CONCURRENT` / `RUN_MAX_CONCURRENT` before lowering these. |
+| `web.maxUpstreamConnections` | *(unset)* | Per-worker ceiling for the gateway's pooled backend connections (`INQTRIX_MAX_UPSTREAM_CONNECTIONS`). Unset keeps the gateway's built-in default — deliberately not restated in the chart, one source of truth. A typed value because the web pod has **no** `envFrom`: `config:`/`extraConfig:` never reach it. Values below `1` fail the render. Every open SSE stream holds one upstream connection for its whole duration; exhaustion is a `503` naming the variable. |
+| `postgres.maxConnections` | `300` | Bundled demo database only, rendered as `-c max_connections=...`. The image default of 100 does not cover the shipped run cap: run threads open a connection per database operation, and an API plus a worker each add their own pooled budget, both reported at startup. The 300 carries headroom for that sum; it is an engineering estimate, not a figure measured at the run cap. Every connection costs memory, and `postgres.resources` is sized for this value — raise them together. A value below `1` fails the render rather than the container start. Ignored with an external database — that ceiling belongs to whoever runs it. |
 | `postgres.auth.username`, `postgres.auth.database` | `inqtrix` | Bundled demo database only. The username becomes the image's `POSTGRES_USER`, which PostgreSQL creates as a superuser owning every object; the chart builds `INQTRIX_DATABASE_URL` from it. No Inqtrix role name is fixed — external deployments choose their own. |
+
+### Chart-derived environment variables
+
+The chart computes the following ConfigMap keys itself. A deployment that
+**bypasses the chart** (raw manifests, its own templates) must set them
+directly — this is the complete list, with the condition each one appears
+under and whether an explicit `config:`/`extraConfig:` value may override
+it. Merge priority is `config:` > `extraConfig:` > derived, so an explicit
+value wins wherever overriding is allowed at all.
+
+| Key | Derived when | Derived value | Override allowed? |
+| --- | --- | --- | --- |
+| `INQTRIX_OBJECT_STORE_BACKEND` | always | `local`, or `s3` when `s3.enabled` | yes when `s3.enabled=false` — e.g. to point at an external S3. With `s3.enabled=true` the render fails: the key is part of the bundled-MinIO refusal list, so disable the bundled MinIO first when migrating to an external S3. |
+| `INQTRIX_REPLICA_COUNT` | always | `api.replicaCount` (or `autoscaling.maxReplicas`) + `worker.replicaCount` when the worker is enabled | **no — the render fails.** Too low is caught by the chart's local-store guard, but too high would pass the chart and then crash-loop every api pod at startup via the app-side guard. |
+| `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY` | always | `bundled_legacy` with the bundled Postgres, else `restricted` | yes, but doing so waives a guard — see [Database migrations](database-migrations.md) |
+| `INQTRIX_PUBLIC_BASE_URL` | ingress or Route with a host | scheme + host of the chart-owned edge | yes — explicitly supported for edges the chart does not own |
+| `INQTRIX_TRUSTED_PROXY_HOPS` | chart-owned ingress/Route | `2` | yes |
+| `INQTRIX_KNOWLEDGE_ENABLED`, `INQTRIX_VECTOR_BACKEND`, `INQTRIX_QDRANT_URL` | `qdrant.enabled` | `true` / `qdrant` / in-cluster service URL | yes |
+| `INQTRIX_QUEUE_BACKEND` | `valkey.enabled` **and** `worker.enabled` | `valkey` | yes |
+| `INQTRIX_S3_AUTH_MODE`, `INQTRIX_S3_ENDPOINT_URL`, `INQTRIX_S3_BUCKET`, `INQTRIX_S3_ADDRESSING_STYLE`, `INQTRIX_S3_BUCKET_PROVISIONING` | `s3.enabled` | bundled-MinIO topology | **no — the render fails**; the bundled topology is derived from `s3.*` |
+| `INQTRIX_S3_CA_BUNDLE` | `s3.caBundle.*` set | the configured mount path | n/a (driven by its own values keys) |
+| `INQTRIX_METRICS_ENABLED`, `INQTRIX_WORKER_METRICS_PORT` | `metrics.enabled` | `true` / `metrics.workerPort` | yes |
+| `INQTRIX_COLLABORATION_ENABLED`, `INQTRIX_COLLABORATION_HTTP_URL`, `INQTRIX_COLLABORATION_WS_URL` | `collaboration.enabled` | `true` / in-cluster service URLs | yes |
+
+Note the pod-scope asymmetry: api and worker mount the **same** ConfigMap,
+so every key lands on both pods, while some govern only one process — see
+[Who reads a variable](../configuration/settings-and-env.md#who-reads-a-variable--and-how-to-set-it-yourself).
+The web pod mounts **none** of it (no `envFrom`); its knobs are typed
+values (`web.maxUpstreamConnections`) or `web.extraEnv`.
 
 ## Queue broker
 
@@ -939,7 +971,7 @@ preserve the stop -> one-shot job -> readiness -> start ordering. Manual
 | Pod `CrashLoopBackOff` with `Read-only file system: 'logs'` | `INQTRIX_LOG_ENABLED=true` under the read-only root filesystem | Logs already go to container stdout (captured by the cluster). Leave file logging off; the chart mounts an ephemeral `/app/logs` so the flag does not crash, but stdout is the durable sink. |
 | `helm install` hangs on the migrate hook | The database is unreachable from the cluster | Check `kubectl -n inqtrix logs job/inqtrix-migrate`; fix connectivity/credentials. |
 | Migration fails with SQLSTATE `28000` / `inqtrix.tenant_id is not set` | A normal managed-PostgreSQL role touched a forced-RLS table, or the custom chart reused the runtime credential | Configure the migration-only Secret and explicit `bypass`/`owner` mode; do not set a tenant env variable. See [Database migrations](database-migrations.md). |
-| `/readyz` says database unavailable and product routes return `database_not_ready` | New runtime image is running against an old schema, cannot `SET ROLE`, or the effective role is privileged | Inspect the failed migration Job and role grants. Do not bypass readiness or start workers until the contract passes. |
+| `/readyz` says database unavailable and product routes return `database_not_ready` | Confirmed contract break (old schema, `SET ROLE` failure, privileged role) or the boot-time check never passed. Check the readyz body's `database_contract` field: `violation` is a confirmed break; `unavailable` is mere unreachability, which keeps product routes serving until it persists past the bounded keep-open window | Inspect the failed migration Job and role grants. Do not bypass readiness or start workers until the contract passes. |
 | `runtime session login must be LOGIN NOSUPERUSER NOBYPASSRLS …` | `INQTRIX_DATABASE_URL` uses the external database's admin account | Create the unprivileged runtime login from [step 0](#step-2-scenario-c-production-with-an-external-database-vanilla-kubernetes). Do **not** set `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY=bundled_legacy` to silence it — that runs the app as a database superuser. |
 | Migration Job: `migration role requires USAGE and CREATE on the active schema` | The Job is using the runtime login (migration Secret missing, misnamed, or a custom chart reused the runtime Secret) | Check `migrations.databaseSecret.name`; it must differ from the runtime Secret and carry the migration login. |
 | Migration Job: `fresh installation requires ADMIN OPTION on the pre-created inqtrix_app role` | The application role exists but was not granted to the migration login with `ADMIN OPTION` | `GRANT inqtrix_app TO <migration-login> WITH ADMIN OPTION;` as an administrator. |

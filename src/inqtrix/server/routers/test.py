@@ -92,6 +92,10 @@ def build_router(container: "AppContainer") -> APIRouter:
         loop = asyncio.get_running_loop()
         try:
             result = await asyncio.wait_for(
+                # Deliberately the shared pool, not the AI lane: this
+                # diagnostic route passes no admission gate, so counting it
+                # against a lane sized from that gate would let it displace
+                # the request path it exists to inspect.
                 loop.run_in_executor(
                     None,
                     partial(

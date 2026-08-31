@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentSessionRecord } from './model'
+import { DERIVED_AGENT_SESSION_UPDATED_AT } from './model'
 import {
   agentSessionMetadataFromJson,
   agentSessionFingerprint,
+  persistableAgentSessionsInOrder,
   serverAgentSessionFingerprint,
   serverAgentSessionPayload,
 } from './agentSessionSync'
@@ -138,5 +140,38 @@ describe('agent session model stickiness (wire)', () => {
       source_policy: { web: 'available', knowledge: 'available' },
     })))
     expect(withTier).not.toBe(without)
+  })
+})
+
+describe('persistable sessions (G1 fabrication fence)', () => {
+  const session = (overrides: Record<string, unknown> = {}) => ({
+    id: 's1',
+    title: 'Titel',
+    groupId: null,
+    createdAt: '2026-08-27T10:00:00.000Z',
+    updatedAt: '2026-08-27T10:00:00.000Z',
+    runIds: [],
+    sourcePolicy: { knowledge: 'available' as const, web: 'available' as const },
+    ...overrides,
+  })
+
+  it('never admits an untouched fabrication to the persistence API', () => {
+    // A record fabricated from a run summary carries the epoch stamp —
+    // pushing it once resurrected a question-derived title over the
+    // stored one (F-P4-TITLE2).
+    const sessions = {
+      derived: session({
+        id: 'derived',
+        updatedAt: DERIVED_AGENT_SESSION_UPDATED_AT,
+      }),
+      real: session({ id: 'real' }),
+      shared: session({ id: 'shared', persistable: false }),
+    }
+    const admitted = persistableAgentSessionsInOrder(sessions, [
+      'derived',
+      'real',
+      'shared',
+    ])
+    expect(admitted.map((item) => item.id)).toEqual(['real'])
   })
 })

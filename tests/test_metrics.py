@@ -11,8 +11,10 @@ here as a stale zero.
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
+import time
 
 import pytest
 
@@ -549,3 +551,112 @@ def test_map_cancellable_plain_path_cancels_queued_on_failure():
             release.set()
     # ex.map parity: the queued remainder was cancelled, not executed.
     assert len(executed) < 8
+
+
+class _Captured(logging.Handler):
+    """Collect records straight off the logger.
+
+    The application logger does not propagate to root, so the usual capture
+    fixture sees nothing; attaching here reads what actually gets emitted.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def _scrape_reports(handler: _Captured) -> list[logging.LogRecord]:
+    return [r for r in handler.records if "Prometheus-Scrape" in str(r.msg)]
+
+
+def test_slow_scrape_names_which_side_was_slow(monkeypatch):
+    """A slow scrape must say whether it waited for a thread or for work.
+
+    Both causes look identical from outside — the client sees one duration.
+    Without the split an operator cannot tell a contended thread pool from a
+    slow database, and the two need opposite remedies.
+    """
+    # The threshold decides whether the split is worth reporting; zero makes
+    # every scrape report so the accounting itself can be checked.
+    monkeypatch.setattr(metrics_module, "_SLOW_SCRAPE_SECONDS", 0.0)
+    handler = _Captured()
+    logger = logging.getLogger("inqtrix")
+    logger.addHandler(handler)
+    try:
+        with make_contract_client(
+            server_settings=ServerSettings(metrics_enabled=True)
+        ) as client:
+            assert client.get("/metrics").status_code == 200
+    finally:
+        logger.removeHandler(handler)
+
+    reported = _scrape_reports(handler)
+    assert reported, "a slow scrape must be explained, not just be slow"
+    total, waited, worked = reported[-1].args
+    # The halves must account for the whole, or the split is decorative.
+    assert abs((waited + worked) - total) < 1e-6
+    assert waited >= 0.0 and worked > 0.0
+
+
+def test_scrape_split_can_see_a_starved_pool(monkeypatch):
+    """The instrument must be able to SEE thread starvation, not report zero.
+
+    An always-zero wait reading would make a healthy pool indistinguishable
+    from a broken probe. This occupies the shared pool for a known interval
+    and requires the split to blame the wait rather than the collection.
+    """
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    import httpx
+
+    monkeypatch.setattr(metrics_module, "_SLOW_SCRAPE_SECONDS", 0.0)
+    handler = _Captured()
+    logger = logging.getLogger("inqtrix")
+    logger.addHandler(handler)
+
+    hold_for = 0.5
+
+    async def scenario() -> int:
+        loop = asyncio.get_running_loop()
+        pool = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(pool)
+        occupied = threading.Barrier(2, timeout=10)
+
+        def hold() -> None:
+            occupied.wait()
+            time.sleep(hold_for)
+
+        held = loop.run_in_executor(pool, hold)
+        # Releasing the barrier from here puts the worker inside hold(), so
+        # the single slot is taken for the next hold_for seconds.
+        occupied.wait()
+
+        with make_contract_client(
+            server_settings=ServerSettings(metrics_enabled=True)
+        ) as client:
+            app = client.app
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://metrics.test"
+        ) as request_client:
+            response = await request_client.get("/metrics")
+        await held
+        pool.shutdown(wait=False)
+        return response.status_code
+
+    try:
+        assert asyncio.run(scenario()) == 200
+    finally:
+        logger.removeHandler(handler)
+
+    reported = _scrape_reports(handler)
+    assert reported
+    _total, waited, worked = reported[-1].args
+    assert waited > worked, (
+        f"a scrape queued behind a full pool must blame the wait "
+        f"(waited={waited:.3f}s, worked={worked:.3f}s)"
+    )

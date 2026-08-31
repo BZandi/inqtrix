@@ -121,3 +121,39 @@ def test_strict_thread_delete_verifies_the_checkpoint_is_absent() -> None:
 
     saver.remaining = None
     handle.delete_thread_strict("run_1")
+
+
+def test_pool_size_flows_from_settings_to_the_handle() -> None:
+    """One source, three displays: the pool ceiling must come from
+    INQTRIX_AGENT_CHECKPOINTER_POOL_SIZE, not from a class literal."""
+    settings = Settings(
+        server=ServerSettings(public_base_url=""),
+        storage=StorageSettings(
+            backend="postgres",
+            database_url="postgresql+asyncpg://u:p@db:5432/inqtrix",
+        ),
+        auth=AuthSettings(mode="none"),
+        agent_platform=AgentPlatformSettings(checkpointer_pool_size=9),
+    )
+    handle = build_checkpointer_handle(settings)
+    assert handle is not None
+    assert handle.max_connections == 9
+    handle.close()
+
+
+def test_pool_size_rejects_a_nonpositive_value() -> None:
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        AgentPlatformSettings(checkpointer_pool_size=0)
+
+
+def test_volatile_handle_declares_zero_server_connections() -> None:
+    """An InMemorySaver opens no server connections; the attribute must
+    say so instead of inheriting the durable default."""
+    handle = build_checkpointer_handle(
+        _memory_settings(enabled=True, allow_volatile=True)
+    )
+    assert handle is not None
+    assert handle.durable is False
+    assert handle.max_connections == 0

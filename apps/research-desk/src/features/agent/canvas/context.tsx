@@ -1,10 +1,13 @@
 import { createContext, useContext } from 'react'
-import type { MutableRefObject } from 'react'
 
 import type { ClientOptions } from '@/api/inqtrixClient'
+import type { KnowledgeDataSource } from '@/features/knowledge/types'
 import type { CanvasViewDescriptor } from '@/features/canvas/types'
 import type { FileAssetRecord } from '@/features/project/types'
 import type { AgentRunRecord } from '../model'
+import type { AgentSessionArtifactIndex } from '../model'
+import type { CanvasSaveRegistry } from './saveRegistry'
+import type { ReportRuleOption } from '../plan/PlanReviewBody'
 import type { PlanSourceInfo } from '../plan/sourceLabel'
 import type { AgentPlanDraft } from '../plan/usePlanApproval'
 import type {
@@ -12,7 +15,10 @@ import type {
   AgentTaskCancelWire,
   AgentTaskResultWire,
 } from '../types'
-import type { ArtifactSaveResult } from '../useAgentControlApi'
+import type {
+  ArtifactRenameResult,
+  ArtifactSaveResult,
+} from '../useAgentControlApi'
 
 /**
  * Data plane of the agent canvas views. A React context (not per-render
@@ -31,6 +37,10 @@ export type AgentCanvasContextValue = {
     | { kind: 'conflict'; currentRevision: number | null }
   >
   clientOptions: ClientOptions | null
+  /** Knowledge document reader for the K-evidence view (P10-K5): the
+   * same reader the Knowledge Desk uses, so "verify the source" is one
+   * experience across desks. */
+  knowledgeDataSource: KnowledgeDataSource
   cancelTask: (
     runId: string,
     taskId: string,
@@ -67,22 +77,62 @@ export type AgentCanvasContextValue = {
   /** Re-flags the run's plan as stale so the control hook refetches it —
    * the plan view's on-open trigger (rows stay the truth, rule R1). */
   requestPlanRefresh: (runId: string) => void
-  /** Registered by the document view while an edit is pending; the
-   * composer awaits it before a follow-up submit (plan §5.4 flush rule). */
-  pendingSaveRef: MutableRefObject<(() => Promise<void>) | null>
+  /** Pending canvas saves keyed by artifact; the composer flushes ALL
+   * of them before any submit — including one that answers a gate
+   * (plan §5.4 flush rule; P4 registry fix). */
+  saveRegistry: CanvasSaveRegistry
   planDrafts: Record<string, AgentPlanDraft>
   /** Collection titles + vector-backend label for the plan view's
    * per-task source line (same data plane as the timeline card). */
   planSource: PlanSourceInfo
+  /** Library rules the user marked visible for the agent — attachable
+   * as a saved result requirement at the plan gate. */
+  reportRuleOptions: ReportRuleOption[]
+  /** The server's OWN limits for that requirement (published ==
+   * enforced): the gate must not accept a text or a rule count the
+   * decision would then be refused for. */
+  reportGuidanceMaxChars: number
+  reportRuleIdsMax: number
   /** Parent runs currently using the visible polling fallback. */
   pollingRunIds: readonly string[]
   runs: Record<string, AgentRunRecord>
+  /** Anchor-independent artifact index per session (P4). */
+  sessionArtifacts: Record<string, AgentSessionArtifactIndex>
+  /** Queue one selection comment for the next submission (P4). Returns
+   * false when the queue is at the server's comment bound — the caller
+   * shows the visible limit hint instead of dropping silently. */
+  queueCanvasComment: (
+    draft: import('./commentQueue').AgentCanvasCommentDraft,
+  ) => boolean
+  /** The queued drafts (P9c): the document view highlights their
+   * anchors and the edit round-trip resolves against them. */
+  canvasComments: import('./commentQueue').AgentCanvasCommentDraft[]
+  /** Replace one queued comment's text in place (P9c edit). */
+  updateCanvasComment: (id: string, comment: string) => void
+  /** Pending edit request from the composer's stacked rows (P9c): the
+   * matching document view scrolls to the anchor, opens the popover
+   * prefilled, and clears the request. */
+  canvasCommentEdit:
+    | import('./commentQueue').AgentCanvasCommentDraft
+    | null
+  clearCanvasCommentEdit: () => void
   saveArtifact: (
     runId: string,
     artifactId: string,
     contentMarkdown: string,
     expectedRevision: number,
   ) => Promise<ArtifactSaveResult>
+  /** Metadata-only title change (P9, K3): revision stays, chips/tabs/
+   * registry follow via the refreshed row + session index. */
+  renameArtifact: (
+    runId: string,
+    artifactId: string,
+    title: string,
+    sessionId: string | null,
+  ) => Promise<ArtifactRenameResult>
+  /** Derived session file names (P9, artifactId -> `name.md`); empty
+   * while the session index has not loaded. */
+  sessionFileNames: Record<string, string>
   setPlanDraft: (runId: string, draft: AgentPlanDraft | null) => void
   workspaceId: string
 }

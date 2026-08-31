@@ -95,3 +95,66 @@ def test_delegated_research_recency_is_persisted_for_worker_replay() -> None:
     )
 
     assert store.submission["request_payload"]["body"]["web_recency"] == "year"
+
+
+def test_canvas_context_is_persisted_for_worker_replay() -> None:
+    """P4 payload proof: the attachment survives as its OWN body field.
+
+    Never in ``question`` (clipped at persistence, leaks into share-inbox
+    titles) and never in the summary override channel.
+    """
+    from inqtrix.core.results import CanvasContext
+
+    store = _Store()
+    service = RunService(
+        registry=_Registry(),
+        runtime=SimpleNamespace(),
+        run_store=store,
+    )
+    context = CanvasContext.model_validate(
+        {
+            "artifact_id": "art_ctx1",
+            "revision": 3,
+            "comments": [
+                {
+                    "artifact_id": "art_ctx1",
+                    "revision": 3,
+                    "quote": "Der Umsatz stieg.",
+                    "comment": "Bitte Zahl ergaenzen.",
+                }
+            ],
+        }
+    )
+
+    service.submit(
+        question="Arbeite die Kommentare ein.",
+        history="",
+        messages=[],
+        resolved=_resolved(depth="normal"),
+        workspace_id="workspace-a",
+        kind="agent",
+        canvas_context=context,
+    )
+
+    body = store.submission["request_payload"]["body"]
+    assert body["canvas_context"] == context.model_dump(mode="json")
+    assert store.submission["question"] == "Arbeite die Kommentare ein."
+    assert "canvas_context" not in store.submission["agent_overrides"]
+
+
+def test_without_canvas_context_the_replay_body_carries_no_key() -> None:
+    store = _Store()
+    service = RunService(
+        registry=_Registry(),
+        runtime=SimpleNamespace(),
+        run_store=store,
+    )
+    service.submit(
+        question="Frage",
+        history="",
+        messages=[],
+        resolved=_resolved(depth="normal"),
+        workspace_id="workspace-a",
+        kind="agent",
+    )
+    assert "canvas_context" not in store.submission["request_payload"]["body"]

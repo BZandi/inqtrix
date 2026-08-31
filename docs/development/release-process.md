@@ -6,7 +6,7 @@ The release process is maintainer-owned. This page exists so contributors know w
 
 ## Today's state
 
-The repository is marked experimental and is on release line `0.2.0` (dev designation `0.2.0.7`), a placeholder. The version is defined once as `__version__` in `src/inqtrix/__init__.py`; `pyproject.toml` derives the package version from it (Hatchling dynamic version). No version has been tagged or published yet. A formal release process — signing, PyPI publication, GitHub Releases, change categorisation — is a dedicated follow-up task.
+The repository is marked experimental and is on release line `0.2.0` (dev designation `0.2.0.8`), a placeholder. The version is defined once as `__version__` in `src/inqtrix/__init__.py`; `pyproject.toml` derives the package version from it (Hatchling dynamic version). No version has been tagged or published yet. A formal release process — signing, PyPI publication, GitHub Releases, change categorisation — is a dedicated follow-up task.
 
 ## Automation status
 
@@ -29,7 +29,7 @@ administratively blocked.
 Two values live in [`src/inqtrix/__init__.py`](../../src/inqtrix/__init__.py), and the difference between them matters:
 
 - **`__version__`** is the **release line**, always three segments (`major.minor.patch`). `pyproject.toml` declares `dynamic = ["version"]` with a `[tool.hatch.version]` source pointing at that line, so Hatchling derives the package version and the wheel metadata from it. Three other things are pinned to it and break if it moves: `apps/research-desk/package.json` (npm accepts only SemVer), the `_inqtrix_version` stamp in every `tests/eval/baselines/*.json` (enforced by `tests/verification/repository-hygiene.test.ts`, so moving it declares those measured baselines re-validated), and a literal in `tests/verification/orchestrator.test.ts`.
-- **`__display_version__`** is the **dev designation inside that line** — a fourth segment matching the branch name (`local/dev-inqtrix-v0.2.0.7`). It is what `/health` reports and what the app shows in Settings → Licensing. It moves freely every dev milestone, which is precisely why it is separate: the release line stays put and nothing downstream is disturbed. `tests/test_routes.py` pins that it starts with `__version__`.
+- **`__display_version__`** is the **dev designation inside that line** — a fourth segment matching the branch name (`local/dev-inqtrix-v0.2.0.8`). It is what `/health` reports and what the app shows in Settings → Licensing. It moves freely every dev milestone, which is precisely why it is separate: the release line stays put and nothing downstream is disturbed. `tests/test_routes.py` pins that it starts with `__version__`.
 
 Historically the fourth segment lived only in branch names while `__version__` stayed at `0.2.0`; `__display_version__` makes that existing practice explicit instead of leaving the running build invisible.
 

@@ -51,6 +51,9 @@ from sqlalchemy import case, delete, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
+from inqtrix.storage.migration_contract import (
+    assert_schema_head,
+)
 from inqtrix.auth.log_redaction import log_authorization_denial
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.contextualization_circuit import (
@@ -259,9 +262,9 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
             app_role=app_role,
             worker_id=worker_id,
             queue=queue,
-            max_concurrent=max_concurrent,
             recover_orphans=recover_orphans,
         )
+        self._max_concurrent = max_concurrent
         self._max_queue_size = max_queue_size
         self._completed_ttl_seconds = completed_ttl_seconds
         self._history_limit = history_limit
@@ -2520,6 +2523,13 @@ class PostgresIndexingJobStore(DurableJobStoreBase):
         self, job_id: str, tenant_id: str, *, allow_takeover: bool
     ) -> ClaimedIndexingJob | None:
         async with self._session(tenant_id) as session:
+            # Cutover fence, FIRST statement of the claim transaction: a
+            # worker whose image predates a completed migration must not
+            # take a durable claim -- nor run this transaction's other
+            # writes -- against a schema its code no longer matches. Rides
+            # in the same transaction, so a mismatch rolls everything back
+            # and the queue entry stays unacked for an upgraded worker.
+            await assert_schema_head(session)
             locked = await self._lock_collection_access_for_job(session, job_id=job_id)
             if locked is None:
                 await self._terminalize_revoked_job_db(

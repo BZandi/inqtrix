@@ -17,7 +17,22 @@ export const EDITOR_SCHEMA_DEPENDENCY_VERSIONS = Object.freeze({
 export const EDITOR_SCHEMA_BEHAVIOR_INPUTS = Object.freeze({
   extensionConfiguration: 'editor-extensions-v1',
   linkPolicy: 'http-https-mailto-noopener-v1',
-  markdownProjection: 'gfm-final-original-v1',
+  // v2: `parseEditorMarkdown` wendet die LaTeX-Einfuhr-Regel nicht mehr an.
+  // Sie gehoert auf FREMDEN Text; auf die eigene Serialisierung angewandt
+  // zerstoerte sie Inhalt (`\[Marke\]` wurde zum Formelblock).
+  //
+  // Der Wert wandert mit, weil der Abdruck auf JEDEM Kollaborationsdokument
+  // steht und beim Laden gegen den aktuellen geprueft wird: er beantwortet
+  // "wurde dieses Dokument von einem Dienst mit MEINEM Verhalten aktiviert".
+  // Die Umwandlung Markdown -> Y.Doc hat sich geaendert, also ist die Antwort
+  // fuer Bestandsdokumente ehrlicherweise nein -- Migration
+  // 0081_editor_markdown_read stempelt sie um und nimmt sie damit bewusst an.
+  //
+  // Ausdruecklich NICHT geleistet: eine Schraege zwischen Browser und Dienst.
+  // Der Browser berechnet den Fingerabdruck nie (er ist in `browser.ts` nicht
+  // einmal exportiert); ueber die Grenze geht nur `schema_version`. Ein alter
+  // Browser-Tab mit neuem Dienst bleibt damit unerkannt.
+  markdownProjection: 'gfm-final-original-v2-literal-read',
   relativePositions: 'yjs-relative-position-base64-v1',
   suggestionTransform: 'semantic-five-kind-structure-metadata-table-topology-guard-v6',
   yjsValidation: 'canonical-v1-structure-attributes-full-consumption-live-state-v8',

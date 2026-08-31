@@ -8,7 +8,6 @@ the 401-before-400 precedence plus the exact FastAPI ``detail``-wrapped
 
 from __future__ import annotations
 
-import asyncio
 import threading
 
 from fastapi import FastAPI

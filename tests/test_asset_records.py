@@ -517,3 +517,187 @@ async def test_bind_validates_origin_like_save_asset(service) -> None:
     await _section(service, "fsec_1", owner=USER)
     with pytest.raises(AssetValidationError):
         await _bind(service, owner=USER, visible_to=_scoped(USER), origin="bogus")
+
+
+@pytest.mark.asyncio
+async def test_a_new_local_asset_is_ready_without_any_second_write(service) -> None:
+    """The rejected fix would have flipped every local asset here.
+
+    ``server_file_id=None`` legitimately means "local-only asset that was
+    never uploaded" -- deriving the status from the column would read that
+    as not-ready. The intent belongs to the caller: plain ``save_asset``
+    creates a finished local asset, and it must be ``ready`` immediately,
+    with no follow-up write involved.
+    """
+    await _section(service, "fsec_local", owner=USER)
+    asset = await service.save_asset(
+        id="fa_local", section_id="fsec_local", group_id=None, title="L",
+        label="L", file_name="local.md", mime_type="text/markdown",
+        origin="library", page_count=None, parse_status="parsed",
+        parse_warning=None, text_truncated=False, size_bytes=5,
+        server_file_id=None, extracted_text="hallo", created_at=1.0,
+        updated_at=1.0, caller_user_id=USER, workspace_id=None,
+        visible_to=_scoped(USER),
+    )
+    assert asset.upload_status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_a_reservation_is_never_ready_even_for_one_write(service) -> None:
+    """The atomicity property itself: the INSERT already carries the intent.
+
+    Before this, the row was born 'ready' (the column default) and only a
+    SECOND transaction corrected it -- a connection failure in between left
+    an asset that looked like a complete file and had no bytes. Asserted at
+    the store, bypassing the service's follow-up write, so this fails if
+    the insert-only intent is ever dropped again.
+    """
+    await _section(service, "fsec_r", owner=USER)
+    row = await service._store.upsert_asset(
+        id="fa_r", section_id="fsec_r", group_id=None, title="R", label="R",
+        file_name="r.pdf", mime_type="application/pdf", origin="library",
+        page_count=None, parse_status="parsed", parse_warning=None,
+        text_truncated=False, size_bytes=10, server_file_id=None,
+        extracted_text="", created_at=1.0, updated_at=1.0,
+        created_by_user_id=USER, workspace_id=None,
+        initial_upload_status="awaiting_upload",
+    )
+    assert row.upload_status == "awaiting_upload"
+
+
+@pytest.mark.asyncio
+async def test_the_insert_only_intent_cannot_reset_an_existing_row(service) -> None:
+    """On an existing row the intent does nothing -- or a repeated
+    reservation could pull a finalised asset back to awaiting_upload."""
+    await _section(service, "fsec_keep", owner=USER)
+    # The full legitimate path: reserve, then bind the bytes.
+    await service.reserve_upload(
+        id="fa_keep", section_id="fsec_keep", group_id=None, title="K",
+        label="K", file_name="k.pdf", mime_type="application/pdf",
+        origin="library", page_count=None, parse_status="parsed",
+        parse_warning=None, text_truncated=False, size_bytes=10,
+        created_at=1.0, updated_at=1.0, caller_user_id=USER,
+        workspace_id=None, visible_to=_scoped(USER),
+    )
+    await service.bind_uploaded_file(
+        id="fa_keep", section_id="fsec_keep", group_id=None, title="K",
+        label="K", file_name="k.pdf", mime_type="application/pdf",
+        origin="library", page_count=None, parse_status="parsed",
+        parse_warning=None, text_truncated=False, size_bytes=10,
+        server_file_id="fl_keep", created_at=1.0, updated_at=2.0,
+        caller_user_id=USER, workspace_id=None, visible_to=_scoped(USER),
+    )
+    row = await service._store.upsert_asset(
+        id="fa_keep", section_id="fsec_keep", group_id=None, title="K",
+        label="K", file_name="k.pdf", mime_type="application/pdf",
+        origin="library", page_count=None, parse_status="parsed",
+        parse_warning=None, text_truncated=False, size_bytes=10,
+        server_file_id=None, extracted_text="", created_at=1.0,
+        updated_at=3.0, created_by_user_id=USER, workspace_id=None,
+        initial_upload_status="awaiting_upload",
+    )
+    assert row.upload_status == "ready", (
+        "an existing row keeps its stored status; the intent is insert-only"
+    )
+    assert row.server_file_id == "fl_keep"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_row_returns_to_awaiting_on_a_retried_reservation(
+    service,
+) -> None:
+    """Why the follow-up write stays: it is what rescues a 'failed' row."""
+    await _section(service, "fsec_fail", owner=USER)
+    await service.reserve_upload(
+        id="fa_fail", section_id="fsec_fail", group_id=None, title="F",
+        label="F", file_name="f.pdf", mime_type="application/pdf",
+        origin="library", page_count=None, parse_status="parsed",
+        parse_warning=None, text_truncated=False, size_bytes=10,
+        created_at=1.0, updated_at=1.0, caller_user_id=USER,
+        workspace_id=None, visible_to=_scoped(USER),
+    )
+    await service.mark_upload_failed(
+        "fa_fail", visible_to=_scoped(USER), message="kaputt"
+    )
+    retried = await service.reserve_upload(
+        id="fa_fail", section_id="fsec_fail", group_id=None, title="F",
+        label="F", file_name="f.pdf", mime_type="application/pdf",
+        origin="library", page_count=None, parse_status="parsed",
+        parse_warning=None, text_truncated=False, size_bytes=10,
+        created_at=1.0, updated_at=2.0, caller_user_id=USER,
+        workspace_id=None, visible_to=_scoped(USER),
+    )
+    assert retried.upload_status == "awaiting_upload", (
+        "deleting the follow-up write as 'now redundant' breaks exactly this"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reservation_survives_a_failing_follow_up_write(
+    service, monkeypatch
+) -> None:
+    """The observed failure, replayed: write two dies, the row tells the truth.
+
+    An asyncpg connection timeout between the two reservation writes left
+    an asset that looked like a complete file and had no bytes. With the
+    intent applied AT the insert, the follow-up write may fail freely --
+    the stored row is already 'awaiting_upload', visible in the library as
+    "Datei noch nicht uebertragen" with a retry affordance instead of as a
+    normal file that 409s on indexing.
+    """
+
+    async def _dies(*args, **kwargs):
+        raise ConnectionError("verbindung weg zwischen den beiden writes")
+
+    await _section(service, "fsec_atomic", owner=USER)
+    monkeypatch.setattr(service._store, "set_asset_upload_state", _dies)
+
+    with pytest.raises(ConnectionError):
+        await service.reserve_upload(
+            id="fa_atomic", section_id="fsec_atomic", group_id=None,
+            title="A", label="A", file_name="a.pdf",
+            mime_type="application/pdf", origin="library", page_count=None,
+            parse_status="parsed", parse_warning=None, text_truncated=False,
+            size_bytes=10, created_at=1.0, updated_at=1.0,
+            caller_user_id=USER, workspace_id=None, visible_to=_scoped(USER),
+        )
+
+    stored = await service._store.get_asset("fa_atomic")
+    assert stored.upload_status == "awaiting_upload", (
+        "the insert itself must carry the intent; before the fix this row "
+        "was 'ready' with no bytes -- the exact observed corruption"
+    )
+    assert stored.server_file_id is None
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_insert_intent_is_rejected_at_runtime(service) -> None:
+    """The Literal binds only a typechecker, and none runs in this repo.
+
+    Without the runtime guard a typo ("awaiting-upload", "reserved", ...)
+    would land as a silent new state in the database. The guard lives in
+    the ports module, derived from the Literal, and both backends call it
+    before the INSERT.
+    """
+    from inqtrix.source_authority import MemorySourceLifecycleAuthority
+
+    authority = MemorySourceLifecycleAuthority()
+    service._store.bind_source_lifecycle_authority(authority)
+    await _section(service, "fsec_guard", owner=USER)
+    with pytest.raises(ValueError, match="initial_upload_status"):
+        await service._store.upsert_asset(
+            id="fa_guard", section_id="fsec_guard", group_id=None, title="G",
+            label="G", file_name="g.pdf", mime_type="application/pdf",
+            origin="library", page_count=None, parse_status="parsed",
+            parse_warning=None, text_truncated=False, size_bytes=10,
+            server_file_id=None, extracted_text="", created_at=1.0,
+            updated_at=1.0, created_by_user_id=USER, workspace_id=None,
+            initial_upload_status="awaiting-upload",
+        )
+    # Placement pin: the guard must fall BEFORE the source authority's
+    # active_write(create_if_missing=True), which registers a lifecycle
+    # with no rollback -- a guard inside the write path would leave a
+    # phantom ACTIVE lifecycle for an asset row that never existed.
+    assert not authority._records, (
+        "rejected insert must not register a source lifecycle"
+    )

@@ -63,14 +63,22 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
     shareCount,
   }, ref) {
     const { locale, t } = useLocale()
-    const StatusIcon = statusIcon[job.status]
+    const StatusIcon = job.unavailable
+      ? statusIcon.expired
+      : statusIcon[job.status]
     const reduceMotion = useReducedMotion()
-    const runningDuration = useRunningDuration(job.status, job.startedAtIso)
+    // A locked card must not keep a 1 Hz interval alive: feed the hook a
+    // non-running status so it neither ticks nor re-renders.
+    const runningDuration = useRunningDuration(
+      job.unavailable ? 'expired' : job.status,
+      job.startedAtIso,
+    )
     const isSharedIn = job.access?.mode === 'shared'
     // An active run is cancellable, not deletable: the server delete is
     // terminal-only (409 while active), so the trash button is hidden for
     // running/queued runs and cancel is the action instead.
-    const isActive = job.status === 'running' || job.status === 'queued'
+    const isActive = !job.unavailable
+      && (job.status === 'running' || job.status === 'queued')
     // Mirrors the server rule: cancelling a shared-in run needs at
     // least an edit grant — a view grantee would only earn a 404.
     const canCancel = isActive && canCancelWithAccess(job.access)
@@ -89,7 +97,7 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
     if (job.status === 'queued' && job.queueNote) {
       metadata.push({ text: localizedText(job.queueNote, locale) })
     }
-    if (job.status === 'running') {
+    if (job.status === 'running' && !job.unavailable) {
       metadata.push({ text: `${t.runCard.runtime}: ${runningDuration}` })
     }
     if (isCancelSubmitting) {
@@ -101,6 +109,9 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
     }
     if (job.error) {
       metadata.push({ text: job.error })
+    }
+    if (job.unavailable) {
+      metadata.push({ text: t.runCard.unavailableHint })
     }
 
     return (
@@ -130,7 +141,9 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
               job.status === 'failed' && 'text-destructive',
               job.status === 'cancelled' && 'text-destructive/80',
               job.status === 'expired' && 'text-muted-foreground',
-              job.status === 'running' && !reduceMotion && 'animate-spin [animation-duration:1.6s]',
+              job.unavailable && 'text-muted-foreground',
+              job.status === 'running' && !job.unavailable && !reduceMotion
+                && 'animate-spin [animation-duration:1.6s]',
             )}
           />
           <div className="min-w-0">
@@ -144,7 +157,7 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
                 </span>
               ))}
             </div>
-            {job.status === 'running' && !isExpanded && (
+            {job.status === 'running' && !job.unavailable && !isExpanded && (
               <RunningCompactStatus job={job} />
             )}
           </div>
@@ -154,9 +167,18 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
               isSharedWithMe={isSharedIn}
               onClick={isSharedIn ? undefined : onShare}
             />
-            <Badge className={statusBadgeClassName[job.status]} variant="outline">
-              {t.status[job.status]}
-            </Badge>
+            {job.unavailable ? (
+              <Badge
+                className={statusBadgeClassName.expired}
+                variant="outline"
+              >
+                {t.runCard.unavailableBadge}
+              </Badge>
+            ) : (
+              <Badge className={statusBadgeClassName[job.status]} variant="outline">
+                {t.status[job.status]}
+              </Badge>
+            )}
             {canCancel && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -248,7 +270,7 @@ export const ResearchJobCard = forwardRef<HTMLElement, ResearchJobCardProps>(
               initial={false}
               transition={appMotion.card}
             >
-              {job.status === 'running' ? (
+              {job.status === 'running' && !job.unavailable ? (
                 <RunningJobDetails job={job} />
               ) : (
                 <CompactJobDetails job={job} />
@@ -419,8 +441,17 @@ function RunningJobDetails({ job }: { job: ResearchJob }) {
               {t.runCard.live}
             </span>
           </div>
+          {/* One row rises when one event ARRIVES — never the whole block.
+              `initial={false}` covers the rows already present when this list
+              first renders (a card mounting with history: a desk switch, or a
+              reload where the server replays a run's events). Rows added after
+              that are genuinely new and animate. Keying on the event's stable
+              id is what makes the distinction hold: the sliding window then
+              drops the oldest row and adds one, instead of rebuilding all four
+              whenever the formatted minute changes. */}
           <ol className="mt-2 space-y-1.5">
-            {visibleEvents.map((event, index) => {
+            <AnimatePresence initial={false}>
+            {visibleEvents.map((event) => {
               const EventIcon = event.severity === 'warning' || event.severity === 'error'
                 ? AlertTriangle
                 : Info
@@ -429,9 +460,14 @@ function RunningJobDetails({ job }: { job: ResearchJob }) {
                 <motion.li
                   animate={{ opacity: 1, y: 0 }}
                   className="grid min-w-0 grid-cols-[50px_14px_minmax(0,1fr)_auto] items-center gap-2 text-xs"
-                  initial={reduceMotion ? false : { opacity: 0, y: 4 }}
-                  key={`${event.time}-${index}`}
-                  transition={{ ...appMotion.list, delay: reduceMotion ? 0 : index * 0.04 }}
+                  // Data-borne history/live distinction: replayed events
+                  // (reload into a running run, reconnect catch-up) carry no
+                  // arrivedLive and render in place even though they enter
+                  // this AnimatePresence after its first render. Only an
+                  // event that arrived on the live side of its stream rises.
+                  initial={reduceMotion || !event.arrivedLive ? false : { opacity: 0, y: 4 }}
+                  key={event.id}
+                  transition={appMotion.list}
                 >
                   <span className="tabular-nums text-muted-foreground">{event.time}</span>
                   <EventIcon
@@ -462,6 +498,7 @@ function RunningJobDetails({ job }: { job: ResearchJob }) {
                 </motion.li>
               )
             })}
+            </AnimatePresence>
           </ol>
         </div>
 

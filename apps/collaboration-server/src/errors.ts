@@ -29,17 +29,26 @@ export type CollaborationErrorReason =
   | 'suggestion_policy_violation'
   | 'unsupported_suggestion_structure'
   | 'update_required'
+  | 'upstream_conflict'
 
 export class CollaborationError extends Error {
   readonly code: number
   readonly httpStatus: number
   readonly reason: CollaborationErrorReason
+  /** Der Grund, den die interne API genannt hat, unveraendert.
+   *
+   * Der Sidecar bildet auf seine eigene, kleine Vokabelliste ab, weil die
+   * den WebSocket-Schliesscode steuert. Diese Abbildung darf den
+   * urspruenglichen Grund aber nicht VERNICHTEN: sonst steht am Ende
+   * weder im Log noch beim Nutzer, warum wirklich abgelehnt wurde. */
+  readonly upstreamReason: string | undefined
 
   constructor(
     reason: CollaborationErrorReason,
     options: {
       closeCode: number
       httpStatus?: number
+      upstreamReason?: string
     },
   ) {
     super(reason)
@@ -47,6 +56,7 @@ export class CollaborationError extends Error {
     this.code = options.closeCode
     this.httpStatus = options.httpStatus ?? 500
     this.reason = reason
+    this.upstreamReason = options.upstreamReason
   }
 }
 
@@ -92,14 +102,23 @@ export function collaborationError(error: unknown): CollaborationError {
       })
     }
     if (error.status === 409) {
-      const reason = error.reason === 'sequence_conflict' || error.reason === 'command_conflict'
-        ? 'sequence_conflict'
-        : error.reason === 'generation_mismatch'
-          ? 'generation_mismatch'
-          : 'update_required'
+      // Die interne API kennt rund vierzig Konfliktgruende; hier werden
+      // nur die abgebildet, die eine EIGENE Behandlung haben. Alles
+      // uebrige bleibt ein Konflikt ohne erfundene Ursache — der echte
+      // Grund reist als upstreamReason mit, statt zu "dein Client ist
+      // veraltet" zu werden.
+      const reason: CollaborationErrorReason =
+        error.reason === 'sequence_conflict' || error.reason === 'command_conflict'
+          ? 'sequence_conflict'
+          : error.reason === 'generation_mismatch'
+            ? 'generation_mismatch'
+            : error.reason === 'update_required'
+              ? 'update_required'
+              : 'upstream_conflict'
       return new CollaborationError(reason, {
         closeCode: CloseCodes.incompatible,
         httpStatus: 409,
+        upstreamReason: error.reason,
       })
     }
     if (error.status === 413) {
@@ -121,7 +140,15 @@ export function collaborationError(error: unknown): CollaborationError {
       })
     }
   }
+  // Der Auffangzweig: jede Antwort, die oben keinen eigenen Zweig hat --
+  // heute vor allem 400 -- landet hier. Sie heisst nach aussen weiterhin
+  // internal_consistency, denn aus Sicht des Nutzers IST sie ein interner
+  // Fehler. Aber der Grund der internen API darf dabei nicht verloren
+  // gehen: ohne ihn meldet der Sidecar "internal_consistency" fuer einen
+  // Ablehnungsgrund, den er selbst kennt, und die Fehlersuche beginnt bei
+  // null. Genau das hat eine 400-Ablehnung als Raum-Inkonsistenz getarnt.
   return new CollaborationError('internal_consistency', {
     closeCode: CloseCodes.internalConsistency,
+    ...(error instanceof ApiRequestError ? { upstreamReason: error.reason } : {}),
   })
 }

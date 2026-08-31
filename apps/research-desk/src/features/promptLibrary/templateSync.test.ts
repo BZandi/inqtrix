@@ -23,7 +23,7 @@ const TEMPLATE: PromptTemplateInfo = {
   revision: 7,
   title: 'Briefing',
   updated_at: 1_700_000_100,
-  visibility: { chat: true, editor: false },
+  visibility: { agent: false, chat: true, editor: false },
 }
 
 const RULE: ChatRuleRecord = {
@@ -38,7 +38,7 @@ const RULE: ChatRuleRecord = {
   serverTemplateId: 'pt_abc',
   title: 'Briefing',
   updatedAt: '2024-01-01T00:00:00.000Z',
-  visibility: { chat: true, editor: false },
+  visibility: { agent: false, chat: true, editor: false },
 }
 
 describe('ruleFromTemplate', () => {
@@ -47,7 +47,7 @@ describe('ruleFromTemplate', () => {
     expect(rule.id).toBe('pt_abc')
     expect(rule.serverTemplateId).toBe('pt_abc')
     expect(rule.label).toBe('briefing')
-    expect(rule.visibility).toEqual({ chat: true, editor: false })
+    expect(rule.visibility).toEqual({ agent: false, chat: true, editor: false })
     expect(rule.createdAt).toBe(new Date(1_700_000_000 * 1000).toISOString())
     expect(rule.access).toEqual({ mode: 'owner' })
     expect(rule.serverRevision).toBe(7)
@@ -120,7 +120,7 @@ describe('templatePayloadFromRule', () => {
       include_in_autocomplete: true,
       label: 'briefing',
       title: 'Briefing',
-      visibility: { chat: true, editor: false },
+      visibility: { agent: false, chat: true, editor: false },
     })
   })
 

@@ -23,7 +23,9 @@ function run(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
     artifactsStale: false,
     taskStates: {},
     children: {},
+    childGates: {},
     stepLog: [],
+    touchedArtifacts: [],
     patchStale: false,
     ...overrides,
   }

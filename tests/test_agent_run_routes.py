@@ -557,6 +557,87 @@ def test_artifact_routes_serve_conflict_matrix_and_export(monkeypatch):
         assert bad_target.status_code == 400
 
 
+def test_session_artifacts_listing_is_anchor_independent(monkeypatch):
+    """GET /v1/agent-sessions/{id}/artifacts survives the run re-anchor.
+
+    A session artifact's run_id moves to the newest updating run, so the
+    OLD run's listing silently loses it (F-NEU-1) — the session listing
+    keys on the session and keeps the artifact with its CURRENT anchor.
+    Owner-private like every session route."""
+    client = make_sharing_client(monkeypatch)
+    with client:
+        # The session record itself (owner-private resolution target).
+        assert client.put(
+            "/v1/agent-sessions/sess-anchor",
+            json={
+                "title": "Anker-Session",
+                "items_json": "[]",
+                "group_id": None,
+                "created_at": 1000.0,
+                "updated_at": 1000.0,
+            },
+            headers={SUB_HEADER: OWNER},
+        ).status_code == 200
+
+        run_one = _parked_agent_run(client)
+        run_two = _parked_agent_run(client)
+        store = client.agent_control.store
+        asyncio.run(store.upsert_artifact(
+            run_id=run_one,
+            kind="memo",
+            session_id="sess-anchor",
+            title="Sitzungsmemo",
+            status="ready",
+            content_markdown="# V1",
+            payload={},
+            refs=[],
+            updated_by="agent",
+            artifact_id="art_anchor_memo",
+        ))
+        # Turn 2 updates the SAME session memo — the row re-anchors.
+        asyncio.run(store.upsert_artifact(
+            run_id=run_two,
+            kind="memo",
+            session_id="sess-anchor",
+            title="Sitzungsmemo",
+            status="ready",
+            content_markdown="# V2",
+            payload={},
+            refs=[],
+            updated_by="agent",
+        ))
+
+        # The OLD run's listing has lost the memo (the motivating gap) …
+        old_listing = client.get(
+            f"/v1/runs/{run_one}/artifacts", headers={SUB_HEADER: OWNER}
+        ).json()
+        assert old_listing["data"] == []
+
+        # … the session listing keeps it, meta-only, with the NEW anchor.
+        listing = client.get(
+            "/v1/agent-sessions/sess-anchor/artifacts",
+            headers={SUB_HEADER: OWNER},
+        ).json()
+        assert listing["object"] == "list"
+        assert [row["artifact_id"] for row in listing["data"]] == [
+            "art_anchor_memo",
+        ]
+        row = listing["data"][0]
+        assert row["run_id"] == run_two
+        assert row["revision"] == 2
+        assert "content_markdown" not in row
+
+        # Owner-private: another user gets the indistinct 404.
+        assert client.get(
+            "/v1/agent-sessions/sess-anchor/artifacts",
+            headers={SUB_HEADER: RECIPIENT},
+        ).status_code == 404
+        assert client.get(
+            "/v1/agent-sessions/unbekannt/artifacts",
+            headers={SUB_HEADER: OWNER},
+        ).status_code == 404
+
+
 def test_agent_sessions_crud_is_owner_private(monkeypatch):
     client = make_sharing_client(monkeypatch)
     with client:

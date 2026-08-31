@@ -135,7 +135,10 @@ then compares the live principal with the user whose state the SPA rendered.
 If another tab changed the cookie session, the request is rejected before the
 domain operation with `409 principal_changed` and the SPA reloads. API clients
 that omit the additive header keep the existing contract. The per-user SSE
-stream repeats the live check before data and quiet keepalive frames.
+stream repeats the live check before data and quiet keepalive frames; the
+run and indexing streams gate their frames on the commit-ordered per-user
+authorization generation (full re-check on any permission mutation, and on
+a bounded time ceiling for expiry, which writes no mutation).
 
 Session, login-flow, and user records follow `INQTRIX_STORAGE_BACKEND`:
 `memory` (default, single process, logins lost on restart) or `postgres`

@@ -202,3 +202,78 @@ export function installCollaborationWebSocketObserver(): void {
   observerWindow.WebSocket = ObservedWebSocket
   observerWindow.__inqtrixCollaborationSocketObserver = state
 }
+
+export type CollaborationStatusObserverState = {
+  /** Jeder Eintritt in den Wiederverbindungs-Zustand, mit Zeitstempel. */
+  reconnectAppearances: Array<{ observedAt: number; source: string }>
+}
+
+/** Beobachtet DURCHGEHEND, ob der Wiederverbindungs-Streifen erscheint.
+ *
+ * Warum nicht einfach am Ende `toHaveCount(0)` auf
+ * `[data-editor-status-kind="reconnecting"]`? Weil das nur beweist, dass der
+ * Streifen im Abtastmoment fehlte. Er ist kein Ein- und Ausbau, sondern ein
+ * ATTRIBUTWECHSEL an einem dauerhaft vorhandenen Knoten
+ * (`EditorInspector.tsx`), und er kann zwischen zwei Abtastungen kommen und
+ * gehen. Abwesenheit ueber eine Zeitspanne laesst sich nur beobachten, nicht
+ * abfragen.
+ *
+ * Wie die Socket-Sonde laeuft dies als `addInitScript` und wirkt erst ab der
+ * NAECHSTEN Navigation. Ein Neuladen der Seite setzt das Protokoll zurueck. */
+export function installCollaborationStatusObserver(): void {
+  type ObserverWindow = Window & typeof globalThis & {
+    __inqtrixCollaborationStatusObserver?: CollaborationStatusObserverState
+  }
+  const observerWindow = window as ObserverWindow
+  if (observerWindow.__inqtrixCollaborationStatusObserver) return
+
+  const state: CollaborationStatusObserverState = { reconnectAppearances: [] }
+  const RECONNECTING = 'reconnecting'
+  const ATTRIBUTE = 'data-editor-status-kind'
+  // Es gibt mehr als einen Statusknoten (Kopfzeile und Inspektor). Jeder wird
+  // einzeln nachgehalten, damit ein Wechsel am einen nicht als Wechsel am
+  // anderen gezaehlt wird.
+  const zuletzt = new WeakMap<Element, string | null>()
+
+  const pruefen = (element: Element, source: string): void => {
+    const wert = element.getAttribute(ATTRIBUTE)
+    const vorher = zuletzt.get(element) ?? null
+    if (wert === vorher) return
+    zuletzt.set(element, wert)
+    if (wert === RECONNECTING) {
+      state.reconnectAppearances.push({ observedAt: Date.now(), source })
+    }
+  }
+
+  const alleZustaende = (source: string): void => {
+    for (const element of document.querySelectorAll(`[${ATTRIBUTE}]`)) {
+      pruefen(element, source)
+    }
+  }
+
+  const beobachter = new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === 'attributes' && record.target instanceof Element) {
+        pruefen(record.target, 'attribute')
+      }
+    }
+    // Ein frisch eingehaengter Knoten kann bereits im Wiederverbindungs-
+    // Zustand geboren werden; ein reiner Attribut-Zweig saehe ihn nie.
+    alleZustaende('subtree')
+  })
+
+  const starten = (): void => {
+    alleZustaende('initial')
+    beobachter.observe(document.documentElement, {
+      attributeFilter: [ATTRIBUTE],
+      attributes: true,
+      childList: true,
+      subtree: true,
+    })
+  }
+
+  if (document.documentElement) starten()
+  else document.addEventListener('DOMContentLoaded', starten, { once: true })
+
+  observerWindow.__inqtrixCollaborationStatusObserver = state
+}

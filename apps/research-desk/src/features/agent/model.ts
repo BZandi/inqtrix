@@ -46,6 +46,58 @@ export const AGENT_PHASE_STATIONS = [
 export type AgentPhaseStation = (typeof AGENT_PHASE_STATIONS)[number]
 
 /**
+ * The stations of the AGENT KERNEL — measured, not assumed.
+ *
+ * Across every kernel run in the store the engine reports exactly two
+ * phases: `execution` and `done`. It has no discovery, no planning, no
+ * synthesis and no critic. Painting the mission's six stations for it
+ * described a flow that never happened (F-P14-01); `result` is the
+ * station the finished run is standing on.
+ */
+export const AGENT_KERNEL_STATIONS = [
+  'intake',
+  'execution',
+  'result',
+] as const
+
+/** Which line to draw. Absent metadata keeps the mission line, which is
+ * the older and broader vocabulary — an unknown engine must not lose
+ * stations it may well have visited. */
+export function agentStationsFor(
+  effectiveMode: string | undefined,
+): readonly string[] {
+  return effectiveMode === 'agent_kernel'
+    ? AGENT_KERNEL_STATIONS
+    : AGENT_PHASE_STATIONS
+}
+
+/**
+ * How far the pulse track is filled: every station BEFORE this index is
+ * done, the station AT it is the active one while the run is alive.
+ *
+ * A finished run fills up to the station it actually reached and no
+ * further. Filling the whole line on completion made the track lie about
+ * the kernel, which only ever reports `intake` and `execution`: it
+ * claimed a discovery, a plan and a verification pass that never ran
+ * (F-P14-01). The line is read as a record of what happened, so an
+ * engine that visits four of six stations must show four.
+ */
+export function agentPulseActiveIndex(
+  station: AgentPhaseStation,
+  completed: boolean,
+  stations: readonly string[] = AGENT_PHASE_STATIONS,
+): number {
+  const reached = Math.max(0, stations.indexOf(station))
+  if (!completed) return reached
+  // The two lines end differently. The kernel's ends in the RESULT a
+  // finished run holds, so completing it means reaching the last
+  // station. The mission's ends in the critic, which a completed run may
+  // well have skipped — there, completion only closes the station the
+  // run actually reached, and the rest stay pale.
+  return stations === AGENT_KERNEL_STATIONS ? stations.length : reached + 1
+}
+
+/**
  * Backend phase -> station index; `null` keeps the previous station (gates
  * and unknown phases must never bounce the track backwards).
  */
@@ -118,6 +170,10 @@ export type AgentApprovalRecord = {
   subjectId: string
   payload: Record<string, unknown>
   decision: string
+  /** Decision-scoped keys (`approval_scope: 'run'` marks a run-wide
+   * tool grant); empty for a plain approve. Optional so older fixtures
+   * and stores omit it — the wire mapper always fills it. */
+  decisionPayload?: Record<string, unknown>
   note: string
   createdAt: number
   decidedAt: number | null
@@ -176,6 +232,10 @@ export type AgentArtifactRecord = {
   /** The streamed body remains visible until the authoritative artifact
    * detail (including references) replaces it after publication. */
   publicationNeedsReconcile?: boolean
+  /** Citation labels the answer will use, delivered with
+   * `answer.started` so the STREAMED text can render them right away.
+   * Cleared when the artifact settles and the real refs arrive. */
+  publicationRefLabels?: string[]
 }
 
 /** One editor patch proposed by the run (M7); mirrors the wire detail. */
@@ -274,6 +334,165 @@ export type AgentChildProgressRecord = {
   error?: string
   errorCode?: string
   updatedAt?: number
+  /** Zero-based ordinals a delegated MISSION currently has OPEN. A
+   * mission starts its whole parallel wave at once, so this is a set,
+   * not a single "current task". Empty means every started task has
+   * settled. A research child reports none of this. */
+  openTasks?: number[]
+  taskToolKind?: string
+  /** Grounded evidence answers the child has completed so far — the
+   * unit of progress that actually moves during a long execution. */
+  checkedAnswers?: number
+}
+
+/**
+ * Gate rows of one delegated child run, held on the PARENT record. A child
+ * parked on a human decision (`child.progress` reports `waiting_for_approval`
+ * or `waiting_for_input`) blocks the whole delegation, but child runs never
+ * materialize as desk records — so the parent's control loop fetches the
+ * child's approval/clarification rows and the composer tray offers them
+ * with child context. Same row/staleness contract as the root surfaces.
+ */
+export type AgentChildGateRecord = {
+  approvals: AgentApprovalRecord[]
+  clarifications: AgentClarificationRecord[]
+  /** The child's FULL delegated question (its run row's `question`) —
+   * the gate context must be completely readable, and every other
+   * parent-side source (args preview, progress message) is truncated
+   * or transient. Fetched with the rows. */
+  question?: string
+  /** SSE refetch signal: set when child.progress reports a gate park. */
+  stale: boolean
+}
+
+/**
+ * Anchor-independent artifact meta per session (P4). The server moves a
+ * session artifact's ``run_id`` to the newest updating run, so run-scoped
+ * records lose it from older runs — this index keys on the SESSION and
+ * carries each artifact's CURRENT anchor for follow-up reads.
+ */
+export type AgentSessionArtifactMeta = {
+  artifactId: string
+  /** CURRENT run anchor — the id every artifact API call must use. */
+  runId: string
+  kind: AgentArtifactMetaWire['kind']
+  title: string
+  status: AgentArtifactMetaWire['status']
+  revision: number
+  updatedAt: number
+}
+
+export type AgentSessionArtifactIndex = {
+  order: string[]
+  byId: Record<string, AgentSessionArtifactMeta>
+  /** Refetch signal, flipped alongside the anchor run's artifactsStale. */
+  stale: boolean
+  /** Last fetch failure — rendered where the index feeds a menu, so a
+   * broken listing never hides silently. */
+  error?: string
+}
+
+export function sessionArtifactMetaFromWire(
+  wire: AgentArtifactMetaWire,
+): AgentSessionArtifactMeta {
+  return {
+    artifactId: wire.artifact_id,
+    runId: wire.run_id,
+    kind: wire.kind,
+    title: wire.title,
+    status: wire.status,
+    revision: wire.revision,
+    updatedAt: wire.updated_at,
+  }
+}
+
+/**
+ * The canvas comments that rode this run's submission (P9d) — rebuilt
+ * from the durable `canvas_context.attached` event on every replay
+ * (run summaries deliberately never carry the canvas context).
+ */
+export type AgentCanvasContextMeta = {
+  artifactId: string
+  revision: number
+  comments: { comment: string; quotePreview: string }[]
+}
+
+/**
+ * One document this run touched (`artifact.created/updated` with kind
+ * memo|deliverable) — the turn's file-chip row. Rule R1 applies: the
+ * chip is a navigation handle, the artifact ROW stays the content
+ * truth (title may lag until the row refetch lands).
+ */
+export type AgentTouchedArtifact = {
+  artifactId: string
+  kind: 'memo' | 'deliverable'
+  /** `write_canvas` events carry the title; the memo event does not —
+   * display falls back to the fetched row / generic document label. */
+  title?: string
+  revision: number
+  /** Revision BEFORE this run's first touch (P9) — the turn diff's
+   * `from` side; 0 when the run created the artifact. */
+  fromRevision: number
+  /** Server-counted line delta, accumulated across this run's touches
+   * (P9). Absent = honestly unknown: at least one contributing event
+   * carried no numbers (pre-P9 rows, size guard) — the badge then
+   * stays away instead of showing a partial sum. */
+  linesAdded?: number
+  linesRemoved?: number
+  /** First touch in this run was the artifact's creation. */
+  created: boolean
+  /** Live-boundary provenance (same contract as step entries). */
+  arrivedLive?: boolean
+  at: number
+}
+
+/**
+ * Resolve an artifact reference whose descriptor may carry a STALE run
+ * anchor (F-NEU-1): the hinted run first, then any loaded run of the
+ * same session holding the artifact, then the session index's current
+ * anchor. The returned runId is the one artifact API calls must use.
+ */
+export function resolveAgentArtifact(
+  runs: Record<string, AgentRunRecord>,
+  sessionArtifacts: Record<string, AgentSessionArtifactIndex>,
+  reference: { artifactId: string; runId: string },
+): { artifact: AgentArtifactRecord | undefined; runId: string } {
+  const hinted = runs[reference.runId]
+  const sessionId = hinted?.sessionId
+  // The index meta names the CURRENT anchor and revision. A cached copy
+  // on a loaded run only wins while it is not OLDER than that — an old
+  // turn keeps a frozen pre-update copy after a re-anchor, and serving
+  // it would show a stale revision without any hint (F-P4-STALEREV).
+  const indexes = sessionId
+    ? [sessionArtifacts[sessionId]]
+    : Object.values(sessionArtifacts)
+  const meta = indexes
+    .map((index) => index?.byId[reference.artifactId])
+    .find(Boolean)
+  const fresh = (artifact: AgentArtifactRecord | undefined) =>
+    artifact !== undefined && (!meta || artifact.revision >= meta.revision)
+  const direct = hinted?.artifacts[reference.artifactId]
+  if (fresh(direct)) return { artifact: direct, runId: reference.runId }
+  for (const run of Object.values(runs)) {
+    if (sessionId && run.sessionId !== sessionId) continue
+    const artifact = run.artifacts[reference.artifactId]
+    if (fresh(artifact)) return { artifact, runId: run.runId }
+  }
+  if (meta) {
+    return {
+      artifact: runs[meta.runId]?.artifacts[reference.artifactId],
+      runId: meta.runId,
+    }
+  }
+  // No index row: any loaded copy beats nothing (the load effect
+  // refetches bodies; revisions cannot be compared without the meta).
+  if (direct) return { artifact: direct, runId: reference.runId }
+  for (const run of Object.values(runs)) {
+    if (sessionId && run.sessionId !== sessionId) continue
+    const artifact = run.artifacts[reference.artifactId]
+    if (artifact) return { artifact, runId: run.runId }
+  }
+  return { artifact: undefined, runId: reference.runId }
 }
 
 /** The one-line live activity readout (signature activity line). */
@@ -311,6 +530,10 @@ export type AgentStepEntry = {
   seq: number
   /** Event timestamp (seconds). */
   at: number
+  /** Whether the transport delivered this row after its live boundary.
+   * `false` marks persisted replay/catch-up and suppresses presentation
+   * effects; absent keeps locally produced/demo entries backwards compatible. */
+  arrivedLive?: boolean
   kind:
     | 'phase'
     | 'activity'
@@ -321,6 +544,8 @@ export type AgentStepEntry = {
     | 'clarification_answered'
     | 'approval_decided'
     | 'narration'
+    | 'notice'
+    | 'gate_requested'
   phase?: string
   taskId?: string
   activityKind?: string
@@ -349,6 +574,10 @@ export type AgentStepEntry = {
    * loop) with a fresh sequence — the reducer upserts on this id so the
    * line updates in place instead of multiplying. */
   narrationId?: string
+  /** Which runtime fact a `notice` row reports (tool_limit,
+   * quick_web_fallback, citation_validation, sufficiency_gap) — the
+   * label is rendered from i18n, the row carries only the code. */
+  noticeCode?: string
 }
 
 /** Step-log bound; the tail is the recent story, the plan tab the map. */
@@ -448,9 +677,21 @@ export type AgentRunRecord = {
   // Live progress.
   taskStates: Record<string, AgentTaskLiveState>
   children: Record<string, AgentChildProgressRecord>
+  /** Fetched gate rows of parked children, keyed by child run id. */
+  childGates: Record<string, AgentChildGateRecord>
+  /** The kernel's live task list (todo.updated) — replaced wholesale per
+   * event, rendered as ONE checklist block while the run is active. */
+  todos?: { content: string; status: string }[]
+  /** When that list was reported (event timestamp, seconds). */
+  todosAt?: number
   activity?: AgentActivityRecord
   /** Ordered transcript lines for the step stream (bounded). */
   stepLog: AgentStepEntry[]
+  /** Documents this run touched, in first-touch order (deduped by
+   * artifact — an update refreshes the existing chip in place). */
+  touchedArtifacts: AgentTouchedArtifact[]
+  /** Canvas comments that rode the submission (P9d, replay-durable). */
+  canvasContextMeta?: AgentCanvasContextMeta
   /** Auto-approved replan note (plan.revised{auto_approved}). */
   lastAutoApprovedVersion?: number
   /** Proposed editor patch (M7): id from the patch.proposed event, the
@@ -459,6 +700,19 @@ export type AgentRunRecord = {
   patch?: AgentPatchRecord
   patchStale: boolean
 }
+
+/**
+ * `updatedAt` of a session record FABRICATED from a run summary (G1 /
+ * F-P4-TITLE2): hydration delivers run summaries newest-first, often
+ * before the session listing, and the fabricated row must never carry
+ * merge authority — with the epoch stamp the real server row always
+ * wins `local-newer-wins`, and the autosave never pushes an untouched
+ * fabrication (persistableAgentSessionsInOrder skips it). Any USER
+ * mutation stamps a real `updatedAt` and thereby lifts the marker —
+ * no clearing discipline to drift. Only the fabrication branch in
+ * `withAgentRunSummary` ever writes this value.
+ */
+export const DERIVED_AGENT_SESSION_UPDATED_AT = '1970-01-01T00:00:00.000Z'
 
 export type AgentSessionRecord = {
   id: string
@@ -633,6 +887,7 @@ export function agentApprovalFromWire(
     subjectId: wire.subject_id,
     payload: { ...wire.payload },
     decision: wire.decision,
+    decisionPayload: { ...(wire.decision_payload ?? {}) },
     note: wire.note,
     createdAt: wire.created_at,
     decidedAt: wire.decided_at,
@@ -804,7 +1059,11 @@ export function agentRunFromSummary(
     error: summary.error?.message,
     snapshot: summary.snapshot,
     lastSequence: 0,
-    planStale: true,
+    // The kernel has no plan phase (its /plan is a guaranteed 404), so
+    // seeding it stale would fire one doomed fetch per desk open. The FE
+    // twin of the backend's AGENT_MODE_IDS split — a kernel that ever
+    // gains plans must flip this together with isAgentRunSummary.
+    planStale: summary.mode !== 'agent_kernel',
     approvals: [],
     approvalsStale: true,
     clarifications: [],
@@ -814,7 +1073,9 @@ export function agentRunFromSummary(
     artifactsStale: true,
     taskStates: {},
     children: {},
+    childGates: {},
     stepLog: [],
+    touchedArtifacts: [],
     patchStale: false,
   }
 }

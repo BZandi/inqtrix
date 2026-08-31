@@ -8,6 +8,8 @@ import type {
 } from '@/features/researchRuns/types'
 import { createEmptyProjectState, createSeedProjectState } from '@/features/project/seedProject'
 import { normalizeChatRule } from '@/features/project/chatRules'
+import { adoptVisibleExplorerOrder } from '@/features/project/explorerSort'
+import type { ExplorerSortDesk, ExplorerSortMode } from '@/features/project/explorerSort'
 import { renderChatRuleAttachmentContent } from '@/features/project/chatRuleRendering'
 import type {
   ChatChainStepRecord,
@@ -17,6 +19,7 @@ import type {
   ChatMessageModelResolutionRecord,
   ChatMessageRequestContextRecord,
   ChatRuleRecord,
+  ChatThreadDeletionState,
   ChatThreadGroupRecord,
   ChatThreadRecord,
   EditorCommentKind,
@@ -78,15 +81,18 @@ import {
 import type { AgentPlanDraft as AgentPlanDraftState } from '@/features/agent/plan/usePlanApproval'
 import {
   agentApprovalFromWire,
+  sessionArtifactMetaFromWire,
   mergeAgentRunApprovals,
   mergeAgentRunClarifications,
   agentArtifactFromWire,
   agentClarificationFromWire,
   agentPatchFromWire,
   agentPlanFromWire,
+  DERIVED_AGENT_SESSION_UPDATED_AT,
   isAgentRunSummary,
   mergeAgentRunSummary,
   type AgentRunRecord,
+  type AgentSessionArtifactMeta,
   type AgentSessionGroupRecord,
   type AgentSessionRecord,
 } from '@/features/agent/model'
@@ -166,7 +172,19 @@ export type ResearchDeskAction =
   | { ruleId: string; type: 'deleteChatRule' }
   | { groupId: string; type: 'deleteChatThreadGroup' }
   | { type: 'deleteChatThread'; threadId: string }
+  | {
+    deletion: ChatThreadDeletionState | null
+    threadId: string
+    type: 'setChatThreadDeletion'
+  }
   | { threadId: string; type: 'togglePinnedChatThread' }
+  | { desk: ExplorerSortDesk; mode: ExplorerSortMode; type: 'setExplorerSortMode' }
+  | {
+    desk: 'agent' | 'chat' | 'editor' | 'knowledge'
+    folderIds: string[]
+    itemIds: string[]
+    type: 'adoptExplorerOrder'
+  }
   | { type: 'deleteJob'; jobId: string }
   | { folderId?: string | null; type: 'createEditorDocument' }
   | { title: string; type: 'createEditorFolder' }
@@ -182,6 +200,7 @@ export type ResearchDeskAction =
   | { folderId: string; targetIndex: number; type: 'moveEditorFolder' }
   | { documentId: string; folderId: string | null; targetIndex: number; type: 'moveEditorDocumentToFolder' }
   | { comment: EditorCommentThreadRecord; type: 'createEditorComment' }
+  | { comment: EditorCommentThreadRecord; type: 'adoptEditorCarrierComment' }
   | { commentId: string; type: 'resolveEditorComment' }
   | { commentId: string; type: 'deleteEditorComment' }
   | { commentId: string; contentMarkdown: string; type: 'updateEditorCommentText' }
@@ -242,6 +261,7 @@ export type ResearchDeskAction =
   | { contentMarkdown: string; messageId: string; threadId: string; type: 'editChatUserMessage' }
   | { type: 'hydrateProject'; state: ProjectState }
   | { type: 'appendApiRunEvent'; event: ResearchRunEvent }
+  | { type: 'appendApiRunEvents'; events: ResearchRunEvent[] }
   | { select?: boolean; summary: ResearchRunSummary; type: 'upsertAgentRunSummary' }
   | { plan: AgentPlanWire | null; runId: string; type: 'setAgentRunPlan' }
   | { runId: string; type: 'markAgentRunPlanStale' }
@@ -254,10 +274,20 @@ export type ResearchDeskAction =
   }
   | { approvals: AgentApprovalWire[]; runId: string; type: 'setAgentRunApprovals' }
   | { clarifications: AgentClarificationWire[]; runId: string; type: 'setAgentRunClarifications' }
+  | {
+    approvals?: AgentApprovalWire[]
+    childRunId: string
+    clarifications?: AgentClarificationWire[]
+    question?: string
+    runId: string
+    type: 'setAgentChildGates'
+  }
   | { artifacts: AgentArtifactMetaWire[]; runId: string; type: 'setAgentRunArtifacts' }
+  | { artifacts: AgentArtifactMetaWire[]; sessionId: string; type: 'setAgentSessionArtifacts' }
+  | { message: string; sessionId: string; type: 'markAgentSessionArtifactsError' }
   | { artifact: AgentArtifactDetailWire; runId: string; type: 'setAgentRunArtifactDetail' }
   | { patch: AgentPatchWire; runId: string; type: 'setAgentRunPatch' }
-  | { message: string; runId: string; surface?: 'plan' | 'approvals' | 'clarifications' | 'artifacts' | 'answer' | 'patch'; type: 'markAgentRunError' }
+  | { childRunId?: string; message: string; runId: string; surface?: 'plan' | 'approvals' | 'clarifications' | 'artifacts' | 'answer' | 'patch' | 'child_gates'; type: 'markAgentRunError' }
   | { session: AgentSessionRecord; type: 'createAgentSession' }
   | { sessionId: string; sourcePolicy: AgentSourcePolicy; type: 'setAgentSessionSourcePolicy' }
   | { sessionId: string; title: string; type: 'renameAgentSession' }
@@ -265,7 +295,8 @@ export type ResearchDeskAction =
   | { deletion: SessionDeletionState; sessionId: string; type: 'setAgentSessionDeletionState' }
   | { sessionId: string | null; type: 'selectAgentSession' }
   | { sessionId: string; type: 'togglePinnedAgentSession' }
-  | { groupId: string | null; sessionId: string; type: 'moveAgentSessionToGroup' }
+  | { groupId: string | null; sessionId: string; targetIndex: number; type: 'moveAgentSessionToGroup' }
+  | { groupId: string; targetIndex: number; type: 'moveAgentSessionGroup' }
   | { title: string; type: 'createAgentSessionGroup' }
   | { groupId: string; title: string; type: 'renameAgentSessionGroup' }
   | { groupId: string; type: 'deleteAgentSessionGroup' }
@@ -286,7 +317,8 @@ export type ResearchDeskAction =
   | { type: 'toggleAgentSessionsVisible' }
   | { type: 'attachApiRunResult'; result: ResearchRunResult }
   | { type: 'markApiRunError'; message: string; runId: string }
-  | { type: 'upsertApiRunSummary'; select?: boolean; summary: ResearchRunSummary }
+  | { type: 'markApiRunUnavailable'; runId: string }
+  | { hydration?: boolean; type: 'upsertApiRunSummary'; select?: boolean; summary: ResearchRunSummary }
   | {
       sourceRunId: string
       summary: ResearchRunSummary
@@ -554,9 +586,13 @@ export function initializeResearchDeskState(): ResearchDeskState {
 }
 
 function toggleExplorerPin(ids: readonly string[], id: string) {
+  // Appending keeps the pinned section stable (operator decision,
+  // sort program): the first pin stays on top, a new pin attaches
+  // below and never reshuffles the existing ones. Automatic sort
+  // modes render this array order; manual mode keeps master order.
   return ids.includes(id)
     ? ids.filter((currentId) => currentId !== id)
-    : [id, ...ids]
+    : [...ids, id]
 }
 
 function removeExplorerPin(ids: readonly string[], id: string) {
@@ -651,6 +687,56 @@ export function researchDeskReducer(
   if (action.type === 'setDemoMode') {
     const base = action.enabled ? createSeedProjectState() : createEmptyProjectState()
     return { ...base, projectEpoch: state.projectEpoch + 1 }
+  }
+  if (action.type === 'setExplorerSortMode') {
+    if (state.ui.explorerSort[action.desk] === action.mode) return state
+    return {
+      ...state,
+      dirty: true,
+      ui: {
+        ...state.ui,
+        explorerSort: { ...state.ui.explorerSort, [action.desk]: action.mode },
+      },
+    }
+  }
+  if (action.type === 'adoptExplorerOrder') {
+    // A drag inside an automatic sort mode adopts the visible order as
+    // the new explicit order and switches the desk to manual — the list
+    // must not jump at the moment of the switch.
+    const adopted = {
+      ...state,
+      dirty: true,
+      ui: {
+        ...state.ui,
+        explorerSort: { ...state.ui.explorerSort, [action.desk]: 'manual' as const },
+      },
+    }
+    if (action.desk === 'chat') {
+      return {
+        ...adopted,
+        chatThreadGroupOrder: adoptVisibleExplorerOrder(state.chatThreadGroupOrder, action.folderIds),
+        chatThreadOrder: adoptVisibleExplorerOrder(state.chatThreadOrder, action.itemIds),
+      }
+    }
+    if (action.desk === 'knowledge') {
+      return {
+        ...adopted,
+        knowledgeSessionGroupOrder: adoptVisibleExplorerOrder(state.knowledgeSessionGroupOrder, action.folderIds),
+        knowledgeSessionOrder: adoptVisibleExplorerOrder(state.knowledgeSessionOrder, action.itemIds),
+      }
+    }
+    if (action.desk === 'agent') {
+      return {
+        ...adopted,
+        agentSessionGroupOrder: adoptVisibleExplorerOrder(state.agentSessionGroupOrder, action.folderIds),
+        agentSessionOrder: adoptVisibleExplorerOrder(state.agentSessionOrder, action.itemIds),
+      }
+    }
+    return {
+      ...adopted,
+      editorDocumentOrder: adoptVisibleExplorerOrder(state.editorDocumentOrder, action.itemIds),
+      editorFolderOrder: adoptVisibleExplorerOrder(state.editorFolderOrder, action.folderIds),
+    }
   }
   if (action.type === 'togglePinnedChatThread') {
     if (!state.chatThreads[action.threadId]) return state
@@ -1168,6 +1254,21 @@ export function researchDeskReducer(
       },
     }, action.comment, 'upsert')
   }
+  if (action.type === 'adoptEditorCarrierComment') {
+    // Die Maschinenzeile eines Assistentenlaufs. Sie ist bereits
+    // servergespeichert -- der Entwurf haengt daran -, also KEIN
+    // Outbox-Eintrag. Und sie ist keine Notiz des Nutzers, also weder
+    // Panel oeffnen noch auswaehlen: der Zustand braucht sie nur, damit
+    // "Verfeinern" und "Bearbeiten" ihren Kommentar wiederfinden.
+    if (!state.editorDocuments[action.comment.documentId]) return state
+    return {
+      ...state,
+      editorComments: {
+        ...state.editorComments,
+        [action.comment.id]: action.comment,
+      },
+    }
+  }
   if (action.type === 'resolveEditorComment') {
     const comment = state.editorComments[action.commentId]
     if (!comment || comment.status === 'resolved') return state
@@ -1587,7 +1688,14 @@ export function researchDeskReducer(
     // Agent runs live on the Agent Desk (own record model); child runs are
     // internal to their parent and never surface as standalone cards.
     if (isAgentRunSummary(action.summary)) {
-      return withAgentRunSummary(state, action.summary, Boolean(action.select))
+      return withAgentRunSummary(
+        state,
+        action.summary,
+        Boolean(action.select),
+        // Hydration replays history newest-first — only a LIVE submit may
+        // hand a placeholder session its title (P3.5 drift fix).
+        { retitle: !action.hydration },
+      )
     }
     if (action.summary.kind === 'agent_child') return state
     const current = state.researchRuns[action.summary.run_id]
@@ -1619,7 +1727,9 @@ export function researchDeskReducer(
   }
   if (action.type === 'upsertAgentRunSummary') {
     // Server-derived rows: never dirty (session-scoped, not project files).
-    return withAgentRunSummary(state, action.summary, Boolean(action.select))
+    return withAgentRunSummary(state, action.summary, Boolean(action.select), {
+      retitle: true,
+    })
   }
   if (action.type === 'setAgentRunPlan') {
     // `plan: null` = the server has no plan yet (pre-planning 404); the
@@ -1672,6 +1782,69 @@ export function researchDeskReducer(
       ),
       clarificationsStale: false,
     }))
+  }
+  if (action.type === 'setAgentChildGates') {
+    // Same reconcile-not-replace contract as the root surfaces, applied to
+    // one parked child's rows on the PARENT record (children never become
+    // desk records). A decide seeds its single fresh row; the fetch brings
+    // the full lists — neither may regress a decided row to pending.
+    return updateAgentRun(state, action.runId, (run) => {
+      const gates = run.childGates[action.childRunId]
+      return {
+        ...run,
+        childGates: {
+          ...run.childGates,
+          [action.childRunId]: {
+            approvals: mergeAgentRunApprovals(
+              gates?.approvals ?? [],
+              (action.approvals ?? []).map(agentApprovalFromWire),
+            ),
+            clarifications: mergeAgentRunClarifications(
+              gates?.clarifications ?? [],
+              (action.clarifications ?? []).map(agentClarificationFromWire),
+            ),
+            question: action.question ?? gates?.question,
+            stale: false,
+          },
+        },
+      }
+    })
+  }
+  if (action.type === 'setAgentSessionArtifacts') {
+    // Anchor-independent index (P4): the rows carry each artifact's
+    // CURRENT run anchor; server-derived, never dirty.
+    const byId: Record<string, AgentSessionArtifactMeta> = {}
+    const order: string[] = []
+    for (const wire of action.artifacts) {
+      const meta = sessionArtifactMetaFromWire(wire)
+      byId[meta.artifactId] = meta
+      order.push(meta.artifactId)
+    }
+    return {
+      ...state,
+      agentSessionArtifacts: {
+        ...state.agentSessionArtifacts,
+        [action.sessionId]: { byId, order, stale: false },
+      },
+    }
+  }
+  if (action.type === 'markAgentSessionArtifactsError') {
+    // Same no-tight-loop contract as the run surfaces: the failure
+    // clears the stale flag and stays VISIBLE on the index (rendered
+    // where the index feeds a menu); the next SSE signal re-flags.
+    const index = state.agentSessionArtifacts[action.sessionId]
+    return {
+      ...state,
+      agentSessionArtifacts: {
+        ...state.agentSessionArtifacts,
+        [action.sessionId]: {
+          byId: index?.byId ?? {},
+          order: index?.order ?? [],
+          error: action.message,
+          stale: false,
+        },
+      },
+    }
   }
   if (action.type === 'setAgentRunArtifacts') {
     return updateAgentRun(state, action.runId, (run) => {
@@ -1754,6 +1927,19 @@ export function researchDeskReducer(
         : {}),
       ...(action.surface === 'artifacts' ? { artifactsStale: false } : {}),
       ...(action.surface === 'patch' ? { patchStale: false } : {}),
+      ...(action.surface === 'child_gates'
+        && action.childRunId
+        && run.childGates[action.childRunId]
+        ? {
+          childGates: {
+            ...run.childGates,
+            [action.childRunId]: {
+              ...run.childGates[action.childRunId],
+              stale: false,
+            },
+          },
+        }
+        : {}),
     }))
   }
   if (action.type === 'createAgentSession') {
@@ -1928,19 +2114,59 @@ export function researchDeskReducer(
   }
   if (action.type === 'moveAgentSessionToGroup') {
     const session = state.agentSessions[action.sessionId]
-    if (!session || session.groupId === action.groupId) return state
+    if (!session) return state
+    const groupChanged = (session.groupId ?? null) !== action.groupId
+    if (!groupChanged) {
+      // Same-position no-op guard (chat parity): a threshold-crossing
+      // wiggle released on the row's own slot must not dirty the project.
+      const pinnedIds = new Set(state.ui.pinnedExplorer.agentSessionIds)
+      const groupOf = (id: string) => {
+        const candidate = state.agentSessions[id]?.groupId
+        return candidate && state.agentSessionGroups[candidate] ? candidate : null
+      }
+      const sectionIds = state.agentSessionOrder.filter((id) =>
+        id !== action.sessionId && !pinnedIds.has(id) && groupOf(id) === action.groupId)
+      const currentIds = state.agentSessionOrder.filter((id) =>
+        !pinnedIds.has(id) && groupOf(id) === action.groupId)
+      const currentIndex = currentIds.indexOf(action.sessionId)
+      const boundedTargetIndex = Math.max(0, Math.min(sectionIds.length, action.targetIndex))
+      if (currentIndex === boundedTargetIndex) return state
+    }
     return {
       ...state,
       dirty: true,
+      agentSessionOrder: insertAgentSessionIntoSection(
+        state,
+        action.sessionId,
+        action.groupId,
+        action.targetIndex,
+      ),
       agentSessions: {
         ...state.agentSessions,
-        [action.sessionId]: {
-          ...session,
-          groupId: action.groupId,
-          updatedAt: new Date().toISOString(),
-        },
+        [action.sessionId]: groupChanged
+          ? {
+            ...session,
+            groupId: action.groupId,
+            // The bump flushes the sync fingerprint so the server learns
+            // the new group; a pure position change stays local.
+            updatedAt: new Date().toISOString(),
+          }
+          : session,
       },
     }
+  }
+  if (action.type === 'moveAgentSessionGroup') {
+    if (!state.agentSessionGroups[action.groupId]) return state
+    const withoutGroup = state.agentSessionGroupOrder.filter((id) => id !== action.groupId)
+    const boundedIndex = Math.max(0, Math.min(withoutGroup.length, action.targetIndex))
+    if (state.agentSessionGroupOrder[boundedIndex] === action.groupId
+      && withoutGroup.length + 1 === state.agentSessionGroupOrder.length) {
+      const current = state.agentSessionGroupOrder.indexOf(action.groupId)
+      if (current === boundedIndex) return state
+    }
+    const nextOrder = [...withoutGroup]
+    nextOrder.splice(boundedIndex, 0, action.groupId)
+    return { ...state, agentSessionGroupOrder: nextOrder, dirty: true }
   }
   if (action.type === 'createAgentSessionGroup') {
     const now = new Date().toISOString()
@@ -2220,14 +2446,15 @@ export function researchDeskReducer(
     }
     // Preserve the SERVER's keyset order (created_at desc) within each batch:
     // newIds already follows action.threads, which the hook fills straight from
-    // the server page. Re-sorting by another key (e.g. updatedAt) would make the
+    // the server page. Re-sorting THIS ARRAY by another key would make the
     // merged list inconsistent across page boundaries -- the server paginates by
-    // created_at, so an older-created/recently-updated thread would float above
-    // page-1 threads it actually sorts after on the server. Keeping the server
-    // order makes the displayed list a faithful prefix of the canonical order
-    // across every paginated load. (Sending a message to an existing thread does
-    // not re-bubble it either -- see startChatExchange -- so created_at order is
-    // the coherent client model, not an approximation of activity-recency.)
+    // created_at, so keeping its order makes chatThreadOrder a faithful prefix
+    // of the canonical pagination across every load-more. DISPLAY recency is a
+    // separate concern since the sort program: projectChatHistorySections sorts
+    // the RENDERED sections by activity in the automatic modes while this array
+    // stays the untouched pagination prefix. Honest limit: recency is ranked
+    // within the loaded created_at window only -- an old thread that became
+    // active again is not in the window until 'load older' reaches it.
     // Page-1 / newest hydrate prepends; an older load-more page appends to the
     // end so the displayed order stays newest-first across paginated loads.
     const chatThreadOrder = newIds.length === 0
@@ -3252,35 +3479,20 @@ export function researchDeskReducer(
     return { ...state, vectorIndexOrder, vectorIndexes }
   }
   if (action.type === 'appendApiRunEvent') {
-    // Knowledge thread items consume the same event stream as the run
-    // records: demo asks have no run record, live asks have both.
-    const withKnowledge = applyEventToKnowledgeItem(state, action.event)
-    // Agent runs own their events entirely (separate record model);
-    // server-derived state never marks the project dirty.
-    const agentRun = withKnowledge.agentRuns[action.event.run_id]
-    if (agentRun) {
-      const applied = applyAgentRunEvent(agentRun, action.event)
-      if (applied === agentRun) return withKnowledge
-      return {
-        ...withKnowledge,
-        agentRuns: {
-          ...withKnowledge.agentRuns,
-          [applied.runId]: applied,
-        },
-      }
-    }
-    const current = withKnowledge.researchRuns[action.event.run_id]
-    if (!current) return withKnowledge
-    const run = applyRunEvent(current, action.event)
-
-    return {
-      ...withKnowledge,
-      dirty: true,
-      researchRuns: {
-        ...withKnowledge.researchRuns,
-        [run.runId]: run,
-      },
-    }
+    return appendApiRunEventToState(state, action.event, { arrivedLive: true })
+  }
+  if (action.type === 'appendApiRunEvents') {
+    // History batch: the transport delivered these as replay/catch-up (SSE
+    // frames before the server's `inqtrix.stream.live` boundary, or the
+    // first polling page), so they land in ONE commit — no render per
+    // replayed frame — and without `arrivedLive`, so no row animates.
+    // Semantics are pinned to the singular path: Batch(N) ≡ N × Einzeln,
+    // bis auf `arrivedLive` (state.test.ts).
+    return action.events.reduce(
+      (accumulated, event) =>
+        appendApiRunEventToState(accumulated, event, { arrivedLive: false }),
+      state,
+    )
   }
   if (action.type === 'attachApiRunResult') {
     const knowledgeItem = knowledgeItemByRunId(state, action.result.run_id)
@@ -3316,6 +3528,45 @@ export function researchDeskReducer(
       researchRuns: {
         ...withKnowledge.researchRuns,
         [run.runId]: run,
+      },
+    }
+  }
+  if (action.type === 'markApiRunUnavailable') {
+    // Knowledge asks never live in researchRuns; their surface is the
+    // thread item, which would otherwise spin at "running" forever with
+    // no path out (the ask gate blocks and cancel also 404s). The item
+    // settles terminally with the unavailable prose -- project data, so
+    // this branch IS dirty.
+    const knowledgeItem = knowledgeItemByRunId(state, action.runId)
+    if (knowledgeItem) {
+      return touchKnowledgeSessions(
+        updateKnowledgeItem({ ...state, dirty: true }, knowledgeItem.id, (item) => (
+          item.status === 'completed'
+            ? item
+            : {
+                ...item,
+                error: 'Dieser Lauf ist nicht mehr verfügbar.',
+                status: 'failed',
+              }
+        )),
+        [knowledgeItem.sessionId],
+        new Date().toISOString(),
+      )
+    }
+    const current = state.researchRuns[action.runId]
+    if (!current || current.unavailable === true) return state
+    // Calm lock, NOT an error and NOT a status claim: the server's 404
+    // is deliberately non-disclosing (revoked/deleted/expired/foreign
+    // all identical), so the last known status stays and only the flag
+    // moves. The next run-list hydration prunes the record entirely.
+    // NOT dirty: the flag is server-derived, never serialized into a
+    // project file -- dirtying it would show "Unsaved changes" for a
+    // change no save artifact can capture.
+    return {
+      ...state,
+      researchRuns: {
+        ...state.researchRuns,
+        [action.runId]: { ...current, unavailable: true },
       },
     }
   }
@@ -4990,6 +5241,20 @@ export function researchDeskReducer(
   if (action.type === 'setChatAssistantMessageContent') {
     return setChatAssistantMessageContent(state, action)
   }
+  if (action.type === 'setChatThreadDeletion') {
+    const thread = state.chatThreads[action.threadId]
+    if (!thread) return state
+    // Deliberately leaves `updatedAt` untouched: the autosave fingerprint is
+    // (groupId, updatedAt), so marking a row as deleting must not look like
+    // an edit that needs pushing.
+    const next = { ...thread, deletion: action.deletion ?? undefined }
+    if (!action.deletion) delete next.deletion
+    return {
+      ...state,
+      chatThreads: { ...state.chatThreads, [action.threadId]: next },
+    }
+  }
+
   if (action.type === 'deleteChatThread') {
     const chatThreads = { ...state.chatThreads }
     delete chatThreads[action.threadId]
@@ -5235,8 +5500,12 @@ function insertKnowledgeSessionIntoSection(
   targetIndex: number,
 ) {
   const orderWithoutSession = state.knowledgeSessionOrder.filter((id) => id !== sessionId)
+  // Same pinned-row exclusion as insertThreadIntoSection: the DOM drop
+  // index never counts pinned rows.
+  const pinnedIds = new Set(state.ui.pinnedExplorer.knowledgeSessionIds)
   const targetSessionIds = orderWithoutSession.filter((id) =>
-    normalizedKnowledgeSessionGroupId(state, id, memberships) === groupId)
+    !pinnedIds.has(id)
+    && normalizedKnowledgeSessionGroupId(state, id, memberships) === groupId)
   const beforeSessionId = targetSessionIds[targetIndex]
   if (beforeSessionId) {
     return insertBefore(orderWithoutSession, sessionId, beforeSessionId)
@@ -5370,7 +5639,13 @@ function insertThreadIntoSection(
   targetIndex: number,
 ) {
   const orderWithoutThread = state.chatThreadOrder.filter((id) => id !== threadId)
-  const targetThreadIds = orderWithoutThread.filter((id) => normalizedThreadGroupId(state, id, memberships) === groupId)
+  // Pinned rows render in the lifted pinned block, so the DOM drop index
+  // counts a section WITHOUT them — anchor against the same set or every
+  // drop lands off by the pinned count (review find).
+  const pinnedIds = new Set(state.ui.pinnedExplorer.chatThreadIds)
+  const targetThreadIds = orderWithoutThread.filter((id) =>
+    !pinnedIds.has(id)
+    && normalizedThreadGroupId(state, id, memberships) === groupId)
   const beforeThreadId = targetThreadIds[targetIndex]
   if (beforeThreadId) {
     return insertBefore(orderWithoutThread, threadId, beforeThreadId)
@@ -5413,6 +5688,55 @@ function emptySectionInsertionIndex(
   }
 
   return orderWithoutThread.length
+}
+
+/** Agent twin of insertThreadIntoSection: sessions carry groupId on the
+ * record (no membership map), pinned rows are excluded from the visible
+ * index just like every other rail. */
+function insertAgentSessionIntoSection(
+  state: ResearchDeskState,
+  sessionId: string,
+  groupId: string | null,
+  targetIndex: number,
+) {
+  const orderWithoutSession = state.agentSessionOrder.filter((id) => id !== sessionId)
+  const pinnedIds = new Set(state.ui.pinnedExplorer.agentSessionIds)
+  const groupOf = (id: string) => {
+    const candidate = state.agentSessions[id]?.groupId
+    return candidate && state.agentSessionGroups[candidate] ? candidate : null
+  }
+  const targetSessionIds = orderWithoutSession.filter((id) =>
+    !pinnedIds.has(id) && groupOf(id) === groupId)
+  const beforeSessionId = targetSessionIds[targetIndex]
+  if (beforeSessionId) {
+    return insertBefore(orderWithoutSession, sessionId, beforeSessionId)
+  }
+  const previousSessionId = targetSessionIds[targetIndex - 1]
+  if (previousSessionId) {
+    return insertAfter(orderWithoutSession, sessionId, previousSessionId)
+  }
+  const sectionKeys: (string | null)[] = [
+    ...state.agentSessionGroupOrder.filter((candidateId) => Boolean(state.agentSessionGroups[candidateId])),
+    null,
+  ]
+  const targetSectionIndex = Math.max(0, sectionKeys.findIndex((candidateId) => candidateId === groupId))
+  for (const nextGroupId of sectionKeys.slice(targetSectionIndex + 1)) {
+    const nextSessionId = orderWithoutSession.find((id) => groupOf(id) === nextGroupId)
+    if (nextSessionId) {
+      const nextOrder = [...orderWithoutSession]
+      nextOrder.splice(orderWithoutSession.indexOf(nextSessionId), 0, sessionId)
+      return nextOrder
+    }
+  }
+  for (const previousGroupId of sectionKeys.slice(0, targetSectionIndex).reverse()) {
+    const previousSessionId = [...orderWithoutSession].reverse().find((id) => groupOf(id) === previousGroupId)
+    if (previousSessionId) {
+      const nextOrder = [...orderWithoutSession]
+      nextOrder.splice(orderWithoutSession.indexOf(previousSessionId) + 1, 0, sessionId)
+      return nextOrder
+    }
+  }
+  return [...orderWithoutSession, sessionId]
 }
 
 function threadIdsForGroup(
@@ -5677,6 +6001,12 @@ function setChatAssistantMessageContent(
 ): ResearchDeskState {
   const thread = state.chatThreads[action.threadId]
   if (!thread) return state
+  // A thread awaiting its server deletion accepts no further content. The
+  // abort of its in-flight generation lands here with the "generation
+  // stopped" text, and writing it would bump `updatedAt` — the autosave
+  // fingerprint — so the next flush would push the thread back to a server
+  // that just deleted it.
+  if (thread.deletion) return state
 
   const messageIndex = thread.messages.findIndex((message) => message.id === action.assistantMessageId)
   if (messageIndex === -1) return state
@@ -5846,10 +6176,14 @@ function moveEditorDocumentToFolder(
   const currentFolderId = document.folderId && state.editorFolders[document.folderId]
     ? document.folderId
     : null
+  // Visible-index math excludes pinned documents (they render in the
+  // lifted Pinned section, never inside their folder).
+  const pinnedDocumentIds = new Set(state.ui.pinnedExplorer.editorDocumentIds)
   const currentSectionDocumentIds = documentIdsForEditorFolder(state.editorDocumentOrder, state.editorDocuments, currentFolderId)
+    .filter((id) => !pinnedDocumentIds.has(id))
   const currentIndex = currentSectionDocumentIds.indexOf(documentId)
   const targetDocumentIds = documentIdsForEditorFolder(state.editorDocumentOrder, state.editorDocuments, folderId)
-    .filter((id) => id !== documentId)
+    .filter((id) => id !== documentId && !pinnedDocumentIds.has(id))
   const boundedTargetIndex = Math.max(0, Math.min(targetDocumentIds.length, targetIndex))
   if (currentFolderId === folderId && currentIndex === boundedTargetIndex) return state
 
@@ -5863,6 +6197,7 @@ function moveEditorDocumentToFolder(
       folderId,
       boundedTargetIndex,
       documentId,
+      state.ui.pinnedExplorer.editorDocumentIds,
     ),
     editorDocuments: {
       ...state.editorDocuments,
@@ -5883,14 +6218,21 @@ function moveSectionDocumentIds(
   targetFolderId: string | null,
   targetIndex: number,
   movedDocumentId?: string,
+  pinnedDocumentIds: readonly string[] = [],
 ): string[] {
   const movedIds = movedDocumentId
     ? [movedDocumentId]
     : documentOrder.filter((documentId) => documents[documentId]?.folderId === currentFolderId)
   const orderWithoutMovedIds = documentOrder.filter((documentId) => !movedIds.includes(documentId))
+  // Pinned documents render in the lifted Pinned section but keep their
+  // folderId — exclude them so the DOM drop index (which never counts
+  // them) anchors against the same visible set.
+  const pinnedIds = new Set(pinnedDocumentIds)
   const targetSectionIds = orderWithoutMovedIds.filter((documentId) => {
     const document = documents[documentId]
-    return Boolean(document) && (document.folderId ?? null) === targetFolderId
+    return Boolean(document)
+      && !pinnedIds.has(documentId)
+      && (document.folderId ?? null) === targetFolderId
   })
   const boundedTargetIndex = Math.max(0, Math.min(targetSectionIds.length, targetIndex))
   const anchorId = targetSectionIds[boundedTargetIndex] ?? null
@@ -6115,6 +6457,10 @@ function knowledgeSessionTitleFromQuestion(question: string): string {
   return title || 'Knowledge session'
 }
 
+function isPlaceholderAgentSessionTitle(title: string): boolean {
+  return ['Neue Sitzung', 'New session', ''].includes(title.trim())
+}
+
 function isPlaceholderKnowledgeSessionTitle(title: string): boolean {
   return [
     'Knowledge session',
@@ -6200,6 +6546,68 @@ function touchKnowledgeSessions(
 /** Route one run event into the matching knowledge thread item (live
  * runs and demo asks share this path); terminal events also close the
  * item so the card never poses as still running. */
+/** The ONE application path for a run event, shared by the live single
+ * dispatch (arrivedLive: true) and the history batch (arrivedLive: false) —
+ * the two may never drift apart in anything but that flag. */
+function appendApiRunEventToState(
+  state: ProjectState,
+  event: ResearchRunEvent,
+  options: { arrivedLive: boolean },
+): ProjectState {
+  // Knowledge thread items consume the same event stream as the run
+  // records: demo asks have no run record, live asks have both.
+  const withKnowledge = applyEventToKnowledgeItem(state, event)
+  // Agent runs own their events entirely (separate record model);
+  // server-derived state never marks the project dirty.
+  const agentRun = withKnowledge.agentRuns[event.run_id]
+  if (agentRun) {
+    const applied = applyAgentRunEvent(agentRun, event, options)
+    if (applied === agentRun) return withKnowledge
+    // The session artifact index invalidates alongside the run's
+    // artifact surface: an update may have RE-ANCHORED a session
+    // artifact, and only the session listing sees that move (P4).
+    const sessionId = applied.sessionId
+    const flipSession =
+      sessionId !== undefined
+      && applied.artifactsStale
+      && !agentRun.artifactsStale
+    const index = flipSession
+      ? withKnowledge.agentSessionArtifacts[sessionId]
+      : undefined
+    return {
+      ...withKnowledge,
+      agentRuns: {
+        ...withKnowledge.agentRuns,
+        [applied.runId]: applied,
+      },
+      ...(flipSession
+        ? {
+          agentSessionArtifacts: {
+            ...withKnowledge.agentSessionArtifacts,
+            [sessionId]: {
+              byId: index?.byId ?? {},
+              order: index?.order ?? [],
+              stale: true,
+            },
+          },
+        }
+        : {}),
+    }
+  }
+  const current = withKnowledge.researchRuns[event.run_id]
+  if (!current) return withKnowledge
+  const run = applyRunEvent(current, event, options)
+
+  return {
+    ...withKnowledge,
+    dirty: true,
+    researchRuns: {
+      ...withKnowledge.researchRuns,
+      [run.runId]: run,
+    },
+  }
+}
+
 function applyEventToKnowledgeItem(
   state: ProjectState,
   event: ResearchRunEvent,
@@ -6372,6 +6780,12 @@ function privateSuggestionOriginForComment(
   if (comment.kind === 'inline_edit') {
     return { commentId: comment.id, kind: 'inline_edit' }
   }
+  if (comment.kind === 'assistant_edit') {
+    // Eigene Herkunft, nicht 'global_run': eine Sammel-Notiz des Nutzers
+    // faellt ebenfalls in den Zweig darunter und traegt dann dieselbe
+    // Kennung. Wer Anweisungslaeufe daran erkennen will, traefe beide.
+    return { commentId: comment.id, kind: 'assistant_edit' }
+  }
   return { commentId: comment.id, kind: 'global_run' }
 }
 
@@ -6452,6 +6866,13 @@ function reconcilePrivateSuggestionDraftRecords(
       revision: draft.revision,
       status: 'pending',
       updatedAt: draft.updatedAt,
+      // Ohne diese beiden Zeilen faellt der Vorschlag beim Neuaufbau auf
+      // 'replace' zurueck (resolveSuggestionTarget: editPosition ?? 'replace').
+      // Ein "nach dem Anker einfuegen" wuerde dann den Anker ERSETZEN und der
+      // Nutzer verloere still Text. Bestandsentwuerfe ohne die Felder
+      // verhalten sich unveraendert wie bisher.
+      ...(draft.editPosition ? { editPosition: draft.editPosition } : {}),
+      ...(draft.anchorText ? { anchorText: draft.anchorText } : {}),
       ...(draft.changeSummary?.length
         ? { changeSummary: [...draft.changeSummary] }
         : {}),
@@ -6490,9 +6911,16 @@ function retireActiveDocumentInstructionSuggestions(
   let changed = false
   const next = Object.fromEntries(
     Object.entries(suggestions).map(([suggestionId, suggestion]) => {
+      // Genau die Vorschlaege des VORIGEN Anweisungslaufs, nicht mehr.
+      // 'global_run' ohne Traeger ist der Markdown-Modus; 'assistant_edit'
+      // ist der Kollaborationsmodus. Ein 'global_run' MIT commentId stammt
+      // dagegen aus einer Sammel-Notiz des Nutzers und geht diesen Lauf
+      // nichts an -- ihn mitzuverwerfen hiesse, offene Arbeit des Nutzers
+      // stillschweigend wegzuraeumen.
+      const fromInstructionRun = suggestion.origin.kind === 'assistant_edit'
+        || (suggestion.origin.kind === 'global_run' && !suggestion.origin.commentId)
       const shouldRetire = suggestion.documentId === documentId
-        && suggestion.origin.kind === 'global_run'
-        && !suggestion.origin.commentId
+        && fromInstructionRun
         && (suggestion.status === 'pending' || suggestion.status === 'stale')
       if (!shouldRetire) return [suggestionId, suggestion]
       changed = true
@@ -6508,7 +6936,11 @@ export function visibleResearchJobs(
 ) {
   return activeFilter === 'all'
     ? jobs
-    : jobs.filter((job) => job.status === activeFilter)
+    // An unavailable run's card visibly retracts its last status (calm
+    // lock), so it must not appear under -- or count toward -- that
+    // status bucket; it stays reachable under "all" until hydration
+    // prunes it.
+    : jobs.filter((job) => job.status === activeFilter && !job.unavailable)
 }
 
 export function selectedResearchJob(
@@ -6556,6 +6988,7 @@ export function replaceApiRunSummaries(
   let merged = state
   for (const summary of summaries) {
     merged = researchDeskReducer(merged, {
+      hydration: true,
       summary,
       type: 'upsertApiRunSummary',
     })
@@ -6933,11 +7366,22 @@ function withAgentRunSummary(
   state: ProjectState,
   summary: ResearchRunSummary,
   select: boolean,
+  { retitle = true }: { retitle?: boolean } = {},
 ): ProjectState {
   if (matchesCompletedAgentSessionDeletion(state, summary)) return state
   const current = state.agentRuns[summary.run_id]
   const run = mergeAgentRunSummary(current, summary)
   const sessionId = run.sessionId || run.runId
+  // First sighting of a session seeds its artifact index STALE, so the
+  // control loop fetches the anchor-independent listing once (P4);
+  // afterwards the event wrapper re-flags it alongside artifactsStale.
+  const agentSessionArtifacts = run.sessionId
+    && state.agentSessionArtifacts[run.sessionId] === undefined
+    ? {
+      ...state.agentSessionArtifacts,
+      [run.sessionId]: { byId: {}, order: [], stale: true },
+    }
+    : state.agentSessionArtifacts
   let agentSessions = state.agentSessions
   let agentSessionOrder = state.agentSessionOrder
   const existing = agentSessions[sessionId]
@@ -6947,7 +7391,13 @@ function withAgentRunSummary(
       title: run.question.trim().slice(0, 80) || sessionId,
       groupId: null,
       createdAt: run.createdAt,
-      updatedAt: run.createdAt,
+      // FABRICATION, not user state (G1): summaries hydrate newest-first
+      // and may beat the session listing — the epoch stamp makes the
+      // real server row win the merge and keeps the autosave from ever
+      // pushing this derived title over the stored one (the F-P4-TITLE2
+      // resurrection: a reload retitled the session to the LATEST
+      // question and synced that back durably).
+      updatedAt: DERIVED_AGENT_SESSION_UPDATED_AT,
       runIds: [run.runId],
       sourcePolicy: { ...DEFAULT_AGENT_SOURCE_POLICY },
       ...(run.access?.mode === 'shared' ? { persistable: false } : {}),
@@ -6955,14 +7405,44 @@ function withAgentRunSummary(
     agentSessions = { ...agentSessions, [sessionId]: session }
     agentSessionOrder = [sessionId, ...agentSessionOrder]
   } else if (!existing.runIds.includes(run.runId)) {
-    // No updatedAt stamp: run membership is server-derived, and a fresh
-    // stamp would win the local-newer-wins merge against a server-side
-    // rename that has not hydrated yet.
+    // Run membership never stamps updatedAt (server-derived). The ONE
+    // exception is the placeholder retitle on a LIVE submit: it must
+    // stamp — with the run's createdAt, not "now" — so the title syncs
+    // exactly once and later reloads see a REAL title instead of
+    // re-deriving one from whichever run hydrates first (newest-first —
+    // that drifted the title to the latest question, P3.5). A genuine
+    // user rename carries a later updatedAt and still wins the merge.
+    const retitled =
+      retitle
+      && existing.runIds.length === 0
+      && isPlaceholderAgentSessionTitle(existing.title)
+      && Boolean(run.question.trim())
+    // A still-untouched fabrication converges on the OLDEST run seen:
+    // newest-first hydration would otherwise display the latest
+    // question until the session listing lands (G1). A real row or any
+    // user mutation carries a non-epoch updatedAt and is never touched.
+    const rederived =
+      !retitled
+      && existing.updatedAt === DERIVED_AGENT_SESSION_UPDATED_AT
+      && run.createdAt < existing.createdAt
+      && Boolean(run.question.trim())
     agentSessions = {
       ...agentSessions,
       [sessionId]: {
         ...existing,
         runIds: [...existing.runIds, run.runId],
+        ...(retitled
+          ? {
+            title: run.question.trim().slice(0, 80),
+            updatedAt: run.createdAt,
+          }
+          : {}),
+        ...(rederived
+          ? {
+            createdAt: run.createdAt,
+            title: run.question.trim().slice(0, 80),
+          }
+          : {}),
       },
     }
   }
@@ -6994,6 +7474,7 @@ function withAgentRunSummary(
       ? agentCanvasForSelection(state, sessionId)
       : state.agentCanvas,
     agentRuns: { ...state.agentRuns, [run.runId]: run },
+    agentSessionArtifacts,
     agentSessionOrder,
     agentSessions,
     ...(select || selectedOverride

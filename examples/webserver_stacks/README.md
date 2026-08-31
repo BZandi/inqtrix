@@ -176,9 +176,9 @@ stack is registered only when its required vars are present, so
 | `OBSERVABILITY_PROFILE` | no | `summary` | `summary`, `debug`, or `forensic`. When set to `forensic`, the agent emits structured lineage events (`query_record`, `source_record`, `claim_merge`, `answer_claim_binding`, …) through the same `inqtrix` logger. Those lines are emitted at **DEBUG** level, so pair `forensic` with `INQTRIX_LOG_LEVEL=DEBUG` (and `INQTRIX_LOG_ENABLED=true`) to see them in `logs/inqtrix_<timestamp>.log`. Operator recipes: [`docs/observability/forensic-cookbook.md`](../../docs/observability/forensic-cookbook.md). |
 | `INQTRIX_SERVER_HOST` | no | `0.0.0.0` | uvicorn bind address |
 | `INQTRIX_SERVER_PORT` | no | `5100` | uvicorn port |
-| `MAX_CONCURRENT` | no | `3` | Maximum active `/v1/chat/completions` requests. Native runs reuse this value only when `RUN_MAX_CONCURRENT` is unset. |
-| `RUN_MAX_CONCURRENT` | no | unset | Optional active-worker cap for native `/v1/runs`. |
-| `RUN_QUEUE_MAX_SIZE` | no | `50` | Maximum native `/v1/runs` jobs waiting in memory. Active jobs do not count against this limit. |
+| `MAX_CONCURRENT` | no | `100` | Maximum active `/v1/chat/completions` requests. Native runs reuse this value only when `RUN_MAX_CONCURRENT` is unset. |
+| `RUN_MAX_CONCURRENT` | no | `100` | Active-worker cap for native `/v1/runs`. Omitting it yields `100`, not a fallback to `MAX_CONCURRENT`; an empty value fails startup validation. |
+| `RUN_QUEUE_MAX_SIZE` | no | `100` | Maximum native `/v1/runs` jobs waiting in memory. Active jobs do not count against this limit. |
 | `RUN_COMPLETED_TTL_SECONDS` | no | `300` | Seconds terminal native run records and event buffers remain queryable in memory. |
 | `RUN_EVENT_BUFFER_SIZE` | no | `200` | Recent structured events retained per native run for late SSE subscribers. |
 | `INQTRIX_SERVER_TLS_KEYFILE` | no | `""` | PEM private key; mandatory pair with `_TLS_CERTFILE` |
@@ -373,13 +373,14 @@ module docstring of that same file.
 
 The server serves multiple clients (e.g. several browser UIs) in
 parallel through an `asyncio.Semaphore`. The default cap is
-`MAX_CONCURRENT=3`. The OpenAI-compatible `/v1/chat/completions`
-endpoint keeps the historical behaviour: the fourth concurrent request
-receives an immediate `429 rate_limit_error` (no queueing).
+`MAX_CONCURRENT=100`. The OpenAI-compatible `/v1/chat/completions`
+endpoint keeps the historical behaviour: once the cap is reached the next
+concurrent request receives an immediate `429 rate_limit_error` (no
+queueing).
 
 The native `/v1/runs` endpoint uses `RUN_MAX_CONCURRENT` for active
 workers when set; otherwise it falls back to `MAX_CONCURRENT`. It also
-keeps an in-memory FIFO queue (`RUN_QUEUE_MAX_SIZE`, default 50).
+keeps an in-memory FIFO queue (`RUN_QUEUE_MAX_SIZE`, default 100).
 Queued/running state and completed reports are intentionally
 process-local; terminal records expire after `RUN_COMPLETED_TTL_SECONDS`
 (default 300).

@@ -29,6 +29,16 @@ export type SyncCollectionArgs<T, F> = {
   pushOne: (item: T) => Promise<void>
   /** Delete one entity (id) the local collection no longer has. */
   deleteOne: (id: string) => Promise<void>
+  /**
+   * Ids a concurrent exclusive writer owns right now — the diff must not
+   * touch them in EITHER direction. The owning case is a user-confirmed
+   * deletion: while it is in flight, just confirmed (the local removal has
+   * not committed yet, so ``current`` still holds a stale record), or failed
+   * and waiting for a manual retry, an autosave pass must neither re-push
+   * the entity (that resurrects the deleted row server-side) nor delete it
+   * (that would be an uncommanded retry of a failed deletion).
+   */
+  exclude?: ReadonlySet<string>
 }
 
 export async function syncCollection<T, F>({
@@ -38,16 +48,19 @@ export async function syncCollection<T, F>({
   changed,
   pushOne,
   deleteOne,
+  exclude,
 }: SyncCollectionArgs<T, F>): Promise<void> {
   for (const item of Object.values(current)) {
     const fingerprint = fingerprintOf(item)
     const id = idOf(item)
+    if (exclude?.has(id)) continue
     if (changed(synced.get(id), fingerprint)) {
       await pushOne(item)
       synced.set(id, fingerprint)
     }
   }
   for (const id of [...synced.keys()]) {
+    if (exclude?.has(id)) continue
     if (!(id in current)) {
       await deleteOne(id)
       synced.delete(id)

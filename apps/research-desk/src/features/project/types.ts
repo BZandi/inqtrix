@@ -3,6 +3,7 @@ import {
   type SerializedRelativePosition,
 } from '@inqtrix/editor-schema'
 import type { JobFilter, JobPhase, JobStatus, AppView } from '@/features/researchDesk/types'
+import type { ExplorerSortState } from '@/features/project/explorerSort'
 import type { Locale } from '@/i18n/translations'
 import { asFiniteNumber, asNonEmptyString } from '@/lib/coerce'
 import type {
@@ -49,6 +50,7 @@ export type ProjectMetadata = {
 
 import type {
   AgentRunRecord,
+  AgentSessionArtifactIndex,
   AgentSessionGroupRecord,
   AgentSessionRecord,
 } from '@/features/agent/model'
@@ -87,6 +89,9 @@ export type ProjectUiState = {
   panelLayout: ProjectPanelLayoutState
   pendingChatAttachmentRefs: ChatContextReferenceRecord[]
   pendingChatReportRunId: string | null
+  /** Per-desk sidebar sort mode (recent | name | manual); a drag in an
+   * automatic mode switches the desk to manual visibly. */
+  explorerSort: ExplorerSortState
   pinnedExplorer: PinnedExplorerState
   selectedChatModel: string | null
   selectedChatEffort: string | null
@@ -165,7 +170,19 @@ export type EditorFolderRecord = {
 
 export type EditorCommentStatus = 'open' | 'resolved' | 'stale'
 
-export type EditorCommentKind = 'collect' | 'inline_edit' | 'evidence_review'
+/** Die Arten privater Notizen -- plus einen Maschinentraeger.
+ *
+ * `assistant_edit` ist keine Notiz des Nutzers, sondern die Zeile, an der ein
+ * Assistentenlauf seinen privaten Entwurf befestigt. Nur ein solcher Entwurf
+ * autorisiert spaeter die Veroeffentlichung genau dieses Vorschlags. Die
+ * Notizliste und ihre Zaehler zeigen die Art nicht, und sie ist nicht erneut
+ * ausfuehrbar -- sonst waere jeder Maschinen-Edit eine Aufgabe fuer den
+ * Nutzer, die er nie gestellt hat. */
+export type EditorCommentKind =
+  | 'collect'
+  | 'inline_edit'
+  | 'evidence_review'
+  | 'assistant_edit'
 
 export type EditorEvidencePreset = 'add_sources' | 'fact_check' | 'verify_citations'
 
@@ -210,8 +227,22 @@ export type EditorSuggestionRevisionRecord = {
 
 export type EditorPrivateSuggestionDraftRecord = {
   anchorVersion: 1
+  /** Der Suchtext, an dem dieser Vorschlag haengt.
+   *
+   * Beim Kommentarweg steht er im Kommentar selbst. Ein Assistentenlauf hat
+   * keinen Kommentar des Nutzers, also muss der Entwurf ihn tragen: ohne ihn
+   * findet der Uebernahmepfad nach einem Neuladen die Stelle nicht wieder. */
+  anchorText?: string
   changeSummary?: string[]
   createdAt: string
+  /** Ob ersetzt oder eingefuegt wird -- und wo.
+   *
+   * Der Kommentarweg kennt nur "ersetze den markierten Bereich" und brauchte
+   * das Feld nie. Ein Assistentenlauf fuegt in drei von vier Faellen ein.
+   * Fehlt die Angabe, baut der Uebernahmepfad den Vorschlag als Ersetzung neu
+   * auf: aus "nach dem Anker einfuegen" wird "den Anker ersetzen", und der
+   * Nutzer verliert stillschweigend Text. */
+  editPosition?: EditorSuggestionEditPosition
   evidence?: EditorSuggestionEvidence
   groupId: string
   patchId: string
@@ -224,9 +255,17 @@ export type EditorPrivateSuggestionDraftRecord = {
   warnings?: string[]
 }
 
+/** Woher ein Vorschlag stammt.
+ *
+ * `assistant_edit` ist eigenstaendig und nicht mit `global_run` zu verwechseln:
+ * `global_run` traegt auch dann eine `commentId`, wenn der Lauf aus einer
+ * Sammel-Notiz des Nutzers kam. Wer Anweisungslaeufe an
+ * `kind === 'global_run'` erkennen will, trifft darum auch die Vorschlaege zu
+ * fremden Notizen -- und verwirft oder verdoppelt sie. */
 export type EditorSuggestionOrigin =
   | { commentId?: string; kind: 'global_run' }
   | { commentId: string; kind: 'inline_edit' }
+  | { commentId: string; kind: 'assistant_edit' }
   | { commentId: string; kind: 'evidence_review'; preset: EditorEvidencePreset }
 
 export type EditorSuggestionEvidenceSource = {
@@ -265,6 +304,14 @@ export type EditorSuggestionRecord = {
     patchId: string
     publicationCommandId: string
     revision: number
+  }
+  /** Server-side agent patch this suggestion mirrors (P7): decisions go
+   * through the official patch endpoints (`:apply`/`:reject`, whole
+   * patch), never the client-side edit path. Absent for editor-born
+   * suggestions, which have no server row. */
+  serverPatch?: {
+    patchId: string
+    editId: string
   }
   proposedText: string
   revision?: number
@@ -369,6 +416,11 @@ export type ResearchRunEventSeverity = 'error' | 'info' | 'success' | 'warning'
 
 export type ResearchRunEventRecord = {
   active?: boolean
+  /** True only for an event that arrived on the LIVE side of its stream —
+   * after the server's replay/live boundary marker. Absent (history: SSE
+   * replay after a reload, the first polling page, imported/persisted
+   * records) the row renders in place; only live arrivals animate. */
+  arrivedLive?: boolean
   createdAt: string
   id: string
   kind: ResearchRunEventKind
@@ -405,6 +457,11 @@ export type ResearchRunResultRecord = {
 }
 
 export type ResearchRunRecord = {
+  /** Set by the event channel when the run answered 404/401: no longer
+   * available to this session. Deliberately NOT a status -- the server
+   * did not say why (non-disclosing 404), so the last known status stays
+   * and the UI renders a calm lock instead of a claim. */
+  unavailable?: boolean
   access?: ResearchRunAccess
   agentOverrides: Record<string, unknown>
   /** Transient server state: a cancel is pending on a still-running run.
@@ -445,6 +502,11 @@ export type ChatRole = 'assistant' | 'user'
 export type ChatRuleCategory = 'context' | 'function' | 'instruction'
 
 export type ChatRuleVisibility = {
+  /** Agent Desk: a rule can be attached to a mission's plan gate as a
+   * result requirement. Off by default — an existing rule was written
+   * for chat or the editor and should not start steering reports
+   * without its owner saying so. */
+  agent: boolean
   chat: boolean
   editor: boolean
 }
@@ -869,8 +931,21 @@ export type ChatMessageRecord = {
   role: ChatRole
 }
 
+/** A chat thread's server deletion is in flight, or it failed and waits for
+ * an explicit retry. Deliberately NOT `SessionDeletionState`: a thread
+ * delete is one owner-scoped row cascade, not a durable deletion operation,
+ * so it has no operation id and no stage to report. */
+export type ChatThreadDeletionState = {
+  error: string | null
+  status: 'deleting' | 'delete_failed'
+}
+
 export type ChatThreadRecord = {
   createdAt: string
+  /** Present only while a server deletion is pending or has failed. The row
+   * stays visible and inert until the server confirms; nothing local removes
+   * it earlier, so a failed delete can never look like a completed one. */
+  deletion?: ChatThreadDeletionState
   id: string
   messages: ChatMessageRecord[]
   /** The model picked inside THIS thread; absent = nothing picked, the
@@ -893,6 +968,7 @@ export type ChatThreadRecord = {
 
 /** Step kinds shown on the live knowledge run card, in pipeline order. */
 export type KnowledgeStepKind =
+  | 'queued'
   | 'context'
   | 'profile'
   | 'decompose'
@@ -1108,6 +1184,11 @@ export type ProjectState = {
    * reference short-lived server rows, so none of this is part of
    * project files — server hydration rebuilds it. */
   agentRuns: Record<string, AgentRunRecord>
+  /** Anchor-independent artifact index per session (P4): meta rows from
+   * GET /v1/agent-sessions/{id}/artifacts, carrying each artifact's
+   * CURRENT run anchor. Server-derived like agentRuns — never part of
+   * project files. */
+  agentSessionArtifacts: Record<string, AgentSessionArtifactIndex>
   agentSessionGroupOrder: string[]
   agentSessionGroups: Record<string, AgentSessionGroupRecord>
   agentSessionOrder: string[]
@@ -1299,10 +1380,11 @@ export function appendRunEventRecord(
 export function applyRunEvent(
   record: ResearchRunRecord,
   event: ResearchRunEvent,
+  options?: { arrivedLive?: boolean },
 ): ResearchRunRecord {
   const snapshot = snapshotFromEvent(event) ?? record.snapshot
   const nextStatus = statusFromEvent(event) ?? record.status
-  const eventRecord = eventRecordFromRunEvent(event)
+  const eventRecord = eventRecordFromRunEvent(event, options?.arrivedLive ?? true)
   const events = eventRecord
     ? appendRunEventRecord(record.events, eventRecord)
     : record.events
@@ -1482,12 +1564,16 @@ function terminalStatus(status: JobStatus) {
     || status === 'expired'
 }
 
-function eventRecordFromRunEvent(event: ResearchRunEvent): ResearchRunEventRecord | null {
+function eventRecordFromRunEvent(
+  event: ResearchRunEvent,
+  arrivedLive: boolean,
+): ResearchRunEventRecord | null {
   if (!isVisibleProtocolEvent(event)) return null
   const phase = phaseFromRunEvent(event)
 
   return {
     active: !terminalStatus(statusFromEvent(event) ?? 'running') || undefined,
+    ...(arrivedLive ? { arrivedLive } : {}),
     createdAt: toIsoString(event.created_at) ?? new Date().toISOString(),
     // Model-resolution events fire once per node per round but the model is
     // stable per node, so give them a node-stable id; the dedup below then

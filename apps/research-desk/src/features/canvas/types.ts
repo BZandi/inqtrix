@@ -95,7 +95,11 @@ export function canvasTabKey(descriptor: CanvasViewDescriptor): string {
     case 'run':
       return `run:${descriptor.runId}`
     case 'document':
-      return `document:${descriptor.runId}:${descriptor.artifactId}`
+      // The artifact IS the document's identity (P4): its run anchor
+      // moves to the newest updating run, so a runId in the key would
+      // split one document across tabs and dead-end the old one. The
+      // descriptor's runId stays as a resolution HINT only.
+      return `document:${descriptor.artifactId}`
     case 'patch':
       return `patch:${descriptor.runId}:${descriptor.patchId}`
     case 'evidence':

@@ -96,10 +96,33 @@ Easing is `cubic-bezier(0.22, 1, 0.36, 1)` (soft settle); UI transitions ≤ ~0.
 | Side panel collapse / expand | width/flex collapse + directed fade-slide (`x ±10px→0`) | `appMotion.panel` 0.26s; left panels originate left, right panels originate right |
 | Page-in-page push (canvas list → detail) | incoming layer slides in full width (`x 100%→0`), covered list parallaxes to `x −30%` and stays mounted (`inert`, scroll/focus survive), leading-edge `--shadow-soft` | forward `appMotion.push` 0.3s, back `appMotion.pushExit` 0.25s; reduced motion = 120ms fade; %-based transforms only (resize-proof) |
 | Appearance switch | token swap without colour transition | Theme, preset, contrast, and bubble-tone changes suppress transitions for one frame so the shell changes as one state |
-| Skeleton / loading | shimmer | loop **only while loading** |
+| Structural region wait | retain usable truth; delayed silhouette only for a cold target | `StructuralLoadBoundary`: 0.8s delay, 0.3s minimum fallback, `appMotion.reveal` 0.15s only when the fallback painted |
+| Skeleton / loading | shimmer | loop **only while loading**; static under reduced motion |
 
 **Rules:** no endless animation on real content (loops only for "working" signals); everything is
 `prefers-reduced-motion`-safe (decorative motion off; the visible end-state is the base); off in print/PDF.
+
+A structural region distinguishes `pending`, `ready`, `refreshing`, `empty`,
+and `error`. A cached or prefetched target publishes in its normal React commit
+without fallback or mount motion. During a cold identity change the previous
+complete surface remains visible and inert; without a previous surface the
+shell leaves a quiet, stable body. Only work still pending after 0.8 seconds
+receives the target-shaped skeleton. Once painted it remains stable for at
+least 0.3 seconds, then performs the single 0.15-second veil exit after data,
+geometry blockers, and scroll preparation are complete. Empty and error states
+are terminal, while background refresh preserves usable content.
+
+Pointer/focus intent warms likely navigation targets through the same
+idempotent loader used by selection. Navigation never clears a usable snapshot.
+Mermaid diagrams and images with unknown geometry may block only a staged
+target; stable text highlighting remains progressive. A long-running Agent or
+Research operation switches from initial hydration to local status rows and
+activity cards rather than repeatedly skeletonising the transcript.
+
+Inline button progress, pagination and incremental table rows retain their
+local indicators because they do not replace a complete region. They still use
+the shared colour, skeleton and reduced-motion roles; they must not introduce a
+second mount-wide fade.
 
 ### Spatial continuity and disclosure
 
@@ -492,7 +515,15 @@ hull with a "Diagramm wird erstellt …" hint fills in asynchronously from a sha
 cache keyed by (code, theme, preset, contrast). Visible figures render immediately; figures within 1200px of the
 nearest scroll viewport warm during browser idle time. Render errors show a **warning-tone box**
 (border-warning, AlertTriangle) with the parser message plus the source — content never disappears
-silently. Security stays `securityLevel: 'strict'` + `htmlLabels: false`; do not relax it. Shiki
+silently. Security stays `securityLevel: 'strict'`. Labels default to the HTML-free SVG text path
+(`htmlLabels: false`); a fence whose source carries `$$…$$` math renders — and only then — with
+mermaid's HTML labels, the sole mode in which its KaTeX support produces output. Those math renders
+pass a strict DOMPurify policy twice: mermaid's own passes via `dompurifyConfig`, then an app-owned
+pass over the final SVG before injection. MathML/KaTeX markup is allowed; network-capable tags and
+attributes (`img`/`image`/`video`/`audio`/`source`/`track`, `src`/`srcset`/`poster`/`background`)
+are forbidden, so the external-image privacy boundary below cannot be bypassed through a diagram
+label, and without a usable sanitizer the math render fails closed into the visible error box.
+Do not relax any part of this, and do not add a second sanitize path beside it. Shiki
 highlighting follows the same visible-now / near-viewport-idle policy and uses its own 256-entry LRU,
 while preserving the frame-one plaintext code shell required by the synchronous chat contract.
 

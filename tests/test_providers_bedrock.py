@@ -403,7 +403,6 @@ def test_complete_allows_per_call_output_budget_override(mock_boto3):
 def test_retries_transient_error_then_succeeds(mock_boto3):
     BedrockLLM, mock_client = mock_boto3
 
-    from botocore.exceptions import ClientError
 
     transient = _make_client_error("ServiceUnavailableException", "service busy", 503)
     mock_client.converse.side_effect = [transient, transient, _converse_response("ok")]

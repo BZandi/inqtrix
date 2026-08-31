@@ -390,6 +390,8 @@ def test_tenant_integrity_migration_repairs_and_enforces_scoped_references(
         "llm_usage",
         "knowledge_document_revisions",
         "knowledge_index_generations",
+        "user_authorization_generations",
+        "prompt_template_seed_markers",
     }
     assert executed[:4] == [
         migration._TENANT_REFERENCE_PREFLIGHT_SQL,
@@ -609,3 +611,79 @@ def test_review_semantics_migration_is_additive_and_schema_scoped(
     assert "DROP COLUMN decision_outcome" in downgrade
     assert "DROP COLUMN change_summary" in downgrade
     assert "SET collaboration_schema_version = 1" in downgrade
+
+
+def test_markdown_read_migration_restamps_both_hash_columns(monkeypatch) -> None:
+    """Der Umstempel-Schritt muss beide Traeger des Abdrucks erreichen.
+
+    Der Abdruck steht auf zwei Spalten -- ``editor_documents`` und
+    ``editor_collaboration_snapshots`` --, und der Ladepfad prueft beide
+    gegeneinander. Bliebe eine zuruck, waere das Dokument nach dem Cutover
+    unlesbar, waehrend die Migration Erfolg meldet.
+    """
+    migration = importlib.import_module(
+        "inqtrix.storage.migrations.versions." "0081_editor_markdown_read"
+    )
+    executed: list[str] = []
+    monkeypatch.setattr(migration.op, "execute", executed.append)
+
+    migration.upgrade()
+
+    statements = "\n".join(executed)
+    assert "UPDATE editor_documents" in statements
+    assert "UPDATE editor_collaboration_snapshots" in statements
+    assert migration._NEW_SCHEMA_HASH in statements
+    assert migration._OLD_SCHEMA_HASH in statements
+    # Der Rueckweg muss beide Spalten ebenso erreichen, sonst ist ein
+    # Downgrade eine Einbahnstrasse mit halbem Bestand.
+    executed.clear()
+    migration.downgrade()
+    rueckweg = "\n".join(executed)
+    assert "UPDATE editor_documents" in rueckweg
+    assert "UPDATE editor_collaboration_snapshots" in rueckweg
+
+
+def test_markdown_read_migration_hash_matches_the_built_fingerprint() -> None:
+    """Der handgeschriebene Hash muss der sein, den der Code wirklich baut.
+
+    Der Wert entsteht in TypeScript (``getEditorSchemaFingerprint``) und wird
+    in Python von Hand notiert. Zwischen beiden Sprachen lag kein einziger
+    Test. Eine vertauschte Hex-Ziffer haette jedes Bestandsdokument
+    unlesbar gemacht -- die Migration haette alle Zeilen erfolgreich
+    umgestempelt, kein Test haette angeschlagen, und der Bruch waere erst
+    beim Oeffnen eines Dokuments aufgefallen.
+    """
+    import json
+    import subprocess
+
+    migration = importlib.import_module(
+        "inqtrix.storage.migrations.versions." "0081_editor_markdown_read"
+    )
+    root = Path(__file__).resolve().parents[2]
+    skript = (
+        "import('./packages/editor-schema/dist/index.js')"
+        ".then(async (m) => console.log(await m.getEditorSchemaFingerprint()))"
+    )
+    gebaut = root / "packages/editor-schema/dist/index.js"
+    if not gebaut.exists():
+        pytest.skip(
+            "packages/editor-schema ist nicht gebaut; der Vergleich braucht "
+            "das gebaute Paket (npm run build im Paket)."
+        )
+    ergebnis = subprocess.run(
+        ["node", "-e", skript],
+        capture_output=True,
+        cwd=root,
+        text=True,
+        timeout=60,
+    )
+    assert ergebnis.returncode == 0, ergebnis.stderr
+    aktuell = ergebnis.stdout.strip()
+
+    assert aktuell == migration._NEW_SCHEMA_HASH, (
+        "Der Fingerabdruck des Codes und der Zielwert der Migration weichen "
+        f"ab: Code {aktuell}, Migration {migration._NEW_SCHEMA_HASH}. "
+        "Entweder wurde das Verhalten erneut geaendert, ohne eine neue "
+        "Migration anzulegen, oder der Wert ist vertippt."
+    )
+    assert json.dumps(aktuell)  # Der Wert ist eine schlichte Zeichenkette.

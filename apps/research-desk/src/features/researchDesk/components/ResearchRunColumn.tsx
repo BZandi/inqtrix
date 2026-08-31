@@ -1,5 +1,6 @@
 import { PanelBottomOpen, Users } from '@/components/icons'
 import { AnimatePresence, motion } from 'motion/react'
+import { Skeleton } from '@/components/ui/skeleton'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { PanelToggle } from '@/components/ui/panel-toggle'
@@ -8,6 +9,7 @@ import { WelcomeState } from '@/components/ui/welcome-state'
 import type { CreateResearchRunRequest } from '@/features/researchRuns/types'
 import { partitionJobsByAccess } from '@/features/sharing/shareModel'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { StructuralLoadBoundary } from '@/motion/StructuralLoadBoundary'
 import { appMotion } from '@/motion/transitions'
 import type { JobFilter, ResearchJob } from '../types'
 import {
@@ -25,6 +27,10 @@ import { JobFilterMenu } from './JobFilterMenu'
 import { ResearchJobCard } from './ResearchJobCard'
 
 type ResearchRunColumnProps = {
+  /** True while the server run listing is still in flight (never in demo /
+   * local-first). The column then shows the card silhouette instead of the
+   * empty-state hero — the same waiting language every other region speaks. */
+  runsLoading?: boolean
   activeFilter: JobFilter
   allJobs: ResearchJob[]
   authenticatedUserId: string | null
@@ -67,6 +73,7 @@ export function ResearchRunColumn({
   isReportVisible,
   isSubmitDisabled,
   jobs,
+  runsLoading = false,
   onActiveFilterChange,
   onAuthenticationRequired,
   onCancelJob,
@@ -172,7 +179,7 @@ export function ResearchRunColumn({
           />
         }
       />
-      {allJobs.length === 0 ? (
+      {allJobs.length === 0 && !runsLoading ? (
         <ResearchEmptyState
           disabled={isSubmitDisabled || isSubmitting}
           onSuggestionSelect={(question) => void submitComposerRequest(
@@ -181,6 +188,17 @@ export function ResearchRunColumn({
         />
       ) : null}
       <div className="relative flex min-h-0 flex-1 flex-col gap-3 px-4 pt-3">
+        {/* The first authoritative listing mounts behind the card silhouette.
+            AnimatePresence remains absent until jobs exist, so hydrated
+            history is not misclassified as newly arriving work. */}
+        <StructuralLoadBoundary
+          className="min-h-0 flex-1"
+          fallback={<RunListSkeleton />}
+          identity="research:runs"
+          phase={runsLoading && allJobs.length === 0
+            ? 'pending'
+            : allJobs.length === 0 ? 'empty' : 'ready'}
+        >
         {allJobs.length === 0 ? (
           <div className="min-h-0 flex-1" />
         ) : (
@@ -243,6 +261,7 @@ export function ResearchRunColumn({
             </motion.div>
           </ScrollArea>
         )}
+        </StructuralLoadBoundary>
       </div>
 
       <AnimatePresence initial={false} mode={reduceMotion ? 'sync' : 'popLayout'}>
@@ -340,6 +359,28 @@ function ResearchEmptyState({
         subtitle={t.home.emptyDescription}
         title={t.home.emptyTitle}
       />
+    </div>
+  )
+}
+
+/** Card silhouettes for the run listing while the server hydration is in
+ * flight: same rounded card footprint the real run cards occupy, filling
+ * the column so arriving cards land inside the silhouette instead of
+ * popping into an empty-state hero. */
+function RunListSkeleton() {
+  return (
+    <div aria-hidden className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-hidden pr-2">
+      {Array.from({ length: 5 }, (_, index) => (
+        <div className="rounded-lg border border-border bg-card p-4" key={index}>
+          <div className="flex flex-col gap-2.5">
+            <div className="flex items-center justify-between gap-3">
+              <Skeleton className="h-4 w-[62%]" />
+              <Skeleton className="h-5 w-24 rounded-full" />
+            </div>
+            <Skeleton className="h-3.5 w-[48%]" />
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

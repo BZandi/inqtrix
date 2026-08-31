@@ -11,6 +11,8 @@ chart logic is only verifiable against the real templating engine.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -1111,8 +1113,15 @@ def test_byo_service_account_creates_none_and_requires_explicit_name() -> None:
 
 
 def test_chart_version_tracks_chart_contract_changes() -> None:
+    """Pinned so a version bump is a deliberate, reviewed act.
+
+    Note what this does NOT do: it fires when the version changes without
+    this pin being updated, not when the chart changes without the version
+    being bumped. Detecting the latter is what
+    ``test_chart_contract_digest_forces_a_version_bump`` below is for.
+    """
     chart = yaml.safe_load((_CHART / "Chart.yaml").read_text(encoding="utf-8"))
-    assert chart["version"] == "0.1.15"
+    assert chart["version"] == "0.1.18"
 
 
 def test_observability_tracing_env_renders_for_api_and_worker() -> None:
@@ -1812,3 +1821,242 @@ def test_web_extra_env_accepts_explicit_proxy_byte_cap() -> None:
     env = _web_env(docs)
     assert env["INQTRIX_MAX_FILE_BYTES"] == "524288000"
     assert env["INQTRIX_PROXY_MAX_BODY_BYTES"] == "209715200"
+
+
+def test_bundled_postgres_carries_the_configured_connection_ceiling():
+    """The bundled server must be sizeable, not stuck on the image default.
+
+    An api and a worker together ask for more connections than the image
+    default allows, and without a lever the only remedy is to abandon the
+    bundled database entirely.
+    """
+    rendered = _template(
+        "postgres.enabled=true",
+        "postgres.maxConnections=250",
+    )
+    stateful = _by_kind(_docs(rendered), "StatefulSet")
+    postgres = [
+        d for d in stateful if d["metadata"]["name"].endswith("-postgres")
+    ]
+    assert postgres, "the bundled database should render a StatefulSet"
+    container = postgres[0]["spec"]["template"]["spec"]["containers"][0]
+    assert container["args"] == ["postgres", "-c", "max_connections=250"]
+
+
+def test_bundled_postgres_ships_above_the_image_ceiling():
+    """The shipped run cap needs more connections than the image allows.
+
+    Run threads open a connection per database operation, and an api plus a
+    worker each add their own pooled budget on top.
+    """
+    rendered = _template("postgres.enabled=true")
+    stateful = _by_kind(_docs(rendered), "StatefulSet")
+    postgres = [
+        d for d in stateful if d["metadata"]["name"].endswith("-postgres")
+    ]
+    container = postgres[0]["spec"]["template"]["spec"]["containers"][0]
+    assert container["args"] == ["postgres", "-c", "max_connections=300"]
+    # A ceiling raised without the memory to hold it trades one failure for
+    # another, so the two move together or not at all.
+    memory = container["resources"]["limits"]["memory"]
+    assert memory == "2Gi", (
+        "raising max_connections without raising memory buys an OOM instead "
+        "of the connections"
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "abc", "12.5"])
+def test_invalid_connection_ceiling_fails_the_render(value):
+    """A ceiling below one must fail here, not at container start.
+
+    A server that refuses to start takes the whole release down with a
+    message from Postgres rather than from the value that caused it.
+    """
+    # Anchored on the message the guard itself emits, not on the value being
+    # echoed back: every unrelated render failure quotes the --set argument
+    # too, so a looser match would go green for the wrong reason.
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        _template(
+            "postgres.enabled=true",
+            f"postgres.maxConnections={value}",
+        )
+
+
+# Digest of every file under the chart, updated together with the version
+# above. Recompute with:
+#   python -c "import hashlib,pathlib;c=pathlib.Path('deploy/helm/inqtrix');\
+#h=hashlib.sha256();[(h.update(p.relative_to(c).as_posix().encode()),h.update(b'\0'),\
+#h.update(p.read_bytes()),h.update(b'\0')) for p in sorted(x for x in c.rglob('*') \
+#if x.is_file())];print(h.hexdigest())"
+_CHART_CONTRACT_DIGEST = (
+    "89654b10020c3912baca1ae6a1185f8664a969e32d8604fbb4254ded44d81704"
+)
+
+
+def _chart_files() -> list:
+    """Every file under the chart, in a stable order.
+
+    No suffix filter: NOTES.txt is a rendered template and .helmignore
+    decides what ships, so a filter that admitted only YAML would leave
+    real chart content outside a gate whose whole job is to notice change.
+    """
+    return sorted(p for p in _CHART.rglob("*") if p.is_file())
+
+
+def _chart_contract_digest() -> str:
+    """Hash the chart's files, path included."""
+    digest = hashlib.sha256()
+    for path in _chart_files():
+        digest.update(path.relative_to(_CHART).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def test_chart_contract_digest_catches_an_unacknowledged_chart_change() -> None:
+    """Catch the direction the version pin above cannot see.
+
+    Precisely what this guarantees, and what it does not: any edit to any
+    chart file turns this red, so a chart change cannot reach review
+    unnoticed -- which is how a chart edit has already shipped unbumped.
+    It cannot force the version to MOVE; someone can update the digest
+    alone. What it forces is a deliberate edit here, in a hunk a reviewer
+    sees next to the chart change, with the message below telling them the
+    version belongs in the same commit.
+
+    Comments count deliberately: in ``values.yaml`` they are the
+    operator-facing contract, and a comment that quietly stops matching
+    the value it describes is exactly the drift worth failing on.
+    """
+    assert _chart_contract_digest() == _CHART_CONTRACT_DIGEST, (
+        "the chart changed: bump `version` in Chart.yaml, then update "
+        "_CHART_CONTRACT_DIGEST and the pin in "
+        "test_chart_version_tracks_chart_contract_changes. The recompute "
+        "command is in the comment above the constant."
+    )
+
+
+def test_the_digest_covers_every_file_the_chart_ships() -> None:
+    """A gate with a blind spot is worse than none: it reads as coverage."""
+    hashed = {p.relative_to(_CHART).as_posix() for p in _chart_files()}
+    # Walked independently of the helper under test, so a filter creeping
+    # back into _chart_files() shows up as a difference rather than being
+    # mirrored on both sides.
+    on_disk = set()
+    for root, _dirs, names in os.walk(_CHART):
+        for name in names:
+            on_disk.add(
+                Path(root).joinpath(name).relative_to(_CHART).as_posix()
+            )
+    assert hashed == on_disk, f"not hashed: {sorted(on_disk - hashed)}"
+    # Named explicitly because these are the files a suffix filter drops.
+    assert "templates/NOTES.txt" in hashed
+    assert ".helmignore" in hashed
+
+
+def test_gateway_pool_value_renders_only_when_set():
+    """The typed value must not restate the gateway's built-in default.
+
+    config:/extraConfig: cannot reach the web pod -- it has no envFrom --
+    so this values key is the only discoverable way to size the gateway
+    pool. Unset, nothing renders and the gateway's own default is the
+    single source of truth.
+    """
+    unset = _template("postgres.enabled=true")
+    assert "INQTRIX_MAX_UPSTREAM_CONNECTIONS" not in unset
+
+    rendered = _template(
+        "postgres.enabled=true", "web.maxUpstreamConnections=768"
+    )
+    web = [
+        d
+        for d in _by_kind(_docs(rendered), "Deployment")
+        if d["metadata"]["name"].endswith("-web")
+    ]
+    env = web[0]["spec"]["template"]["spec"]["containers"][0]["env"]
+    values = {e["name"]: e.get("value") for e in env}
+    assert values["INQTRIX_MAX_UPSTREAM_CONNECTIONS"] == "768"
+
+
+def test_gateway_pool_zero_fails_the_render_instead_of_meaning_unset():
+    """An explicit 0 must fail loudly, never silently read as 'unset'."""
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        _template("postgres.enabled=true", "web.maxUpstreamConnections=0")
+
+
+def test_gateway_pool_bool_and_float_fail_instead_of_coercing(tmp_path):
+    """Helm's int turns true into 1 and truncates a float64 512.9 to 512.
+
+    The bool sails past a positivity check that runs AFTER the coercion
+    (true -> 1). The float trap is values-file-only: --set delivers the
+    STRING "512.9", which the old chart already rejected via int -> 0 ->
+    positivity check; a real YAML float64 512.9 was silently truncated to
+    512. So the float leg must reach the guard as a genuine float64,
+    through a values file -- a --set probe pins nothing.
+    """
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        _template("postgres.enabled=true", "web.maxUpstreamConnections=true")
+    values = tmp_path / "float.yaml"
+    values.write_text("web:\n  maxUpstreamConnections: 512.9\n")
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        _template("postgres.enabled=true", extra=["-f", str(values)])
+
+
+def test_postgres_max_connections_bool_fails_instead_of_meaning_one():
+    """Same trap next door: true -> int 1 -> Postgres with max_connections=1."""
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        _template("postgres.enabled=true", "postgres.maxConnections=true")
+
+
+def test_leading_zero_strings_fail_instead_of_meaning_octal():
+    """sprig's int parses base 0: the STRING "0512" would mean octal 330.
+
+    Only the string channel is guardable: an UNQUOTED values-file 0512 is
+    YAML-1.1 octal, so helm's parser hands the chart the integer 330
+    before any template code runs -- indistinguishable from writing 330.
+    That parser semantic is a documented limit, not a chart fallback.
+    """
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        _template(
+            "postgres.enabled=true",
+            extra=["--set-string", "web.maxUpstreamConnections=0512"],
+        )
+    with pytest.raises(RuntimeError, match="must be a positive integer"):
+        _template(
+            "postgres.enabled=true",
+            extra=["--set-string", "postgres.maxConnections=0512"],
+        )
+
+
+def test_replica_count_cannot_be_supplied_by_the_operator():
+    """The chart derives it completely; a user value is redundant or wrong.
+
+    Too low is caught by the chart's own guard, but too HIGH passes the
+    render and then crash-loops every api pod at startup via the app-side
+    local-store guard -- a failure pointing away from its cause.
+    """
+    with pytest.raises(RuntimeError, match="is derived by the chart"):
+        _template(
+            "postgres.enabled=true",
+            "config.INQTRIX_REPLICA_COUNT=5",
+        )
+
+
+def test_replica_count_counts_actual_worker_replicas():
+    """worker.enabled used to add a flat 1, understating multi-replica workers."""
+    rendered = _template(
+        "postgres.enabled=true",
+        "s3.enabled=true",
+        "s3.secretKey=SyntheticMinio2026Key",
+        "worker.enabled=true",
+        "worker.replicaCount=3",
+        "api.replicaCount=2",
+    )
+    configmaps = _by_kind(_docs(rendered), "ConfigMap")
+    data = {}
+    for cm in configmaps:
+        data.update(cm.get("data") or {})
+    assert data["INQTRIX_REPLICA_COUNT"] == "5", (
+        "2 api replicas + 3 worker replicas are 5 sharers, not 3"
+    )

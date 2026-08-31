@@ -234,6 +234,7 @@ class EditorPatchService:
         created_by_user_id: uuid.UUID | None,
         visible_to: "UserContext | None",
         principal: "Principal | None" = None,
+        expected_revision: int | None = None,
     ) -> EditorPatchRecord:
         """Persist one pending patch against a document the caller may edit.
 
@@ -244,9 +245,18 @@ class EditorPatchService:
         M7 audit trail); ``principal`` supplies the tenant/actor and, when
         absent (memory/dev), the audit is skipped like apply/reject.
 
+        ``expected_revision`` (P7-E1) pins the document state the caller
+        READ before proposing: when set and the document has moved on,
+        the proposal is refused with the SAME conflict apply uses — a
+        patch anchored against stale text must never be created quietly,
+        it would only resolve against content its author never saw.
+        ``None`` keeps the legacy unpinned behavior.
+
         Raises:
             DocumentNotFound: Unknown/foreign document (indistinct 404).
             EditorPatchValidationError: Unknown source or edit position.
+            PatchRevisionConflict: ``expected_revision`` no longer matches
+                the document's current revision.
         """
         if source not in PATCH_SOURCES:
             raise EditorPatchValidationError(f"unknown patch source: {source!r}")
@@ -255,6 +265,14 @@ class EditorPatchService:
             visible_to=visible_to,
             minimum=SharePermission.SUGGEST,
         )
+        if (
+            expected_revision is not None
+            and expected_revision != document.revision
+        ):
+            raise PatchRevisionConflict(
+                current_revision=document.revision,
+                revision_before=expected_revision,
+            )
         record = EditorPatchRecord(
             patch_id=(
                 str(uuid.uuid4())

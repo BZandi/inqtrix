@@ -6,6 +6,7 @@ import type {
   ChatThreadRecord,
   ProjectState,
 } from '@/features/project/types'
+import { fingerprintThread } from '@/features/chat/chatHistorySync'
 import { researchDeskReducer } from '@/features/researchDesk/state'
 
 function thread(
@@ -298,5 +299,63 @@ describe('chat message branching and retry', () => {
     ])
     expect(branch.messages.map((item) => item.id)).not.toEqual(['cm_u1', 'cm_a1'])
     expect(branch.messages[1].requestContext).toEqual({ knowledgeCollectionIds: ['kc_branch'] })
+  })
+})
+
+describe('confirmed thread deletion', () => {
+  it('marks a thread as deleting without touching the autosave fingerprint', () => {
+    const local = thread('ct_1')
+    const next = researchDeskReducer(withThread(local), {
+      deletion: { error: null, status: 'deleting' },
+      threadId: 'ct_1',
+      type: 'setChatThreadDeletion',
+    })
+
+    const marked = next.chatThreads.ct_1
+    expect(marked.deletion).toEqual({ error: null, status: 'deleting' })
+    // The row stays until the server confirms.
+    expect(next.chatThreadOrder).toEqual(['ct_1'])
+    // (groupId, updatedAt) IS the autosave fingerprint: a deletion marker
+    // must never read as an edit that needs pushing.
+    expect(fingerprintThread(marked, null)).toEqual(fingerprintThread(local, null))
+  })
+
+  it('clears the marker when a failed deletion is reset', () => {
+    const marked = researchDeskReducer(withThread(thread('ct_1')), {
+      deletion: { error: 'boom', status: 'delete_failed' },
+      threadId: 'ct_1',
+      type: 'setChatThreadDeletion',
+    })
+    const cleared = researchDeskReducer(marked, {
+      deletion: null,
+      threadId: 'ct_1',
+      type: 'setChatThreadDeletion',
+    })
+
+    expect(cleared.chatThreads.ct_1.deletion).toBeUndefined()
+    expect(Object.hasOwn(cleared.chatThreads.ct_1, 'deletion')).toBe(false)
+  })
+
+  it('refuses assistant content for a thread awaiting deletion', () => {
+    const local = thread('ct_1', {
+      messages: [message('cm_u1', '2026-01-01T00:00:00.000Z'), message('cm_a1', '2026-01-01T00:00:01.000Z', { role: 'assistant' })],
+    })
+    const marked = researchDeskReducer(withThread(local), {
+      deletion: { error: null, status: 'deleting' },
+      threadId: 'ct_1',
+      type: 'setChatThreadDeletion',
+    })
+
+    // This is what the aborted generation dispatches on its way out; writing
+    // it would bump updatedAt and make the next flush re-push a deleted row.
+    const next = researchDeskReducer(marked, {
+      assistantMessageId: 'cm_a1',
+      contentMarkdown: 'Antwort abgebrochen.',
+      threadId: 'ct_1',
+      type: 'setChatAssistantMessageContent',
+    })
+
+    expect(next).toBe(marked)
+    expect(next.chatThreads.ct_1.messages[1].contentMarkdown).toBe('cm_a1')
   })
 })

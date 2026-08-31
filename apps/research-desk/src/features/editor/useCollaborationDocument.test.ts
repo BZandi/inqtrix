@@ -6,6 +6,7 @@ import {
 } from '@inqtrix/editor-schema'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
+import { localizeEditorCollaborationNotice } from './inspector/model'
 
 // Linger contracts drive the registry's real timers with vi fake timers; a
 // failed assertion must not leak the fake clock — or a lingering registry
@@ -509,6 +510,35 @@ describe('collaboration document lifecycle', () => {
       canEdit: false,
       connectionStatus: 'incompatible',
     })
+  })
+
+  it('nennt einen Datenkonflikt nicht eine veraltete App-Version', async () => {
+    // errors.ts:104-122 bildet JEDEN 409 der internen API auf 4409 ab; nur
+    // vier Gruende sind echte Kompatibilitaetsgruende, die uebrigen ~25 sind
+    // gewoehnliche Konflikte. Live gemessen: ein patch_metadata_conflict --
+    // zwei Leute entscheiden denselben Vorschlag -- kam als "Update
+    // erforderlich" an und schickte den Nutzer eine Version suchen, die es
+    // nicht gibt. Beendet wird die Sitzung in beiden Faellen; nur die
+    // Begruendung darf nicht erfunden sein.
+    const harness = createHarness(vi.fn().mockResolvedValue(session('initial-token')))
+    await harness.controller.start()
+
+    harness.getProviderOptions()?.events.onClose(4_409, 'upstream_conflict')
+
+    const snapshot = harness.controller.getSnapshot()
+
+    expect(snapshot).toMatchObject({
+      canEdit: false,
+      connectionStatus: 'incompatible',
+    })
+    expect(snapshot.error).not.toMatch(/not compatible/i)
+    expect(snapshot.error).toMatch(/reload the page/i)
+
+    // Der Satz ist zugleich Schluessel der Uebersetzungstabelle. Driftet er
+    // dort auseinander, faellt die Suche stillschweigend auf das englische
+    // Original zurueck und ein deutscher Nutzer liest Englisch.
+    expect(localizeEditorCollaborationNotice(snapshot.error!, 'de'))
+      .toMatch(/Laden Sie die Seite neu/)
   })
 
   it('disconnects the transport before reconnecting after a rejected update', async () => {

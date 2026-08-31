@@ -28,11 +28,11 @@ Baukasten (building-block) pattern::
 __version__ = "0.2.0"
 
 # The dev designation inside the current release line: what the app shows and
-# what the branch name carries (local/dev-inqtrix-v0.2.0.7). It is deliberately
+# what the branch name carries (local/dev-inqtrix-v0.2.0.8). It is deliberately
 # separate from ``__version__``, which stays on the three-segment release line
 # because packaging metadata, npm, and the eval baselines are pinned to it.
 # It must start with ``__version__`` — tests/test_routes.py pins that.
-__display_version__ = "0.2.0.7"
+__display_version__ = "0.2.0.8"
 
 # -- Public API (high-level) --
 from inqtrix.agent import AgentConfig, ResearchAgent

@@ -21,6 +21,8 @@ const RESEARCH_REPORT_PANEL_ID = 'research-report-panel'
 const RESEARCH_RUN_PANEL_ID = 'research-run-panel'
 
 type ResearchWorkspaceProps = {
+  /** Server run listing still in flight; forwarded to the run column. */
+  runsLoading?: boolean
   activeFilter: JobFilter
   allJobs: ResearchJob[]
   authenticatedUserId: string | null
@@ -58,6 +60,7 @@ type ResearchWorkspaceProps = {
 }
 
 export function ResearchWorkspace({
+  runsLoading = false,
   activeFilter,
   allJobs,
   authenticatedUserId,
@@ -124,6 +127,7 @@ export function ResearchWorkspace({
 
   const runColumn = (
     <ResearchRunColumn
+      runsLoading={runsLoading}
       activeFilter={activeFilter}
       allJobs={allJobs}
       authenticatedUserId={authenticatedUserId}

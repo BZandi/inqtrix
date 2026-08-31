@@ -127,6 +127,27 @@ try {
       title: 'System Smoke Concurrent Edit',
     },
     {
+      // Eigenes Dokument: dieses Szenario VEROEFFENTLICHT einen Vorschlag
+      // und veraendert das Dokument damit dauerhaft. Der Satz ist woertlich
+      // bekannt, weil der gestubbte Vorschlag ihn als Anker sucht.
+      key: 'aiSuggestion',
+      markdown: `# KI-Vorschlag\n\nDer Assistent ersetzt hier ein Wort. Run ${runId}.`,
+      permission: 'edit',
+      title: 'System Smoke AI Suggestion',
+    },
+    {
+      // Eigenes Dokument, bewusst von keinem anderen Szenario benutzt: der
+      // Stabilitaetstest haelt seine beiden Sitzungen eine halbe Minute lang
+      // offen und behauptet, dass keine davon abbricht. Teilte er sich das
+      // Dokument mit einem Szenario, das die Seite absichtlich neu laedt,
+      // liefe er in den Deckel von fuenf gleichzeitigen Sitzungen je Nutzer
+      // und Dokument -- und meldete den Ratenschutz als Verbindungsabbruch.
+      key: 'staysConnected',
+      markdown: `# Dauerhafte Verbindung\n\nRun ${runId}.`,
+      permission: 'edit',
+      title: 'System Smoke Stays Connected',
+    },
+    {
       key: 'remotePresence',
       markdown: `# Remote-Präsenz\n\nRun ${runId}.`,
       permission: 'edit',

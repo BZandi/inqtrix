@@ -52,6 +52,36 @@ describe('syncCollection', () => {
     expect(synced.has('a')).toBe(true)
   })
 
+  it('leaves an excluded id alone in both directions', async () => {
+    // The live-observed resurrection: a confirmed DELETE pruned the synced
+    // baseline while the stale state snapshot still held the thread. Without
+    // the exclusion the diff reads that as NEW -> re-push (the deleted row
+    // comes back), and the re-seeded fingerprint makes the next pass issue
+    // an uncommanded second DELETE. Excluded-but-synced covers the mirror
+    // case: a failed deletion waiting for its manual retry must not be
+    // auto-deleted by the flush.
+    const synced = new Map([['failed', '1']])
+    const pushed: string[] = []
+    const deleted: string[] = []
+    await syncCollection<Item, string>({
+      current: { stale: { id: 'stale', v: '9' } },
+      exclude: new Set(['stale', 'failed']),
+      synced,
+      fingerprintOf: (item) => item.v,
+      changed: (previous, value) => previous !== value,
+      pushOne: async (item) => {
+        pushed.push(item.id)
+      },
+      deleteOne: async (id) => {
+        deleted.push(id)
+      },
+    })
+    expect(pushed).toEqual([])
+    expect(deleted).toEqual([])
+    expect(synced.has('stale')).toBe(false) // never re-seeded
+    expect(synced.get('failed')).toBe('1') // baseline kept for the retry
+  })
+
   it('does not advance the fingerprint when the push throws (retry-safe)', async () => {
     const synced = new Map<string, string>()
     let attempts = 0

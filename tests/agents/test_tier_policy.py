@@ -141,8 +141,14 @@ def test_capabilities_payload_mirrors_the_policy_table():
     assert [entry["id"] for entry in payload] == list(AGENT_TIERS)
     for entry in payload:
         policy = TIER_POLICIES[entry["id"]]  # type: ignore[index]
-        assert entry["latency_hint"] == policy.latency_hint
+        assert entry["plan_gate"] == policy.plan_gate
+        assert entry["response_form"] == policy.response_form
         assert entry["web_child_ceiling"] == policy.web_child_ceiling
+        # No human-readable display text in the manifest: the server
+        # cannot know the reader's language, and it published a German
+        # latency window that the English composer printed verbatim.
+        # Tier wording belongs to the surface's own translations.
+        assert "latency_hint" not in entry
         if entry["web_child_profile"] is not None:
             assert entry["web_child_profile"] in WEB_RESEARCH_PROFILES
 

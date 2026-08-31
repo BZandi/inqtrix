@@ -7,6 +7,7 @@ probes and model-discovery clients keep working without credentials.
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
@@ -16,6 +17,13 @@ if TYPE_CHECKING:
     from inqtrix.server.container import AppContainer
 
 log = logging.getLogger("inqtrix")
+
+# How long the product gate keeps its state through CONSECUTIVE
+# "unavailable" probe readings before failing closed. Well above one
+# load spike (the observed incident was a single 2s probe timeout in one
+# 6s healthcheck cycle), well below "indefinitely": past this, sustained
+# unreachability is treated as a possible masked contract break.
+_UNAVAILABLE_KEEP_OPEN_SECONDS = 120.0
 
 
 def build_router(container: "AppContainer") -> APIRouter:
@@ -41,7 +49,58 @@ def build_router(container: "AppContainer") -> APIRouter:
         from inqtrix.services.system_runtime import readiness_payload
 
         status_code, payload = await readiness_payload(container)
-        database_ready = payload["checks"]["database"] in {"ok", "skipped"}
+        # No default: a payload without the key is shape drift, and a
+        # silent fallback here would freeze the gate forever while
+        # misattributing the cause. Better a loud 500 on /readyz.
+        contract_state = payload["database_contract"]
+        if contract_state == "unavailable":
+            # An UNREACHABLE database proves nothing about the schema/role
+            # contract, so the product gate KEEPS its state: closing it
+            # here once turned a single slow 2s probe under a load spike
+            # into a full-healthcheck-interval 503 outage for every
+            # product route while the system underneath was healthy.
+            # BOUNDED, not forever: only Kubernetes drains an unready pod
+            # (compose and the launcher keep routing), and a wrong-schema
+            # database whose heavy contract probe consistently exceeds
+            # its bound would otherwise read "unavailable" indefinitely —
+            # after sustained unreachability the gate fails closed:
+            # integrity over availability. The share-reconciliation
+            # recovery below needs a VERIFIED database and is skipped.
+            now = time.monotonic()
+            since = getattr(
+                request.app.state, "database_contract_unavailable_since", None
+            )
+            if since is None:
+                since = now
+                request.app.state.database_contract_unavailable_since = since
+            database_ready = bool(
+                getattr(request.app.state, "database_contract_ready", False)
+            )
+            elapsed = now - since
+            if database_ready and elapsed > _UNAVAILABLE_KEEP_OPEN_SECONDS:
+                database_ready = False
+                log.error(
+                    "readyz: Datenbank seit %.0fs durchgehend unerreichbar "
+                    "— Produkt-Gate schliesst (Integritaet vor "
+                    "Verfuegbarkeit).",
+                    elapsed,
+                )
+            else:
+                log.warning(
+                    "readyz: Datenbank-Sonde unerreichbar (seit %.0fs) — "
+                    "Produkt-Gate behaelt seinen Zustand (%s).",
+                    elapsed,
+                    "offen" if database_ready else "geschlossen",
+                )
+            request.app.state.database_contract_ready = database_ready
+            return JSONResponse(status_code=status_code, content=payload)
+        request.app.state.database_contract_unavailable_since = None
+        database_ready = contract_state in {"ok", "skipped"}
+        if not database_ready:
+            log.error(
+                "readyz: bestaetigter Datenbank-Kontraktbruch — "
+                "Produkt-Gate schliesst."
+            )
         if (
             database_ready
             and container.settings.sharing.restrict_to_workspace_members

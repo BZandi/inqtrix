@@ -15,6 +15,13 @@ import type { Editor } from '@tiptap/react'
 import { createSecureUuid, EDITOR_SCHEMA_VERSION } from '@inqtrix/editor-schema'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import {
+  StructuralLoadBoundary,
+  type StructuralLoadPhase,
+  type StructuralVisibilityChange,
+  useStructuralRenderBlocker,
+} from '@/motion/StructuralLoadBoundary'
+import { Skeleton } from '@/components/ui/skeleton'
+import {
   buildLoginUrl,
   enableEditorDocumentCollaboration,
 } from '@/api/inqtrixClient'
@@ -146,6 +153,9 @@ import type {
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import { sharePermissionLabel } from '@/features/sharing/shareModel'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { ExplorerSortMenu } from '@/components/ui/explorer-sort-menu'
+import { orderPinnedExplorerItems, sortExplorerFolders, sortExplorerItems } from '@/features/project/explorerSort'
+import type { ExplorerSortMode } from '@/features/project/explorerSort'
 import { useMediaQuery } from '@/features/researchDesk/hooks/useMediaQuery'
 import { cn } from '@/lib/utils'
 import {
@@ -175,6 +185,7 @@ import {
 } from '@/features/textImprove'
 import { EditorDocumentChangesSection } from './EditorDocumentChangesSection'
 import { EditorInstructionFeedbackCard } from './EditorInstructionFeedbackCard'
+import { SuggestionErrorLine } from './SuggestionErrorLine'
 import {
   beginEditorCollaborationAuthorityGuard,
   editorCollaborationActionDisabledReason,
@@ -271,6 +282,10 @@ import {
 } from './collaborationProjection'
 import { persistCollaborationDiffAnchor } from './collaborationDiffAnchor'
 import { resolveMaterializedAnchor } from './anchoring'
+import type {
+  EditorDocumentBodyHydration,
+  EditorDocumentPushOutcome,
+} from './useEditorHistoryApi'
 
 type EditorWorkspaceProps = {
   apiKey?: string
@@ -282,6 +297,14 @@ type EditorWorkspaceProps = {
   chatModelCatalog?: ModelCatalogEntry[]
   defaultChatModel: NodeModelResolution | null
   dispatch: Dispatch<ResearchDeskAction>
+  /** Authoritative body state from the persistence owner. Tiptap readiness is
+   * combined with it locally before the structural boundary may publish. */
+  documentBodyHydration: EditorDocumentBodyHydration
+  /** Shared, idempotent body loader used by pointer/focus intent and open. */
+  prefetchDocumentBody?: (
+    documentId: string,
+    options?: { retry?: boolean },
+  ) => Promise<void>
   /** Loads attached file-asset bodies on demand before an AI run reads them
    * (M6c load-on-use); forwarded to useEditorSuggestions. */
   ensureAssetBodiesLoaded?: (assetIds: readonly string[]) => Promise<Map<string, string>>
@@ -314,8 +337,8 @@ type EditorWorkspaceProps = {
    * the GLOBAL project dirty flag — which server-synced deployments never
    * clear, leaving the Share button permanently disabled. */
   onFlushDocumentForShare?: (
-    document: EditorDocumentRecord,
-  ) => Promise<{ metadataRevision: number; revision: number } | null>
+    documentId: string,
+  ) => Promise<EditorDocumentPushOutcome>
   onCollaborationControllerChange?: (
     registration: { controller: CollaborationProjectionController; documentId: string } | null,
   ) => void
@@ -348,6 +371,73 @@ export type EditorRecoveryCaptureProvider = (
   documentId: string,
 ) => { contentMarkdown: string } | null
 
+export function editorDocumentStructuralLoadPhase(
+  activeDocumentId: string | null,
+  hydration: EditorDocumentBodyHydration,
+): StructuralLoadPhase {
+  if (!activeDocumentId) return 'empty'
+  return hydration.documentId === activeDocumentId
+    ? hydration.phase
+    : 'pending'
+}
+
+export type EditorIdentityPublication = {
+  displayedIdentity: string
+  visible: boolean
+}
+
+/** Keeps identity-owned editor chrome on the same committed document as the
+ * body boundary. A hidden edge makes the retained chrome inert; only the
+ * matching visible edge publishes the requested identity. Late edges from an
+ * aborted document switch are ignored. */
+export function advanceEditorIdentityPublication(
+  current: EditorIdentityPublication,
+  requestedIdentity: string,
+  change: StructuralVisibilityChange,
+): EditorIdentityPublication {
+  if (change.identity !== requestedIdentity) return current
+  if (!change.visible) {
+    return current.visible ? { ...current, visible: false } : current
+  }
+  if (current.displayedIdentity === change.identity && current.visible) return current
+  return { displayedIdentity: change.identity, visible: true }
+}
+
+function useEditorIdentityOwnedContent(identity: string, content: ReactNode) {
+  const requestedRef = useRef({ content, identity })
+  requestedRef.current = { content, identity }
+  const displayedContentRef = useRef(content)
+  const [publication, setPublication] = useState<EditorIdentityPublication>({
+    displayedIdentity: identity,
+    visible: false,
+  })
+
+  // Updates within the already published document (for example a title save
+  // or collaboration status) stay live. A new document's chrome remains in
+  // requestedRef until its body has reached the same visibility edge.
+  if (publication.displayedIdentity === identity) {
+    displayedContentRef.current = content
+  }
+
+  const handleVisibilityChange = useCallback((change: StructuralVisibilityChange) => {
+    const requested = requestedRef.current
+    if (change.identity !== requested.identity) return
+    if (change.visible) displayedContentRef.current = requested.content
+    setPublication((current) => advanceEditorIdentityPublication(
+      current,
+      requested.identity,
+      change,
+    ))
+  }, [])
+
+  return {
+    content: displayedContentRef.current,
+    inert: !publication.visible || publication.displayedIdentity !== identity,
+    onVisibilityChange: handleVisibilityChange,
+    visibleIdentity: publication.displayedIdentity,
+  }
+}
+
 type EditorDocumentDropTarget = {
   folderId: string | null
   targetIndex: number
@@ -371,6 +461,7 @@ export default function EditorWorkspace({
   chatModelCatalog,
   defaultChatModel,
   dispatch,
+  documentBodyHydration,
   ensureAssetBodiesLoaded,
   ensureUploadTarget,
   onCollaborationControllerChange,
@@ -378,6 +469,7 @@ export default function EditorWorkspace({
   onRecoveryCaptureProviderChange,
   onShareDocument,
   onServerDocumentObserved,
+  prefetchDocumentBody,
   onAssetsIngested,
   onRetryAttachment,
   reportOptions,
@@ -399,6 +491,11 @@ export default function EditorWorkspace({
     capabilities?.features.collaboration === true
   const activeDocumentIdRef = useRef(activeDocument?.id ?? null)
   activeDocumentIdRef.current = activeDocument?.id ?? null
+  // Live mirror of the reducer's document map (the useEditorHistoryApi
+  // pattern): async handlers re-read the CURRENT record instead of a
+  // dialog-open snapshot (P8, Entscheidungsliste #9).
+  const editorDocumentsRef = useRef(state.editorDocuments)
+  editorDocumentsRef.current = state.editorDocuments
   const activeSurfaceIdentity = useMemo<EditorSurfaceIdentity | null>(() => (
     activeDocument
       ? {
@@ -407,6 +504,13 @@ export default function EditorWorkspace({
         }
       : null
   ), [activeDocument?.collaboration?.generation, activeDocument?.id])
+  const activeSurfaceKey = activeSurfaceIdentity
+    ? `${activeSurfaceIdentity.documentId}:${activeSurfaceIdentity.generation ?? 'local'}`
+    : 'editor:empty'
+  const activeDocumentLoadPhase = editorDocumentStructuralLoadPhase(
+    activeDocument?.id ?? null,
+    documentBodyHydration,
+  )
   const [editorRegistration, setEditorRegistration] = useState<EditorSurfaceRegistration | null>(null)
   const activeEditor = editorForSurfaceIdentity(editorRegistration, activeSurfaceIdentity)
   const handleEditorReady = useCallback((editor: Editor | null) => {
@@ -988,15 +1092,24 @@ export default function EditorWorkspace({
       let expectedRevision = document.revision
       let expectedMetadataRevision = document.metadataRevision
       if (onFlushDocumentForShare) {
-        // Push the current body first so the conversion happens on exactly
-        // the content the user sees; null = a concurrent writer advanced the
-        // document mid-flight (visible retry, never a stale conversion).
-        const fresh = await onFlushDocumentForShare(document)
-        if (fresh === null) {
+        // Der Rumpf wird zuerst geschrieben, damit die Umwandlung auf dem
+        // aktuellen Inhalt geschieht. Der Flush liest den Record selbst und
+        // innerhalb seiner Sperre -- hier wird nur die Id gereicht.
+        const outcome = await onFlushDocumentForShare(document.id)
+        // 'rebased' ist der EINZIGE Fall, in dem "gleichzeitig geaendert"
+        // wahr ist: ein anderer Schreiber hat den Revisionsschutz gewonnen,
+        // der lokale Stand wurde nachgezogen, und der naechste Klick setzt
+        // darauf auf. Frueher trug ein einziges `null` vier Bedeutungen und
+        // alle bekamen diese Meldung -- auch die, in denen Wiederholen
+        // nichts aendern konnte.
+        if (outcome.kind === 'rebased') {
           throw new Error(collaborationActivationConflictError(locale))
         }
-        expectedRevision = fresh.revision
-        expectedMetadataRevision = fresh.metadataRevision
+        if (outcome.kind !== 'saved') {
+          throw new Error(collaborationActivationFallbackError(locale))
+        }
+        expectedRevision = outcome.revision
+        expectedMetadataRevision = outcome.metadataRevision
       }
       if (expectedMetadataRevision === undefined) {
         throw new Error(collaborationActivationFallbackError(locale))
@@ -1010,8 +1123,16 @@ export default function EditorWorkspace({
         },
         { apiKey, workspaceId },
       )
+      // The dialog snapshot is only the ADDRESS — the record is re-read
+      // LIVE here (P8, Entscheidungsliste #9): a rebase during the flush
+      // already advanced body/title/updatedAt, and the two observer
+      // callbacks below must never republish the pre-rebase snapshot
+      // (a stale updatedAt fingerprint would misdescribe the server view
+      // that registerOpenedServerDocument records).
+      const liveDocument =
+        editorDocumentsRef.current[document.id] ?? document
       const activatedDocument: EditorDocumentRecord = {
-        ...document,
+        ...liveDocument,
         collaboration: {
           commentRevision: 0,
           generation: response.generation,
@@ -1629,8 +1750,14 @@ export default function EditorWorkspace({
       documents={documents}
       folders={folders}
       onDocumentDetails={(document) => handleShareDocument(document, 'details')}
+      onPrefetchDocument={prefetchDocumentBody
+        ? (documentId) => {
+            void prefetchDocumentBody(documentId)
+          }
+        : undefined}
       pinnedDocumentIds={state.ui.pinnedExplorer.editorDocumentIds}
       reportOptions={reportOptions}
+      sortMode={state.ui.explorerSort.editor}
       runningDocumentId={
         (isGlobalRunning || runningCommentIds.length > 0 || runningSuggestionIds.length > 0)
           ? activeDocument?.id ?? null
@@ -1662,6 +1789,7 @@ export default function EditorWorkspace({
       runningCommentIds={runningCommentIds}
       savingCommentDraftIds={savingCommentDraftIds}
       selectedCommentId={state.editorUi.selectedCommentId}
+      suggestionErrors={suggestionErrors}
       suggestionPublishDisabledReason={suggestionPublishDisabledReason}
       suggestions={documentSuggestions}
     />
@@ -1763,141 +1891,183 @@ export default function EditorWorkspace({
     />
   )
 
+  const requestedDocumentHeader = activeDocument ? (
+    <>
+      <EditorTopBar
+        collaborationAccess={collaboration.access}
+        collaborationActive={collaborationActive}
+        collaborationCanEdit={collaboration.canEdit}
+        collaborationStatus={collaborationStatus}
+        copy={copy}
+        dispatch={dispatch}
+        document={activeDocument}
+        editor={activeEditor}
+        isCommentPanelVisible={isDesktop ? state.editorUi.isCommentPanelVisible : isMobileCommentsOpen}
+        isDiffVisible={state.editorUi.isDiffVisible}
+        isDirty={state.dirty}
+        canFlushForShare={onFlushDocumentForShare !== undefined}
+        isTreeVisible={isDesktop ? state.editorUi.isTreeVisible : isMobileTreeOpen}
+        diffAnchorError={diffAnchorOperation?.documentId === activeDocument.id
+          ? diffAnchorOperation.error
+          : null}
+        diffAnchorPending={diffAnchorOperation?.documentId === activeDocument.id
+          ? diffAnchorOperation.pending
+          : false}
+        diffAnchorDisabledReason={diffAnchorAuthorityDisabledReason}
+        onCommentPanelVisibleChange={handleCommentsVisibleChange}
+        onExportWordMarkdown={resolveWordExportMarkdown}
+        onSetDiffAnchor={handleSetDiffAnchor}
+        onShareDocument={(document, returnFocusTarget) => {
+          handleShareDocument(document, 'share', returnFocusTarget)
+        }}
+        onTreeVisibleChange={handleTreeVisibleChange}
+        onWriteModeChange={handleWriteModeChange}
+        onCollaborationLogin={handleCollaborationLogin}
+        onCollaborationReconnect={collaboration.retryConnection}
+        onCollaborationReload={handleCollaborationReload}
+        sharingAvailable={
+          onShareDocument !== undefined
+          && (collaborationActive || collaborationFeatureAvailable)
+        }
+        viewMode={state.editorUi.viewMode}
+        writeMode={editorWriteMode}
+      />
+      {activeDocument.recovery ? (
+        <EditorRemoteDeletionRecoveryBar
+          locale={locale}
+          onDiscard={() => dispatch({
+            documentId: activeDocument.id,
+            type: 'deleteEditorDocument',
+          })}
+          onSaveAsNew={() => dispatch({
+            documentId: activeDocument.id,
+            type: 'promoteEditorRecoveryDocument',
+          })}
+        />
+      ) : null}
+      {collaborationActive
+        && collaboration.recoverability === 'retry'
+        && collaboration.reconnectAttempt >= 3 ? (
+          <CollaborationRecoveryBar
+            hasUnconfirmedLocalChanges={collaboration.hasUnconfirmedLocalChanges}
+            locale={locale}
+            onReconnect={collaboration.retryConnection}
+          />
+        ) : null}
+    </>
+  ) : null
+  const documentHeaderPublication = useEditorIdentityOwnedContent(
+    activeSurfaceKey,
+    requestedDocumentHeader,
+  )
+
   const editorContent = (
     <main className="flex h-full w-full min-w-0 flex-col bg-background">
       {activeDocument ? (
         <>
-          <EditorTopBar
-            collaborationAccess={collaboration.access}
-            collaborationActive={collaborationActive}
-            collaborationCanEdit={collaboration.canEdit}
-            collaborationStatus={collaborationStatus}
-            copy={copy}
-            dispatch={dispatch}
-            document={activeDocument}
-            editor={activeEditor}
-            isCommentPanelVisible={isDesktop ? state.editorUi.isCommentPanelVisible : isMobileCommentsOpen}
-            isDiffVisible={state.editorUi.isDiffVisible}
-            isDirty={state.dirty}
-            canFlushForShare={onFlushDocumentForShare !== undefined}
-            isTreeVisible={isDesktop ? state.editorUi.isTreeVisible : isMobileTreeOpen}
-            diffAnchorError={diffAnchorOperation?.documentId === activeDocument.id
-              ? diffAnchorOperation.error
-              : null}
-            diffAnchorPending={diffAnchorOperation?.documentId === activeDocument.id
-              ? diffAnchorOperation.pending
-              : false}
-            diffAnchorDisabledReason={diffAnchorAuthorityDisabledReason}
-            onCommentPanelVisibleChange={handleCommentsVisibleChange}
-            onExportWordMarkdown={resolveWordExportMarkdown}
-            onSetDiffAnchor={handleSetDiffAnchor}
-            onShareDocument={(document, returnFocusTarget) => {
-              handleShareDocument(document, 'share', returnFocusTarget)
-            }}
-            onTreeVisibleChange={handleTreeVisibleChange}
-            onWriteModeChange={handleWriteModeChange}
-            onCollaborationLogin={handleCollaborationLogin}
-            onCollaborationReconnect={collaboration.retryConnection}
-            onCollaborationReload={handleCollaborationReload}
-            sharingAvailable={
-              onShareDocument !== undefined
-              && (collaborationActive || collaborationFeatureAvailable)
-            }
-            viewMode={state.editorUi.viewMode}
-            writeMode={editorWriteMode}
-          />
-          {activeDocument.recovery ? (
-            <EditorRemoteDeletionRecoveryBar
-              locale={locale}
-              onDiscard={() => dispatch({
-                documentId: activeDocument.id,
-                type: 'deleteEditorDocument',
-              })}
-              onSaveAsNew={() => dispatch({
-                documentId: activeDocument.id,
-                type: 'promoteEditorRecoveryDocument',
-              })}
-            />
-          ) : null}
-          {collaborationActive
-            && collaboration.recoverability === 'retry'
-            && collaboration.reconnectAttempt >= 3 ? (
-              <CollaborationRecoveryBar
-                hasUnconfirmedLocalChanges={collaboration.hasUnconfirmedLocalChanges}
-                locale={locale}
-                onReconnect={collaboration.retryConnection}
-              />
-            ) : null}
+          <div
+            aria-hidden={documentHeaderPublication.inert || undefined}
+            data-editor-document-header=""
+            data-editor-requested-identity={activeSurfaceKey}
+            data-editor-visible-identity={documentHeaderPublication.visibleIdentity}
+            inert={documentHeaderPublication.inert || undefined}
+          >
+            {documentHeaderPublication.content}
+          </div>
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="relative min-h-0 flex-1">
-              <div
-                aria-hidden={collaborationActive && state.editorUi.viewMode === 'source'}
-                className={cn(
-                  'absolute inset-0 flex min-h-0 flex-col',
-                  collaborationActive && state.editorUi.viewMode === 'source'
-                    && 'invisible pointer-events-none',
-                )}
-              >
-                <MarkdownEditorSurface
-                  collaboration={collaborationActive ? collaboration : null}
-                  collaborationReviewPolicy={collaborationEditorPolicyUpdate(collaborationEditorPolicy)}
-                  comments={inspectorTab === 'assistant' ? surfaceCommentAnchors.comments : []}
-                  copy={copy}
-                  document={activeDocument}
-                  diffAnchorMarkdown={activeDocument.diffAnchorMarkdown ?? null}
-                  isDiffVisible={state.editorUi.isDiffVisible}
-                  mode={state.editorUi.viewMode}
-                  onChange={(contentMarkdown) => {
-                    dispatch({
-                      contentMarkdown,
-                      documentId: activeDocument.id,
-                      type: 'updateEditorDocumentMarkdown',
-                    })
-                  }}
-                  onCreateComment={handleCreateComment}
-                  onCreateTeamComment={collaborationActive
-                    ? handleCreateTeamComment
+            <StructuralLoadBoundary
+              className="min-h-0 flex-1"
+              fallback={<EditorDocumentSkeleton />}
+              identity={activeSurfaceKey}
+              onVisibilityChange={documentHeaderPublication.onVisibilityChange}
+              phase={activeDocumentLoadPhase}
+            >
+              {activeDocumentLoadPhase === 'error' ? (
+                <EditorDocumentBodyError
+                  error={documentBodyHydration.error}
+                  locale={locale}
+                  onRetry={prefetchDocumentBody
+                      ? () => {
+                        void prefetchDocumentBody(activeDocument.id, { retry: true })
+                      }
                     : undefined}
-                  onCollaborationSuggestionUndo={collaborationActive
-                    ? handleCollaborationSuggestionUndo
-                    : undefined}
-                  onEditorReady={handleEditorReady}
-                  onAcceptSuggestion={handleAcceptSuggestion}
-                  onEditSuggestion={handleEditSuggestionProposal}
-                  onMarkSuggestionStale={handleMarkSuggestionStale}
-                  onRefineSuggestion={handleRefineSuggestion}
-                  onRejectSuggestion={handleRejectSuggestion}
-                  onSelectComment={(commentId) => dispatch({ commentId, type: 'selectEditorComment' })}
-                  onSelectTeamComment={handleSelectTeamComment}
-                  onStopSuggestion={handleStopSuggestionRun}
-                  onTeamCommentDraftChange={(value) => teamComments.setDraft('new', value)}
-                  runningSuggestionIds={runningSuggestionIds}
-                  selectedCommentId={inspectorTab === 'assistant' ? state.editorUi.selectedCommentId : null}
-                  suggestionActionsDisabled={Boolean(suggestionPublishDisabledReason)}
-                  suggestionErrors={suggestionErrors}
-                  suggestions={inspectorTab === 'assistant'
-                    ? surfaceSuggestions.filter((suggestion) => suggestion.status === 'pending')
-                    : []}
-                  selectedTeamCommentId={inspectorTab === 'comments'
-                    ? selectedTeamCommentId
-                    : null}
-                  teamCommentParticipants={teamComments.participants}
-                  teamCommentDraft={teamComments.drafts.new ?? ''}
-                  teamComments={surfaceTeamComments.threads}
-                  textImprovement={textImprovement}
                 />
-              </div>
-              {collaborationActive && state.editorUi.viewMode === 'source' ? (
-                <ScrollArea className="absolute inset-0 bg-background">
-                  <pre
-                    aria-label={copy.sourceEditor}
-                    className="t-body min-h-full whitespace-pre-wrap break-words px-10 py-8 font-mono text-foreground"
+              ) : activeDocumentLoadPhase === 'pending' ? (
+                <div aria-hidden className="min-h-0 flex-1" />
+              ) : (
+                <div className="relative min-h-0 flex-1">
+                  <div
+                    aria-hidden={collaborationActive && state.editorUi.viewMode === 'source'}
+                    className={cn(
+                      'absolute inset-0 flex min-h-0 flex-col',
+                      collaborationActive && state.editorUi.viewMode === 'source'
+                        && 'invisible pointer-events-none',
+                    )}
                   >
-                    {collaborationSourceMarkdown}
-                  </pre>
-                </ScrollArea>
-              ) : null}
-            </div>
+                    <EditorDocumentSurfaceReadiness ready={activeEditor !== null}>
+                      <MarkdownEditorSurface
+                        collaboration={collaborationActive ? collaboration : null}
+                        collaborationReviewPolicy={collaborationEditorPolicyUpdate(collaborationEditorPolicy)}
+                        comments={inspectorTab === 'assistant' ? surfaceCommentAnchors.comments : []}
+                        copy={copy}
+                        document={activeDocument}
+                        diffAnchorMarkdown={activeDocument.diffAnchorMarkdown ?? null}
+                        isDiffVisible={state.editorUi.isDiffVisible}
+                        mode={state.editorUi.viewMode}
+                        onChange={(contentMarkdown) => {
+                          dispatch({
+                            contentMarkdown,
+                            documentId: activeDocument.id,
+                            type: 'updateEditorDocumentMarkdown',
+                          })
+                        }}
+                        onCreateComment={handleCreateComment}
+                        onCreateTeamComment={collaborationActive
+                          ? handleCreateTeamComment
+                          : undefined}
+                        onCollaborationSuggestionUndo={collaborationActive
+                          ? handleCollaborationSuggestionUndo
+                          : undefined}
+                        onEditorReady={handleEditorReady}
+                        onAcceptSuggestion={handleAcceptSuggestion}
+                        onEditSuggestion={handleEditSuggestionProposal}
+                        onMarkSuggestionStale={handleMarkSuggestionStale}
+                        onRefineSuggestion={handleRefineSuggestion}
+                        onRejectSuggestion={handleRejectSuggestion}
+                        onSelectComment={(commentId) => dispatch({ commentId, type: 'selectEditorComment' })}
+                        onSelectTeamComment={handleSelectTeamComment}
+                        onStopSuggestion={handleStopSuggestionRun}
+                        onTeamCommentDraftChange={(value) => teamComments.setDraft('new', value)}
+                        runningSuggestionIds={runningSuggestionIds}
+                        selectedCommentId={inspectorTab === 'assistant' ? state.editorUi.selectedCommentId : null}
+                        suggestionActionsDisabled={Boolean(suggestionPublishDisabledReason)}
+                        suggestionErrors={suggestionErrors}
+                        suggestions={inspectorTab === 'assistant'
+                          ? surfaceSuggestions.filter((suggestion) => suggestion.status === 'pending')
+                          : []}
+                        selectedTeamCommentId={inspectorTab === 'comments'
+                          ? selectedTeamCommentId
+                          : null}
+                        teamCommentParticipants={teamComments.participants}
+                        teamCommentDraft={teamComments.drafts.new ?? ''}
+                        teamComments={surfaceTeamComments.threads}
+                        textImprovement={textImprovement}
+                      />
+                    </EditorDocumentSurfaceReadiness>
+                  </div>
+                  {collaborationActive && state.editorUi.viewMode === 'source' ? (
+                    <ScrollArea className="absolute inset-0 bg-background">
+                      <pre
+                        aria-label={copy.sourceEditor}
+                        className="t-body min-h-full whitespace-pre-wrap break-words px-10 py-8 font-mono text-foreground"
+                      >
+                        {collaborationSourceMarkdown}
+                      </pre>
+                    </ScrollArea>
+                  ) : null}
+                </div>
+              )}
+            </StructuralLoadBoundary>
             <EditorAssistantComposer
               aiReadOnlyReason={aiReadOnlyReason}
               attachedCommentIds={attachedCommentIds}
@@ -2130,9 +2300,11 @@ function EditorFileTree({
   documents,
   folders,
   onDocumentDetails,
+  onPrefetchDocument,
   pinnedDocumentIds,
   reportOptions,
   runningDocumentId,
+  sortMode,
 }: {
   activeDocumentId: string | null
   copy: EditorCopy
@@ -2140,9 +2312,11 @@ function EditorFileTree({
   documents: EditorDocumentRecord[]
   folders: EditorFolderRecord[]
   onDocumentDetails: (document: EditorDocumentRecord) => void
+  onPrefetchDocument?: (documentId: string) => void
   pinnedDocumentIds: readonly string[]
   reportOptions: CompletedReportOption[]
   runningDocumentId: string | null
+  sortMode: ExplorerSortMode
 }) {
   const { locale, t } = useLocale()
   const [expandedFolderIds, setExpandedFolderIds] = useState<ReadonlySet<string>>(() => new Set(folders.map((folder) => folder.id)))
@@ -2162,11 +2336,42 @@ function EditorFileTree({
   const suppressFolderToggleClickRef = useRef(false)
   const pinnedDocumentIdSet = new Set(pinnedDocumentIds)
   const partitionedDocuments = partitionEditorDocumentsByAccess(documents)
-  const sharedDocuments = partitionedDocuments.shared
-  const pinnedDocuments = partitionedDocuments.owned.filter((document) => pinnedDocumentIdSet.has(document.id))
-  const treeDocuments = partitionedDocuments.owned.filter((document) => !pinnedDocumentIdSet.has(document.id))
+  // Sort program: automatic modes order every section here (documents by
+  // activity/name, folders alphabetical); manual keeps the explicit
+  // arrays and the user's drag placement.
+  const documentTime = (document: EditorDocumentRecord) => document.updatedAt
+  const documentTitle = (document: EditorDocumentRecord) => document.title
+  const orderedOwned = sortExplorerItems(partitionedDocuments.owned, sortMode, documentTime, documentTitle)
+  const orderedFolders = sortExplorerFolders(folders, sortMode, (folder) => folder.title)
+  const sharedDocuments = sortExplorerItems(partitionedDocuments.shared, sortMode, documentTime, documentTitle)
+  const pinnedDocuments = orderPinnedExplorerItems(
+    orderedOwned.filter((document) => pinnedDocumentIdSet.has(document.id)),
+    pinnedDocumentIds,
+    sortMode,
+    (document) => document.id,
+  )
+  const treeDocuments = orderedOwned.filter((document) => !pinnedDocumentIdSet.has(document.id))
   const ungroupedDocuments = treeDocuments.filter((document) => !document.folderId || !folders.some((folder) => folder.id === document.folderId))
   const hasFolders = folders.length > 0
+  const adoptVisibleOrderIfAutomatic = () => {
+    if (sortMode === 'manual') return
+    dispatch({
+      desk: 'editor',
+      folderIds: orderedFolders.map((folder) => folder.id),
+      itemIds: [
+        ...pinnedDocuments.map((document) => document.id),
+        // Shared section renders between Pinned and the folders — adopt
+        // its sorted order too, or it reshuffles at the manual switch.
+        ...sharedDocuments.map((document) => document.id),
+        ...orderedFolders.flatMap((folder) =>
+          treeDocuments.filter((document) => document.folderId === folder.id).map((document) => document.id)),
+        ...ungroupedDocuments.map((document) => document.id),
+      ],
+      type: 'adoptExplorerOrder',
+    })
+  }
+  const adoptVisibleOrderRef = useRef(adoptVisibleOrderIfAutomatic)
+  adoptVisibleOrderRef.current = adoptVisibleOrderIfAutomatic
   const [searchQuery, setSearchQuery] = useState('')
   const trimmedQuery = searchQuery.trim().toLowerCase()
   const isSearching = trimmedQuery.length > 0
@@ -2320,6 +2525,7 @@ function EditorFileTree({
       const nextDropTarget = didStartDrag ? readFolderDropTarget(upEvent.clientY, folderId) : null
       cleanupPointerDrag()
       if (nextDropTarget === null) return
+      adoptVisibleOrderRef.current()
       dispatch({ folderId, targetIndex: nextDropTarget, type: 'moveEditorFolder' })
     }
 
@@ -2397,6 +2603,7 @@ function EditorFileTree({
       const nextDropTarget = didStartDrag ? readDocumentDropTarget(upEvent.clientY, documentId) : null
       cleanupPointerDrag()
       if (!nextDropTarget) return
+      adoptVisibleOrderRef.current()
       dispatch({
         documentId,
         folderId: nextDropTarget.folderId,
@@ -2433,6 +2640,10 @@ function EditorFileTree({
         </div>
         <div className="flex items-center gap-1">
           <ImportReportMenu copy={copy} dispatch={dispatch} reportOptions={reportOptions} />
+          <ExplorerSortMenu
+            mode={sortMode}
+            onChangeMode={(mode) => dispatch({ desk: 'editor', mode, type: 'setExplorerSortMode' })}
+          />
           <TooltipButton
             label={copy.createFolder}
             onClick={() => dispatch({ title: copy.createFolder, type: 'createEditorFolder' })}
@@ -2478,6 +2689,7 @@ function EditorFileTree({
                     onDetails={() => onDocumentDetails(document)}
                     onDraftChange={setDocumentTitleDraft}
                     onOpen={() => openDocumentFromTree(document.id)}
+                    onPrefetch={() => onPrefetchDocument?.(document.id)}
                     onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
                     showAfterIndicator={false}
                     showBeforeIndicator={false}
@@ -2513,6 +2725,7 @@ function EditorFileTree({
                   onDetails={() => onDocumentDetails(document)}
                   onDraftChange={setDocumentTitleDraft}
                   onOpen={() => openDocumentFromTree(document.id)}
+                  onPrefetch={() => onPrefetchDocument?.(document.id)}
                   onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
                   showAfterIndicator={false}
                   showBeforeIndicator={false}
@@ -2556,6 +2769,7 @@ function EditorFileTree({
                     onDetails={() => onDocumentDetails(document)}
                     onDraftChange={setDocumentTitleDraft}
                     onOpen={() => openDocumentFromTree(document.id)}
+                    onPrefetch={() => onPrefetchDocument?.(document.id)}
                     onTogglePinned={() => undefined}
                     showAfterIndicator={false}
                     showBeforeIndicator={false}
@@ -2584,7 +2798,7 @@ function EditorFileTree({
             <ExplorerSectionLabel>
               {locale === 'de' ? 'Meine Dokumente' : 'My documents'}
             </ExplorerSectionLabel>
-          {folders.map((folder, folderIndex) => {
+          {orderedFolders.map((folder, folderIndex) => {
             const isExpanded = expandedFolderIds.has(folder.id)
             const isDraggingFolder = draggedFolderId === folder.id
             const showFolderBeforeIndicator = folderDropTargetIndex === folderIndex
@@ -2704,6 +2918,7 @@ function EditorFileTree({
                         onDetails={() => onDocumentDetails(document)}
                         onDraftChange={setDocumentTitleDraft}
                         onOpen={() => openDocumentFromTree(document.id)}
+                        onPrefetch={() => onPrefetchDocument?.(document.id)}
                         onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
                         showAfterIndicator={documentDropTarget?.folderId === folder.id && documentDropTarget.targetIndex === Math.min(visibleCount, folderDocuments.length) && index === Math.min(visibleCount, folderDocuments.length) - 1}
                         showBeforeIndicator={documentDropTarget?.folderId === folder.id && documentDropTarget.targetIndex === index}
@@ -2752,6 +2967,7 @@ function EditorFileTree({
                   onDetails={() => onDocumentDetails(document)}
                   onDraftChange={setDocumentTitleDraft}
                   onOpen={() => openDocumentFromTree(document.id)}
+                  onPrefetch={() => onPrefetchDocument?.(document.id)}
                   onTogglePinned={() => dispatch({ documentId: document.id, type: 'togglePinnedEditorDocument' })}
                   showAfterIndicator={documentDropTarget?.folderId === null && documentDropTarget.targetIndex === Math.min(ungroupedVisibleCount, ungroupedDocuments.length) && index === Math.min(ungroupedVisibleCount, ungroupedDocuments.length) - 1}
                   showBeforeIndicator={documentDropTarget?.folderId === null && documentDropTarget.targetIndex === index}
@@ -2799,6 +3015,7 @@ function EditorDocumentTreeItem({
   onDetails,
   onDraftChange,
   onOpen,
+  onPrefetch,
   onTogglePinned,
   showAfterIndicator,
   showBeforeIndicator,
@@ -2821,6 +3038,7 @@ function EditorDocumentTreeItem({
   onDetails: () => void
   onDraftChange: (value: string) => void
   onOpen: () => void
+  onPrefetch?: () => void
   onTogglePinned: () => void
   showAfterIndicator: boolean
   showBeforeIndicator: boolean
@@ -2894,7 +3112,12 @@ function EditorDocumentTreeItem({
   ]
 
   return (
-    <div className="group/editor-document relative" data-editor-document-id={document.id}>
+    <div
+      className="group/editor-document relative"
+      data-editor-document-id={document.id}
+      onFocusCapture={onPrefetch}
+      onPointerEnter={onPrefetch}
+    >
       {showBeforeIndicator ? <DropIndicator className="-top-1" /> : null}
       {showAfterIndicator ? <DropIndicator className="-bottom-1" /> : null}
       <ExplorerHistoryRow
@@ -4025,6 +4248,7 @@ function EditorCommentsPanel({
   runningCommentIds,
   savingCommentDraftIds,
   selectedCommentId,
+  suggestionErrors,
   suggestionPublishDisabledReason,
   suggestions,
 }: {
@@ -4042,6 +4266,7 @@ function EditorCommentsPanel({
   runErrors: Record<string, string>
   runningCommentIds: readonly string[]
   savingCommentDraftIds: readonly string[]
+  suggestionErrors: Record<string, string>
   selectedCommentId: string | null
   suggestionPublishDisabledReason: string | null
   suggestions: EditorSuggestionRecord[]
@@ -4050,18 +4275,31 @@ function EditorCommentsPanel({
   const [statusTab, setStatusTab] = useState<'open' | 'resolved'>('open')
   const [kindFilter, setKindFilter] = useState<'all' | EditorCommentKind>('all')
 
-  const openComments = comments.filter((comment) => comment.status !== 'resolved')
-  const resolvedComments = comments.filter((comment) => comment.status === 'resolved')
+  // Maschinentraeger sind keine Notizen des Nutzers. Sie existieren nur,
+  // damit ein privater Entwurf einen Anker hat, und gehoeren weder in die
+  // Liste noch in die Zaehler -- sonst faende der Nutzer nach jedem
+  // Assistentenlauf N Eintraege vor, die er nie geschrieben hat.
+  const authoredComments = comments.filter((comment) => comment.kind !== 'assistant_edit')
+  const openComments = authoredComments.filter((comment) => comment.status !== 'resolved')
+  const resolvedComments = authoredComments.filter((comment) => comment.status === 'resolved')
   const tabComments = statusTab === 'open' ? openComments : resolvedComments
   const visibleComments = kindFilter === 'all'
     ? tabComments
     : tabComments.filter((comment) => comment.kind === kindFilter)
-  const commentNumbers = buildCommentNumbers(comments)
+  const commentNumbers = buildCommentNumbers(authoredComments)
+  // Genau die Vorschlaege eines Anweisungslaufs. Im Markdown-Modus haben sie
+  // keinen Traeger ('global_run' ohne commentId), im Kollaborationsmodus
+  // haengen sie an einer Maschinenzeile ('assistant_edit'). Ein 'global_run'
+  // MIT commentId stammt dagegen aus einer Sammel-Notiz des Nutzers und
+  // gehoert in deren Karte -- hier erschiene er ein zweites Mal, mit einem
+  // zweiten Uebernehmen-Knopf.
   const documentChangeSuggestions = suggestions
     .filter((suggestion) =>
       (suggestion.status === 'pending' || suggestion.status === 'stale')
-      && suggestion.origin.kind === 'global_run'
-      && !suggestion.origin.commentId)
+      && (
+        suggestion.origin.kind === 'assistant_edit'
+        || (suggestion.origin.kind === 'global_run' && !suggestion.origin.commentId)
+      ))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   const actionRestriction = aiReadOnlyReason ?? (
     suggestions.some((suggestion) => suggestion.status === 'pending')
@@ -4133,29 +4371,34 @@ function EditorCommentsPanel({
             onRejectSuggestion={onRejectSuggestion}
             onSelectSuggestion={onSelectSuggestion}
             publishDisabledReason={suggestionPublishDisabledReason}
+            suggestionErrors={suggestionErrors}
             suggestions={documentChangeSuggestions}
           />
           {visibleComments.length === 0 ? (
             <p className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">{copy.noComments}</p>
-          ) : visibleComments.map((comment) => (
-            <EditorCommentCard
-              aiReadOnlyReason={aiReadOnlyReason}
-              comment={comment}
-              commentNumber={commentNumbers.get(comment.id) ?? 0}
-              copy={copy}
-              dispatch={dispatch}
-              isRunning={runningCommentIds.includes(comment.id)}
-              isSavingDraft={savingCommentDraftIds.includes(comment.id)}
-              isSelected={selectedCommentId === comment.id}
-              key={comment.id}
-              onAcceptSuggestion={onAcceptSuggestion}
-              onRejectSuggestion={onRejectSuggestion}
-              onRunComment={onRunComment}
-              runError={runErrors[comment.id]}
-              suggestion={activeSuggestionFor(suggestions, comment.id)}
-              suggestionPublishDisabledReason={suggestionPublishDisabledReason}
-            />
-          ))}
+          ) : visibleComments.map((comment) => {
+            const commentSuggestion = activeSuggestionFor(suggestions, comment.id)
+            return (
+              <EditorCommentCard
+                aiReadOnlyReason={aiReadOnlyReason}
+                comment={comment}
+                commentNumber={commentNumbers.get(comment.id) ?? 0}
+                copy={copy}
+                dispatch={dispatch}
+                isRunning={runningCommentIds.includes(comment.id)}
+                isSavingDraft={savingCommentDraftIds.includes(comment.id)}
+                isSelected={selectedCommentId === comment.id}
+                key={comment.id}
+                onAcceptSuggestion={onAcceptSuggestion}
+                onRejectSuggestion={onRejectSuggestion}
+                onRunComment={onRunComment}
+                runError={runErrors[comment.id]}
+                suggestion={commentSuggestion}
+                suggestionError={commentSuggestion ? suggestionErrors[commentSuggestion.id] : undefined}
+                suggestionPublishDisabledReason={suggestionPublishDisabledReason}
+              />
+            )
+          })}
         </div>
       </ScrollArea>
     </div>
@@ -4210,6 +4453,7 @@ function EditorCommentCard({
   onRunComment,
   runError,
   suggestion,
+  suggestionError,
   suggestionPublishDisabledReason,
 }: {
   aiReadOnlyReason: string | null
@@ -4225,6 +4469,7 @@ function EditorCommentCard({
   onRunComment: (comment: EditorCommentThreadRecord) => void
   runError?: string
   suggestion?: EditorSuggestionRecord
+  suggestionError?: string
   suggestionPublishDisabledReason: string | null
 }) {
   const meta = commentKindMeta(comment.kind, copy)
@@ -4349,6 +4594,7 @@ function EditorCommentCard({
           ) : suggestion && suggestion.status === 'pending' ? (
             <SuggestionReview
               copy={copy}
+              error={suggestionError}
               onAccept={onAcceptSuggestion}
               onReject={onRejectSuggestion}
               publishDisabledReason={suggestionPublishDisabledReason}
@@ -4433,8 +4679,9 @@ function activeSuggestionFor(
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
 }
 
-function SuggestionReview({ copy, onAccept, onReject, publishDisabledReason, suggestion }: {
+function SuggestionReview({ copy, error, onAccept, onReject, publishDisabledReason, suggestion }: {
   copy: EditorCopy
+  error: string | undefined
   onAccept: (suggestion: EditorSuggestionRecord) => void
   onReject: (suggestionId: string) => void
   publishDisabledReason: string | null
@@ -4503,6 +4750,10 @@ function SuggestionReview({ copy, onAccept, onReject, publishDisabledReason, sug
         </div>
       ) : null}
       {reviewInEditor ? null : (
+        <>
+          {/* Der Fehlschlag steht bei den Knoepfen, die ihn ausloesen. Bei
+              reviewInEditor traegt die Blockkarte im Editor beide. */}
+          {error ? <SuggestionErrorLine message={error} /> : null}
         <div className="mt-2 flex items-center justify-end gap-1.5">
           <Button
             className="h-7"
@@ -4528,6 +4779,7 @@ function SuggestionReview({ copy, onAccept, onReject, publishDisabledReason, sug
             {copy.accept}
           </Button>
         </div>
+        </>
       )}
     </div>
   )
@@ -4736,4 +4988,78 @@ function confirmProjectionFallbackExport(
 function messageFromUnknown(error: unknown) {
   if (error instanceof Error) return error.message
   return String(error)
+}
+
+/** Keeps the boundary staged until the matching Tiptap instance has committed.
+ * The data body is checked before this child mounts, so an editor can never
+ * initialise from a metadata-only empty string and become visible as ready. */
+function EditorDocumentSurfaceReadiness({
+  children,
+  ready,
+}: {
+  children: ReactNode
+  ready: boolean
+}) {
+  useStructuralRenderBlocker(!ready)
+  return children
+}
+
+function EditorDocumentBodyError({
+  error,
+  locale,
+  onRetry,
+}: {
+  error: string | null
+  locale: 'de' | 'en'
+  onRetry?: () => void
+}) {
+  return (
+    <div
+      className="flex min-h-0 flex-1 items-center justify-center bg-background px-8 py-10"
+      data-editor-document-body-error=""
+      role="alert"
+    >
+      <div className="flex max-w-md flex-col items-center gap-3 text-center">
+        <AlertTriangle aria-hidden="true" className="size-5 text-warning" />
+        <p className="t-body font-medium text-foreground">
+          {locale === 'de'
+            ? 'Der Dokumentinhalt konnte nicht geladen werden.'
+            : 'The document body could not be loaded.'}
+        </p>
+        {error ? <p className="t-meta text-muted-foreground">{error}</p> : null}
+        {onRetry ? (
+          <Button onClick={onRetry} size="sm" type="button" variant="outline">
+            <RefreshCw aria-hidden="true" className="icon-sm" />
+            {locale === 'de' ? 'Erneut versuchen' : 'Try again'}
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+/** Document-shaped placeholder for the scrollable body only, using the live
+ * surface's padding. It appears only after the shared structural delay; the
+ * top bar, explorer, inspector, and composer remain stable. */
+function EditorDocumentSkeleton() {
+  const paragraph = (key: number, widths: readonly string[]) => (
+    <div className="flex flex-col gap-2.5" key={key}>
+      {widths.map((width, index) => (
+        <Skeleton className={cn('h-4', width)} key={index} />
+      ))}
+    </div>
+  )
+  return (
+    <div aria-hidden className="flex min-h-0 flex-1 flex-col gap-6 overflow-hidden px-10 py-8">
+      <Skeleton className="h-7 w-1/2" />
+      {paragraph(0, ['w-[94%]', 'w-[88%]', 'w-[91%]', 'w-[60%]'])}
+      {paragraph(1, ['w-[85%]', 'w-[90%]', 'w-[93%]', 'w-[72%]'])}
+      <Skeleton className="h-5 w-1/3" />
+      {paragraph(2, ['w-[90%]', 'w-[86%]', 'w-[94%]', 'w-[64%]'])}
+      {paragraph(3, ['w-[92%]', 'w-[87%]', 'w-[55%]'])}
+      <Skeleton className="h-5 w-2/5" />
+      {paragraph(4, ['w-[89%]', 'w-[93%]', 'w-[84%]', 'w-[68%]'])}
+      {paragraph(5, ['w-[91%]', 'w-[88%]', 'w-[76%]'])}
+    </div>
+  )
 }

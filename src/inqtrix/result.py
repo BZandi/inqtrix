@@ -326,6 +326,15 @@ class AgentExecution(BaseModel):
         ),
     )
     """Visible limits; an empty mapping preserves older result payloads."""
+    tool_grants: list[str] = Field(
+        default_factory=list,
+        max_length=32,
+        description=(
+            "Tools the user approved run-wide (approval_scope=run); "
+            "empty when nothing is granted."
+        ),
+    )
+    """Run-wide tool grants (P6B); the default preserves older payloads."""
 
 
 class KnowledgeProfileResult(BaseModel):

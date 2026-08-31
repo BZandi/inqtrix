@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from inqtrix.core.context import RuntimeContext
     from inqtrix.core.results import RunRequest
     from inqtrix.services.quota_service import QuotaService
+    from inqtrix.server.execution import ExecutionLanes
 
 log = logging.getLogger("inqtrix")
 
@@ -156,6 +157,7 @@ async def stream_response(
     providers: ProviderContext,
     strategies: StrategyContext,
     settings: AgentSettings,
+    lanes: "ExecutionLanes",
     include_progress: bool = True,
     request: Request | None = None,
     cancel_event: threading.Event | None = None,
@@ -241,7 +243,7 @@ async def stream_response(
     from inqtrix.observability.otel import chat_thread_call
 
     agent_future = loop.run_in_executor(
-        None,
+        lanes.ai,
         chat_thread_call(
             partial(
                 algorithm.run,
@@ -312,7 +314,7 @@ async def stream_response(
             return
         try:
             msg_type, msg_content = await loop.run_in_executor(
-                None, partial(progress_queue.get, True, 0.3),
+                lanes.streams, partial(progress_queue.get, True, 0.3),
             )
             if msg_type == "progress" and msg_content != "done":
                 progress_emitted = True
@@ -481,6 +483,7 @@ async def guarded_stream(
     providers: ProviderContext,
     strategies: StrategyContext,
     settings: AgentSettings,
+    lanes: "ExecutionLanes",
     include_progress: bool = True,
     request: Request | None = None,
     cancel_event: threading.Event | None = None,
@@ -509,6 +512,7 @@ async def guarded_stream(
             providers=providers,
             strategies=strategies,
             settings=settings,
+            lanes=lanes,
             include_progress=include_progress,
             request=request,
             cancel_event=cancel_event,

@@ -47,6 +47,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     router = APIRouter()
     resolver = container.resolver
     quota_service = container.quota_service
+    lanes = container.execution_lanes
 
     @router.post("/v1/text/improvements")
     async def improve_text(
@@ -97,7 +98,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             try:
                 raw_response = await asyncio.wait_for(
                     loop.run_in_executor(
-                        None,
+                        lanes.ai,
                         bound_thread_call(
                             partial(
                                 resolved.providers.llm.complete,

@@ -86,7 +86,16 @@ def build_router(container: "AppContainer") -> APIRouter:
         principal: Principal = Depends(principal_dep),
         visible_to: UserContext | None = Depends(user_context_dep),
     ):
-        """The caller's visible templates, newest first."""
+        """The caller's visible templates, newest first.
+
+        The list is also the lazy seeding chokepoint (P12): a scoped
+        user's FIRST listing installs the stock prompts atomically —
+        once, ever — before the visible set is read.
+        """
+        await service.ensure_default_templates(
+            tenant_id=principal.tenant_id,
+            visible_to=visible_to,
+        )
         records = await service.list_visible(
             tenant_id=principal.tenant_id,
             visible_to=visible_to,

@@ -39,6 +39,22 @@ export function applyKnowledgeRunEvent(
   event: ResearchRunEvent,
 ): KnowledgeRunProgressRecord {
   switch (event.type) {
+    // Every accepted run passes through the dispatch queue; the server
+    // emits exactly one queued frame per segment. Rendering it as a real
+    // step keeps the card honest while a busy worker fleet delays the
+    // claim — the previous silent default here left an empty step strip
+    // that read as a hang. A re-queued segment upserts the same step
+    // back to running (appendStep upserts by id).
+    case 'inqtrix.run.queued':
+      return appendStep(progress, {
+        facts: {},
+        id: 'queued',
+        kind: 'queued',
+        status: 'running',
+      })
+    case 'inqtrix.run.started':
+    case 'inqtrix.run.resumed':
+      return markStepDone(progress, 'queued')
     case 'inqtrix.knowledge.contextualized':
       return appendStep(progress, {
         facts: {

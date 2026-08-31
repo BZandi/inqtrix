@@ -14,6 +14,7 @@ import uuid
 from typing import TYPE_CHECKING, Any, Mapping
 
 from inqtrix.auth.permissions import AccessMode, ResourceAccess, SharePermission
+from inqtrix.content.default_prompt_seed import DEFAULT_PROMPT_SEEDS
 from inqtrix.content.prompt_templates import (
     TEMPLATE_CATEGORIES,
     PromptTemplateConflict,
@@ -132,6 +133,49 @@ class PromptTemplateService:
         stored = await self._repository.create(record)
         await self._invalidate(stored)
         return stored
+
+    async def ensure_default_templates(
+        self,
+        *,
+        tenant_id: str,
+        visible_to: "UserContext | None",
+    ) -> bool:
+        """Seed the stock prompts once per scoped user (P12, lazy).
+
+        Called by the LIST route before listing: the client hydrates
+        templates on app start, so this fires right after any first
+        login — every auth mode including the very first admin, with no
+        auth-layer coupling. Unscoped deployments (no user identity)
+        never seed; the demo mode covers that showcase. Returns whether
+        templates were inserted.
+        """
+        if visible_to is None:
+            return False
+        user_id = visible_to.principal.user_id
+        if user_id is None:
+            return False
+        now = time.time()
+        records = [
+            PromptTemplateRecord(
+                id=new_template_id(),
+                tenant_id=tenant_id,
+                owner_user_id=user_id,
+                created_at=now,
+                updated_at=now,
+                # The shared validator also guards the generated seed
+                # module: a broken generation fails LOUDLY here instead
+                # of storing a defective template.
+                **_validated_fields(seed),
+            )
+            for seed in DEFAULT_PROMPT_SEEDS
+        ]
+        seeded = await self._repository.seed_default_templates(
+            records, tenant_id=tenant_id, user_id=user_id
+        )
+        if seeded:
+            for record in records:
+                await self._invalidate(record)
+        return seeded
 
     async def list_visible(
         self,

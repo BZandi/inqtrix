@@ -94,4 +94,15 @@ describe('knowledgeRunHeaderStatus', () => {
     expect(status.value).not.toContain('nicht ausreichend')
     expect(status.title).toBe('Bewerte Evidenz (Runde 3/4) · nicht ausreichend · Suchanfrage umformuliert')
   })
+
+  it('lets a running queued step displace the preparing fallback', () => {
+    const status = knowledgeRunHeaderStatus({
+      collectionCount: 1,
+      fallback: 'Initialisiere Retrieval',
+      step: { facts: {}, id: 'queued', kind: 'queued', status: 'running' },
+      t,
+    })
+    expect(status.value).toBe('In Warteschlange – wartet auf einen freien Slot…')
+    expect(status.value).not.toBe('Initialisiere Retrieval')
+  })
 })

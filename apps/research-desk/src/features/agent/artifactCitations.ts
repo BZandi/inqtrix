@@ -37,6 +37,78 @@ export type AgentArtifactReference = {
   url: string | null
 }
 
+/**
+ * A reference is knowledge-backed exactly when it carries a document id —
+ * the same discriminator the evidence canvas resolves on. Never test the
+ * `url`: a knowledge reference carries the internal source endpoint there,
+ * so a URL check reads it as a web hit and renders the wrong row.
+ */
+export function isKnowledgeReference(
+  reference: Pick<AgentArtifactReference, 'documentId'>,
+): boolean {
+  return Boolean(reference.documentId)
+}
+
+/** Same scheme guard as `webUrl()` (copyAnswer): tool-provided URLs are
+ * trusted data, but only http(s) ever reaches `window.open`/`href`. */
+export function isWebHref(url: string): boolean {
+  return /^https?:\/\//i.test(url)
+}
+
+/**
+ * Whether a citation is a WEB hit and must render as an external source
+ * row. Knowledge wins first — see `isKnowledgeReference` — so an index
+ * citation never renders as a web result just because its internal
+ * source endpoint happens to be an http URL.
+ */
+export function isWebEvidenceReference(
+  reference: Pick<AgentArtifactReference, 'documentId' | 'queryId' | 'url'>,
+): boolean {
+  if (isKnowledgeReference(reference)) return false
+  return Boolean(reference.queryId)
+    || Boolean(reference.url && isWebHref(reference.url))
+}
+
+/**
+ * Reader target for ONE knowledge citation (P10-K5) — the same shape
+ * the Knowledge Desk builds for its citations, so the shared reader
+ * highlights identically in both desks.
+ *
+ * Highlight priority is deliberate: the server-fetched chunk text is
+ * canonical document text, while the stored reference excerpt may carry
+ * contextual-retrieval scaffolding that never appears in the document
+ * and would therefore fail to match. Returns null for web references —
+ * they have no document to open.
+ */
+export function agentReferenceViewerTarget(
+  reference: AgentArtifactReference,
+  chunkExcerpt: string | null,
+  collectionLabel: string | undefined,
+): {
+  chunkIndex: number | null
+  collectionLabel?: string
+  documentId: string
+  excerpt: string | null
+  highlightTargets: string[]
+  pageNumber: number | null
+  title: string
+  verified: boolean
+} | null {
+  if (!reference.documentId) return null
+  return {
+    chunkIndex: reference.chunkIndex,
+    collectionLabel,
+    documentId: reference.documentId,
+    excerpt: chunkExcerpt ?? reference.excerpt,
+    highlightTargets: [chunkExcerpt, reference.excerpt].filter(
+      (value): value is string => Boolean(value && value.trim()),
+    ),
+    pageNumber: reference.pageNumber,
+    title: reference.title,
+    verified: reference.provenanceStatus === 'verified_span',
+  }
+}
+
 /** Labels an agent answer may cite.
  *
  * K and W are the kernel's own knowledge and web citations. E belongs to the
@@ -90,6 +162,27 @@ export function agentArtifactReferences(
       url,
     }]
   })
+}
+
+/**
+ * Which citation labels an answer renders RIGHT NOW.
+ *
+ * While the answer streams its real references do not exist yet, but
+ * the server announces the labels the finished answer will cite
+ * (`answer.started`) — and the linkifier needs only labels. Using them
+ * means the markdown handed to the renderer is identical before and
+ * after the answer settles; without them the whole body was rewritten
+ * in one step, which reads as the message being re-inserted.
+ */
+export function answerCitationLabels(
+  writing: boolean,
+  announced: readonly string[] | undefined,
+  references: readonly AgentArtifactReference[],
+): AgentArtifactReference[] {
+  if (!writing) return [...references]
+  return (announced ?? []).map(
+    (label) => ({ label }) as AgentArtifactReference,
+  )
 }
 
 export function linkifyAgentArtifactCitations(

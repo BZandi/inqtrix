@@ -10,6 +10,7 @@ import {
   type ProjectFile,
 } from './markdown'
 import { createBootstrapKnowledgeSession } from './knowledgeSessionDefaults'
+import { resolveExplorerSortState } from './explorerSort'
 import type {
   EmbedModelId,
   FileAssetRecord,
@@ -481,9 +482,21 @@ function buildProjectStateFromFiles({
       const byDate = editorDocuments[b].updatedAt.localeCompare(editorDocuments[a].updatedAt)
       return byDate || editorDocuments[a].title.localeCompare(editorDocuments[b].title)
     })
-  const chatThreadOrder = Object.keys(chatThreads).sort((a, b) => {
-    return chatThreads[b].updatedAt.localeCompare(chatThreads[a].updatedAt)
-  })
+  // Restore the persisted thread order (manual mode's frozen sequence);
+  // threads the manifest does not cover append by updatedAt desc, and a
+  // manifest without the key (older exports) falls back entirely.
+  const persistedThreadOrder = Array.isArray(manifest.chat_thread_order)
+    ? (manifest.chat_thread_order as unknown[]).filter(
+      (id): id is string => typeof id === 'string' && Boolean(chatThreads[id]),
+    )
+    : []
+  const coveredThreadIds = new Set(persistedThreadOrder)
+  const chatThreadOrder = [
+    ...persistedThreadOrder,
+    ...Object.keys(chatThreads)
+      .filter((id) => !coveredThreadIds.has(id))
+      .sort((a, b) => chatThreads[b].updatedAt.localeCompare(chatThreads[a].updatedAt)),
+  ]
   const manifestRuleOrder = ruleOrderFromManifest(manifest.rule_order, chatRules)
   const chatRuleOrder = manifestRuleOrder.length > 0
     ? manifestRuleOrder
@@ -550,6 +563,7 @@ function buildProjectStateFromFiles({
     // Agent Desk state is session-scoped (references short-lived server
     // runs) and not part of project files — server hydration rebuilds it.
     agentRuns: {},
+    agentSessionArtifacts: {},
     agentSessionGroupOrder: [],
     agentSessionGroups: {},
     agentSessionOrder: [],
@@ -606,6 +620,9 @@ function buildProjectStateFromFiles({
       pendingChatReportRunId: pendingReportRunIdOrDefault(
         (ui as Record<string, unknown>).pendingChatReportRunId,
         researchRuns,
+      ),
+      explorerSort: resolveExplorerSortState(
+        (ui as Record<string, unknown>).explorerSort,
       ),
       pinnedExplorer: resolvePinnedExplorerFromManifest(
         (ui as Record<string, unknown>).pinnedExplorer,

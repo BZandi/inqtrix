@@ -65,6 +65,42 @@ def pinned_knowledge_collection_ids(
     return frozenset(raw_collection_ids)
 
 
+def inherited_knowledge_filters(
+    boundary: "frozenset[str] | None",
+    *,
+    explicit: bool,
+) -> dict[str, Any]:
+    """The knowledge scope a DELEGATED child must be submitted with.
+
+    A child is not admitted through the HTTP router, so the
+    submission-time collection pin never runs for it — and
+    :func:`pinned_knowledge_collection_ids` fails closed on a missing
+    pin. Every delegated run therefore executed with an EMPTY knowledge
+    boundary while its surface reported knowledge as available: it saw
+    zero collections, asked the user for access it already had, or
+    answered from nothing.
+
+    Inheriting is not widening. The child receives EXACTLY the parent's
+    admitted set, and ``None`` — deliberately unscoped execution with no
+    per-user sharing boundary — is passed on as "no pin", never as an
+    empty one.
+
+    Args:
+        boundary: The parent's admitted collection ids, or ``None`` for
+            unscoped execution.
+        explicit: Whether that scope is the user's own pick, carried so
+            the child's gate predicate reads it the same way the
+            parent's did.
+
+    Returns:
+        Filters to merge into the child's resolved request; empty when
+        there is no boundary to inherit.
+    """
+    if boundary is None:
+        return {}
+    return {"collection_ids": sorted(boundary), "explicit": explicit}
+
+
 class _GuardedProvider:
     """Shared before/after check for one synchronous provider adapter."""
 

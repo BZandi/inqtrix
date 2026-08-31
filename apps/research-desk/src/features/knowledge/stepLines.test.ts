@@ -270,4 +270,11 @@ describe('knowledgeStepLine', () => {
       status: 'done',
     }).primary).toBe('Antwort neu formuliert (1 Zitat(e) waren nicht belegt)')
   })
+
+  it('renders the queued step position-less in both states', () => {
+    expect(line({ facts: {}, id: 'queued', kind: 'queued', status: 'running' }).primary)
+      .toBe('In Warteschlange – wartet auf einen freien Slot…')
+    expect(line({ facts: {}, id: 'queued', kind: 'queued', status: 'done' }).primary)
+      .toBe('Warteschlange durchlaufen')
+  })
 })

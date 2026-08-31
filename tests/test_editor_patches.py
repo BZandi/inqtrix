@@ -42,6 +42,7 @@ from inqtrix.server.routers import editor_patches, editor_persistence
 from inqtrix.services.editor_patch_service import (
     EditorPatchService,
     EditorPatchValidationError,
+    _resolve_anchor,
     apply_edits,
 )
 from inqtrix.services.editor_persistence_service import EditorPersistenceService
@@ -1254,3 +1255,76 @@ async def test_same_patch_winner_wrote_doc_not_yet_marked_replays_not_409() -> N
     document = await persistence.get_document("ed_doc", visible_to=scoped(OWNER))
     assert "Alpha verbessert." in document.content_markdown
     assert document.revision == 4
+
+
+@pytest.mark.asyncio
+async def test_propose_expected_revision_pins_the_read_state() -> None:
+    """P7-E1: a proposal pinned to the revision the caller READ succeeds
+    only while the document has not moved; a stale pin conflicts with
+    the SAME exception apply uses, and None keeps the legacy behavior."""
+    service, persistence = _memory_service()
+    await _seed_document(persistence, revision=3)
+
+    pinned = await service.propose(
+        document_id="ed_doc",
+        run_id=None,
+        source="agent",
+        edits=_raw_edits(),
+        summary="Gepinnt",
+        warnings=[],
+        created_by_user_id=OWNER,
+        visible_to=scoped(OWNER),
+        expected_revision=3,
+    )
+    assert pinned.revision_before == 3
+
+    with pytest.raises(PatchRevisionConflict) as conflict:
+        await service.propose(
+            document_id="ed_doc",
+            run_id=None,
+            source="agent",
+            edits=_raw_edits(),
+            summary="Veraltet",
+            warnings=[],
+            created_by_user_id=OWNER,
+            visible_to=scoped(OWNER),
+            expected_revision=2,
+        )
+    assert conflict.value.current_revision == 3
+    assert conflict.value.revision_before == 2
+
+    legacy = await service.propose(
+        document_id="ed_doc",
+        run_id=None,
+        source="agent",
+        edits=_raw_edits(),
+        summary="Ohne Pin",
+        warnings=[],
+        created_by_user_id=OWNER,
+        visible_to=scoped(OWNER),
+    )
+    assert legacy.revision_before == 3
+
+
+def test_anchor_parity_fixture_matches_the_python_resolver() -> None:
+    """P7-E2 cross-language parity: the shared fixture pins THE server
+    semantics (byte-literal, hard quote disqualification, summed
+    distance, tie abstention); anchoring.parity.test.ts runs the SAME
+    cases against the TS port ``resolveAnchorInMarkdown``."""
+    import json
+    from pathlib import Path
+
+    fixture = json.loads(
+        Path(__file__).parent.joinpath(
+            "fixtures/anchor_parity.json"
+        ).read_text()
+    )
+    assert len(fixture["cases"]) >= 10
+    for case in fixture["cases"]:
+        got = _resolve_anchor(
+            case["content"],
+            case["find"],
+            quote_before=case["quote_before"],
+            quote_after=case["quote_after"],
+        )
+        assert got == case["expected"], case["name"]

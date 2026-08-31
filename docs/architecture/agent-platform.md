@@ -83,6 +83,16 @@ and are shared by BOTH engines (mission machine and kernel):
   additive `report_guidance` string (max. 2000 chars, stored in the
   approval's `decision_payload`); it renders as a user-requirements
   block in the outline, section, and answer prompts of that run.
+* **Run-wide tool grants** — a tool-gate approve accepts an additive
+  `approval_scope` (`"once"` default, `"run"`). `"run"` is stored in
+  the approval's `decision_payload` and folded at every segment start
+  into the kernel's grant set: the gated tools of that gate stop
+  gating for the rest of the run. Grants act only in the balanced
+  mode table (`strict` stays per-call by design), never cover
+  `ALWAYS_GATED_TOOLS`, and surface on the execution snapshot as
+  `tool_grants`. Because `decision_payload` is replay identity, an
+  approve-once retry after an approve-run conflicts (409) exactly
+  like a retry carrying a different edited plan.
 
 ## Execution model
 
@@ -371,6 +381,21 @@ tool/step limits for it.
   references, while a plan without web tasks selects
   `agent_answer_light`/mid), `canvas` keeps the session-memo
   path (E15 untouched). A patch assignment always uses canvas.
+* **Canvas attachment (P4).** `canvas_context` on the run request
+  (agent-kernel only, rejected loudly everywhere else including the
+  quick-web lane) carries the open canvas document (`artifact_id` +
+  `revision`) and queued selection comments
+  (`{artifact_id, revision, quote, quote_before, quote_after, comment}`,
+  max. 20). It is a DEDICATED field — never serialized into `question`
+  (the question column is clipped at persistence and reaches share-inbox
+  titles) — validated strictly with visible bounds (over-limit content
+  is rejected with the limit named, never truncated), persisted in the
+  worker replay body, and injected into the kernel user message directly
+  before the assignment. Trust split: the user's comment text is an
+  instruction; the quoted document excerpts are fenced as untrusted data
+  (`quelle="canvas-auszug"`). Snapshot semantics: frozen with the first
+  segment's checkpointed user message — later canvas edits never rewrite
+  it. Child runs do not inherit it.
 * **Session context (K1-K4).** Every follow-up composes session metadata
   server-side from durable rows (`list_session_runs` + clarifications +
   approvals + result answers + `list_session_artifacts` registry). An
@@ -444,6 +469,23 @@ resume under their own algorithm.
   slot-free (`waiting_for_children`) and re-find their child via
   `origin_key=tool_call_id` on resume re-execution (persisted in the
   replay payload, no schema change).
+* **Editor read/propose discipline (P7-E1).** Two read tools —
+  `read_editor_document` (full text, fenced, visibly capped) and
+  `search_editor_document` (whitespace-tolerant search that returns
+  BYTE-TRUE original-markdown `find`/quote candidates the server
+  resolver matches literally) — mint durable read receipts
+  `{document_id: revision}` (marker first line, rebuilt at segment
+  start with a producing-tool check; a lost receipt only forces a
+  re-read). `propose_editor_patch` is ENFORCED read-before-propose: it
+  refuses unread targets, refuses any document other than the run's
+  attached `document_id` target, and pins the receipt revision as
+  `expected_revision` — the propose path answers a moved document with
+  the same `editor.patch_revision_conflict` (409) apply uses, so a
+  proposal can never anchor against text its author has not seen.
+  Editor content is fenced (unlike `read_canvas`): shared documents can
+  carry other people's insertions — data, never instructions. Both read
+  tools gate in `strict` and are `knowledge_only`-whitelisted; skills
+  may allow them (`SKILL_ALLOWED_TOOLS`).
   Source tier is quality metadata rather than a domain admission list. An
   unknown publisher remains in the ledger and its complete provider-grounded
   answer reaches synthesis; the tier can influence ordering, cross-check

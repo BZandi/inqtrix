@@ -48,7 +48,6 @@ from inqtrix.providers.base import (
     LLMProvider,
     SearchProvider,
 )
-from inqtrix.report_profiles import AnswerSectionSpec, ReportProfileTuning
 from inqtrix.settings import (
     AgentSettings,
     ModelSettings,

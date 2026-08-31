@@ -9,7 +9,6 @@ in the ``GET /health`` payload rather than silently leaking the global
 
 from __future__ import annotations
 
-import pytest
 
 from inqtrix.providers.base import SearchProvider
 from inqtrix.search_result import GroundedSearchResult

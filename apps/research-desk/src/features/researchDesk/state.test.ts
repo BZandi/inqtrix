@@ -20,7 +20,9 @@ import type {
 } from '@/features/project/types'
 import { applyRunEvent, fromRunSummary, mergeRunSummary } from '@/features/project/types'
 import { persistableAgentSessionsInOrder } from '@/features/agent/agentSessionSync'
-import { researchDeskReducer } from './state'
+import { DERIVED_AGENT_SESSION_UPDATED_AT } from '@/features/agent/model'
+import { researchDeskReducer, visibleResearchJobs } from './state'
+import { projectResearchJobs } from '@/features/project/selectors'
 
 function makeRunEvent(overrides: Partial<ResearchRunEvent> = {}): ResearchRunEvent {
   return {
@@ -429,10 +431,20 @@ describe('authoritative run replacement', () => {
     })
 
     expect(state.agentRuns[owned.run_id].sessionId).toBe('session-owned')
+    // The contrast to shared views: an owned run's session is a REAL,
+    // persistable-capable record (never the persistable:false shell)...
+    expect(
+      state.agentSessions['session-owned'].persistable,
+    ).not.toBe(false)
+    // ...but as an UNTOUCHED fabrication (epoch updatedAt, G1) it is not
+    // yet admitted for push — the server row from claim_session is the
+    // truth, and pushing the fabrication once resurrected a derived
+    // title over the stored one (F-P4-TITLE2). A user mutation or the
+    // server listing lifts the marker.
     expect(persistableAgentSessionsInOrder(
       state.agentSessions,
       state.agentSessionOrder,
-    ).map((session) => session.id)).toEqual(['session-owned'])
+    )).toEqual([])
   })
 })
 
@@ -657,6 +669,174 @@ describe('pinned explorer reducer actions', () => {
       type: 'togglePinnedChatThread',
     })
     expect(unpinned.ui.pinnedExplorer.chatThreadIds).toEqual([])
+  })
+
+  it('appends new pins so the first pin stays on top (FIFO pin order)', () => {
+    const base = createEmptyProjectState()
+    const seeded = {
+      ...base,
+      chatThreadOrder: ['ct-1', 'ct-2'],
+      chatThreads: {
+        'ct-1': makeChatThread('ct-1', 'First'),
+        'ct-2': makeChatThread('ct-2', 'Second'),
+      },
+    }
+    const one = researchDeskReducer(seeded, { threadId: 'ct-1', type: 'togglePinnedChatThread' })
+    const two = researchDeskReducer(one, { threadId: 'ct-2', type: 'togglePinnedChatThread' })
+    expect(two.ui.pinnedExplorer.chatThreadIds).toEqual(['ct-1', 'ct-2'])
+  })
+
+  it('setExplorerSortMode switches one desk and marks the project dirty', () => {
+    const base = createEmptyProjectState()
+    const next = researchDeskReducer(base, { desk: 'chat', mode: 'manual', type: 'setExplorerSortMode' })
+    expect(next.ui.explorerSort).toEqual({ ...base.ui.explorerSort, chat: 'manual' })
+    expect(next.dirty).toBe(true)
+    expect(researchDeskReducer(next, { desk: 'chat', mode: 'manual', type: 'setExplorerSortMode' })).toBe(next)
+  })
+
+  it('adoptExplorerOrder takes the visible order, appends uncovered ids and switches to manual', () => {
+    const base = createEmptyProjectState()
+    const seeded = {
+      ...base,
+      chatThreadGroupOrder: ['cg-1', 'cg-2'],
+      chatThreadOrder: ['ct-1', 'ct-2', 'ct-3'],
+    }
+    const next = researchDeskReducer(seeded, {
+      desk: 'chat',
+      folderIds: ['cg-2', 'cg-1'],
+      itemIds: ['ct-3', 'ct-1'],
+      type: 'adoptExplorerOrder',
+    })
+    expect(next.chatThreadOrder).toEqual(['ct-3', 'ct-1', 'ct-2'])
+    expect(next.chatThreadGroupOrder).toEqual(['cg-2', 'cg-1'])
+    expect(next.ui.explorerSort.chat).toBe('manual')
+    expect(next.dirty).toBe(true)
+  })
+
+  it('drop index anchors against unpinned rows only (pinned rows render lifted)', () => {
+    const base = createEmptyProjectState()
+    const seeded = {
+      ...base,
+      chatThreadOrder: ['ct-p', 'ct-x', 'ct-y', 'ct-z', 'ct-w'],
+      chatThreads: {
+        'ct-p': makeChatThread('ct-p', 'Pinned'),
+        'ct-w': makeChatThread('ct-w', 'Dragged'),
+        'ct-x': makeChatThread('ct-x', 'X'),
+        'ct-y': makeChatThread('ct-y', 'Y'),
+        'ct-z': makeChatThread('ct-z', 'Z'),
+      },
+      ui: {
+        ...base.ui,
+        pinnedExplorer: { ...base.ui.pinnedExplorer, chatThreadIds: ['ct-p'] },
+      },
+    }
+    // Visible unpinned section is x, y, z — dropping at index 1 must land
+    // BEFORE y (the pinned row p is lifted out and never counted).
+    const next = researchDeskReducer(seeded, {
+      groupId: null,
+      targetIndex: 1,
+      threadId: 'ct-w',
+      type: 'moveChatThreadToGroup',
+    })
+    expect(next.chatThreadOrder).toEqual(['ct-p', 'ct-x', 'ct-w', 'ct-y', 'ct-z'])
+  })
+
+  it('agent drag: positional move into a folder respects pinned exclusion and adopt covers agent', () => {
+    const base = createEmptyProjectState()
+    const agentSession = (id: string, title: string, groupId: string | null = null) => ({
+      createdAt: '2026-08-01T00:00:00.000Z',
+      groupId,
+      id,
+      runIds: [],
+      sourcePolicy: { knowledge: 'available' as const, web: 'available' as const },
+      title,
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    })
+    const seeded = {
+      ...base,
+      agentSessionGroupOrder: ['ag-1'],
+      agentSessionGroups: {
+        'ag-1': { createdAt: '', id: 'ag-1', title: 'Ordner', updatedAt: '' },
+      },
+      agentSessionOrder: ['as-p', 'as-a', 'as-b', 'as-c'],
+      agentSessions: {
+        'as-a': agentSession('as-a', 'In folder A', 'ag-1'),
+        'as-b': agentSession('as-b', 'In folder B', 'ag-1'),
+        'as-c': agentSession('as-c', 'Loose C'),
+        'as-p': agentSession('as-p', 'Pinned in folder', 'ag-1'),
+      },
+      ui: {
+        ...base.ui,
+        pinnedExplorer: { ...base.ui.pinnedExplorer, agentSessionIds: ['as-p'] },
+      },
+    }
+    // Visible folder rows are a, b (p is lifted into the pinned block);
+    // dropping c at index 1 must land between a and b.
+    const moved = researchDeskReducer(seeded, {
+      groupId: 'ag-1',
+      sessionId: 'as-c',
+      targetIndex: 1,
+      type: 'moveAgentSessionToGroup',
+    })
+    expect(moved.agentSessionOrder).toEqual(['as-p', 'as-a', 'as-c', 'as-b'])
+    expect(moved.agentSessions['as-c']?.groupId).toBe('ag-1')
+
+    const adopted = researchDeskReducer(seeded, {
+      desk: 'agent',
+      folderIds: ['ag-1'],
+      itemIds: ['as-b', 'as-a'],
+      type: 'adoptExplorerOrder',
+    })
+    expect(adopted.agentSessionOrder).toEqual(['as-b', 'as-a', 'as-p', 'as-c'])
+    expect(adopted.ui.explorerSort.agent).toBe('manual')
+  })
+
+  it('agent drag: folders reorder positionally', () => {
+    const base = createEmptyProjectState()
+    const group = (id: string, title: string) => ({ createdAt: '', id, title, updatedAt: '' })
+    const seeded = {
+      ...base,
+      agentSessionGroupOrder: ['ag-1', 'ag-2', 'ag-3'],
+      agentSessionGroups: {
+        'ag-1': group('ag-1', 'Eins'),
+        'ag-2': group('ag-2', 'Zwei'),
+        'ag-3': group('ag-3', 'Drei'),
+      },
+    }
+    const next = researchDeskReducer(seeded, {
+      groupId: 'ag-3',
+      targetIndex: 0,
+      type: 'moveAgentSessionGroup',
+    })
+    expect(next.agentSessionGroupOrder).toEqual(['ag-3', 'ag-1', 'ag-2'])
+  })
+
+  it('agent drag: an in-place drop is a strict no-op (no dirty flag)', () => {
+    const base = createEmptyProjectState()
+    const agentSession = (id: string, title: string) => ({
+      createdAt: '2026-08-01T00:00:00.000Z',
+      groupId: null,
+      id,
+      runIds: [],
+      sourcePolicy: { knowledge: 'available' as const, web: 'available' as const },
+      title,
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    })
+    const seeded = {
+      ...base,
+      agentSessionOrder: ['as-a', 'as-b'],
+      agentSessions: {
+        'as-a': agentSession('as-a', 'A'),
+        'as-b': agentSession('as-b', 'B'),
+      },
+    }
+    const next = researchDeskReducer(seeded, {
+      groupId: null,
+      sessionId: 'as-a',
+      targetIndex: 0,
+      type: 'moveAgentSessionToGroup',
+    })
+    expect(next).toBe(seeded)
   })
 
   it('removes stale pins when pinned entries are deleted', () => {
@@ -2247,7 +2427,7 @@ describe('chat rule reducer actions', () => {
       category: 'instruction',
       includeInAutocomplete: true,
       linkedContextRefs: [],
-      visibility: { chat: true, editor: true },
+      visibility: { agent: false, chat: true, editor: true },
     })
     expect(next.chatRuleOrder).toEqual(['r1'])
   })
@@ -3517,6 +3697,123 @@ describe('gate-tray approvals reconcile with exclusive membership', () => {
     expect(state.agentRuns['r-gate'].clarifications[0].status).toBe('answered')
   })
 
+  it('titles a placeholder session from its first run question', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      session: {
+        id: 's-gate',
+        title: 'Neue Sitzung',
+        groupId: null,
+        createdAt: '2026-08-27T06:00:00.000Z',
+        updatedAt: '2026-08-27T06:00:00.000Z',
+        runIds: [],
+        sourcePolicy: { knowledge: 'available', web: 'available' },
+      },
+      type: 'createAgentSession',
+    })
+    state = researchDeskReducer(state, {
+      summary: agentSummary(),
+      type: 'upsertAgentRunSummary',
+    })
+    expect(state.agentSessions['s-gate'].title).toBe('Gate-Lauf')
+    // The retitle must SYNC exactly once: it stamps updatedAt with the
+    // run's createdAt (the autosave fingerprint), so a reload sees a
+    // real title instead of re-deriving one from hydration order.
+    expect(state.agentSessions['s-gate'].updatedAt).not.toBe(
+      '2026-08-27T06:00:00.000Z',
+    )
+
+    // …but HYDRATION must never hand out titles: it replays newest-first,
+    // which drifted a placeholder to the LATEST question (P3.5).
+    let hydrated = researchDeskReducer(createEmptyProjectState(), {
+      session: {
+        id: 's-gate',
+        title: 'Neue Sitzung',
+        groupId: null,
+        createdAt: '2026-08-27T06:00:00.000Z',
+        updatedAt: '2026-08-27T06:00:00.000Z',
+        runIds: [],
+        sourcePolicy: { knowledge: 'available', web: 'available' },
+      },
+      type: 'createAgentSession',
+    })
+    hydrated = researchDeskReducer(hydrated, {
+      hydration: true,
+      summary: agentSummary(),
+      type: 'upsertApiRunSummary',
+    })
+    expect(hydrated.agentSessions['s-gate'].title).toBe('Neue Sitzung')
+    expect(hydrated.agentSessions['s-gate'].runIds).toEqual(['r-gate'])
+
+    // A deliberately named session keeps its name…
+    let named = researchDeskReducer(createEmptyProjectState(), {
+      session: {
+        id: 's-gate',
+        title: 'Mein Batterie-Projekt',
+        groupId: null,
+        createdAt: '2026-08-27T06:00:00.000Z',
+        updatedAt: '2026-08-27T06:00:00.000Z',
+        runIds: [],
+        sourcePolicy: { knowledge: 'available', web: 'available' },
+      },
+      type: 'createAgentSession',
+    })
+    named = researchDeskReducer(named, {
+      summary: agentSummary(),
+      type: 'upsertAgentRunSummary',
+    })
+    expect(named.agentSessions['s-gate'].title).toBe('Mein Batterie-Projekt')
+
+    // …and a later second run never retitles an established session.
+    state = researchDeskReducer(state, {
+      summary: agentSummary({
+        question: 'Zweite Frage',
+        run_id: 'r-gate-2',
+      }),
+      type: 'upsertAgentRunSummary',
+    })
+    expect(state.agentSessions['s-gate'].title).toBe('Gate-Lauf')
+  })
+
+  it('stores child gate rows on the parent and never regresses a decided row', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary: agentSummary({ status: 'waiting_for_children' }),
+      type: 'upsertAgentRunSummary',
+    })
+    state = {
+      ...state,
+      agentRuns: {
+        ...state.agentRuns,
+        'r-gate': {
+          ...state.agentRuns['r-gate'],
+          childGates: {
+            'r-child': { approvals: [], clarifications: [], stale: true },
+          },
+        },
+      },
+    }
+    // The decide seeds the fresh decided row and clears the stale flag …
+    state = researchDeskReducer(state, {
+      approvals: [{ ...approvalWire('approved'), run_id: 'r-child' }],
+      childRunId: 'r-child',
+      runId: 'r-gate',
+      type: 'setAgentChildGates',
+    })
+    const decided = state.agentRuns['r-gate'].childGates['r-child']
+    expect(decided.stale).toBe(false)
+    expect(decided.approvals[0].status).toBe('approved')
+    // … and the racing full-list fetch must not regress it to pending.
+    state = researchDeskReducer(state, {
+      approvals: [{ ...approvalWire('pending'), run_id: 'r-child' }],
+      childRunId: 'r-child',
+      clarifications: [],
+      runId: 'r-gate',
+      type: 'setAgentChildGates',
+    })
+    const raced = state.agentRuns['r-gate'].childGates['r-child']
+    expect(raced.approvals).toHaveLength(1)
+    expect(raced.approvals[0].status).toBe('approved')
+  })
+
   it('retains an in-flight answer publication across a stale artifact-list response', () => {
     let state = researchDeskReducer(createEmptyProjectState(), {
       summary: agentSummary({ status: 'running' }),
@@ -4246,5 +4543,390 @@ describe('chat thread model stickiness (thread-scoped)', () => {
       type: 'upsertServerChatThreads',
     })
     expect(state.ui.selectedChatModelTier).toBe('high')
+  })
+})
+
+describe('appendApiRunEvents (history batch)', () => {
+  function seededWithRun() {
+    const run = fromRunSummary(makeRunSummary({ run_id: 'run-batch' }), 'test-stack')
+    const base = createEmptyProjectState()
+    return {
+      ...base,
+      researchRunOrder: [run.runId],
+      researchRuns: { [run.runId]: run },
+    }
+  }
+  const batchEvents = [1, 2, 3].map((sequence) =>
+    makeRunEvent({
+      created_at: Date.parse('2026-01-01T00:00:05.000Z') / 1000 + sequence,
+      data: { message: `Schritt ${sequence}`, status: 'running' },
+      run_id: 'run-batch',
+      sequence,
+      type: 'inqtrix.progress.message',
+    }))
+
+  it('is equivalent to N single appends except for arrivedLive', () => {
+    // The batch path exists so a replay lands in ONE commit without any row
+    // counting as live — it must never drift from the singular path in
+    // anything else (status transitions, dedup, knowledge/agent routing).
+    const viaBatch = researchDeskReducer(seededWithRun(), {
+      events: batchEvents,
+      type: 'appendApiRunEvents',
+    })
+    const viaSingles = batchEvents.reduce(
+      (state, event) => researchDeskReducer(state, { event, type: 'appendApiRunEvent' }),
+      seededWithRun(),
+    )
+
+    const stripLive = (state: typeof viaBatch) =>
+      state.researchRuns['run-batch'].events.map((event) => {
+        const { arrivedLive, ...rest } = event
+        void arrivedLive
+        return rest
+      })
+    expect(stripLive(viaBatch)).toEqual(stripLive(viaSingles))
+    expect(viaBatch.researchRuns['run-batch'].status)
+      .toBe(viaSingles.researchRuns['run-batch'].status)
+
+    // The flag is the ONLY divergence: history renders in place, live rises.
+    expect(viaBatch.researchRuns['run-batch'].events.map((event) => event.arrivedLive))
+      .toEqual([undefined, undefined, undefined])
+    expect(viaSingles.researchRuns['run-batch'].events.map((event) => event.arrivedLive))
+      .toEqual([true, true, true])
+  })
+})
+
+describe('markApiRunUnavailable', () => {
+  function seeded() {
+    const run = fromRunSummary(
+      makeRunSummary({ run_id: 'run-gone', status: 'running' }),
+      'test-stack',
+    )
+    const base = createEmptyProjectState()
+    return {
+      ...base,
+      researchRunOrder: [run.runId],
+      researchRuns: { [run.runId]: run },
+    }
+  }
+
+  it('sets the calm lock without claiming a status', () => {
+    // The server's 404 is deliberately non-disclosing (revoked, deleted,
+    // expired and foreign all identical), so the record keeps its last
+    // known status and only the flag moves — the card renders a lock,
+    // never "access revoked" and never a red error.
+    const next = researchDeskReducer(seeded(), {
+      runId: 'run-gone',
+      type: 'markApiRunUnavailable',
+    })
+    const run = next.researchRuns['run-gone']
+    expect(run.unavailable).toBe(true)
+    expect(run.status).toBe('running')
+    expect(run.error).toBeUndefined()
+  })
+
+  it('is idempotent and ignores unknown runs', () => {
+    const once = researchDeskReducer(seeded(), {
+      runId: 'run-gone',
+      type: 'markApiRunUnavailable',
+    })
+    expect(researchDeskReducer(once, {
+      runId: 'run-gone',
+      type: 'markApiRunUnavailable',
+    })).toBe(once)
+    const state = seeded()
+    expect(researchDeskReducer(state, {
+      runId: 'run-unknown',
+      type: 'markApiRunUnavailable',
+    })).toBe(state)
+  })
+})
+
+describe('markApiRunUnavailable for knowledge asks', () => {
+  it('settles the thread item terminally instead of spinning forever', () => {
+    // Knowledge runs never live in researchRuns: without this branch the
+    // dispatch was a no-op, the item claimed "running" forever, the ask
+    // gate stayed blocked, and cancel also 404s -- no path out.
+    const base = createEmptyProjectState()
+    const withItem = researchDeskReducer(base, {
+      item: makeKnowledgeItem('ki-gone', base.selectedKnowledgeSessionId as string),
+      type: 'startKnowledgeAsk',
+    })
+    const next = researchDeskReducer(withItem, {
+      runId: 'run-ki-gone',
+      type: 'markApiRunUnavailable',
+    })
+    const item = next.knowledgeItems['ki-gone']
+    expect(item.status).toBe('failed')
+    expect(item.error).toBe('Dieser Lauf ist nicht mehr verfügbar.')
+  })
+
+  it('never demotes a completed item', () => {
+    const base = createEmptyProjectState()
+    const withItem = researchDeskReducer(base, {
+      item: makeKnowledgeItem('ki-done', base.selectedKnowledgeSessionId as string, {
+        status: 'completed',
+      }),
+      type: 'startKnowledgeAsk',
+    })
+    const next = researchDeskReducer(withItem, {
+      runId: 'run-ki-done',
+      type: 'markApiRunUnavailable',
+    })
+    expect(next.knowledgeItems['ki-done'].status).toBe('completed')
+  })
+})
+
+describe('unavailable runs and the status buckets', () => {
+  it('drops out of the running bucket but stays under all', () => {
+    // The card visibly retracts its last status (calm lock): the COUNT
+    // and the filtered list must not keep claiming "running".
+    const run = {
+      ...fromRunSummary(
+        makeRunSummary({ run_id: 'run-lock', status: 'running' }),
+        'test-stack',
+      ),
+      unavailable: true,
+    }
+    const jobs = projectResearchJobs({
+      ...createEmptyProjectState(),
+      researchRunOrder: [run.runId],
+      researchRuns: { [run.runId]: run },
+    })
+    expect(jobs).toHaveLength(1)
+    expect(jobs[0].unavailable).toBe(true)
+    expect(visibleResearchJobs(jobs, 'all')).toHaveLength(1)
+    expect(visibleResearchJobs(jobs, 'running')).toHaveLength(0)
+  })
+})
+
+/**
+ * P4 session artifact index: the anchor-independent listing per session.
+ * Seeded stale on the session's first sighting, filled by the session
+ * listing fetch, re-flagged when a run's artifact surface invalidates
+ * (an update may have re-anchored a session artifact), and NEVER left
+ * stale after a failed fetch (no tight loop — the error stays visible).
+ */
+describe('agent session artifact index (P4)', () => {
+  const summary: ResearchRunSummary = {
+    access: { mode: 'owner' },
+    run_id: 'r-idx',
+    status: 'running',
+    queue_position: null,
+    question: 'Indexlauf',
+    stack: 'default',
+    mode: 'workspace_agent',
+    kind: 'agent',
+    session_id: 's-idx',
+    agent_overrides: {},
+    created_at: 1_700_000_000,
+    started_at: 1_700_000_000,
+    finished_at: null,
+    elapsed_seconds: null,
+    snapshot: {},
+    error: null,
+    events_url: '/v1/runs/r-idx/events',
+    result_url: '/v1/runs/r-idx/result',
+  }
+  const metaWire = {
+    artifact_id: 'a-memo',
+    created_at: 1_700_000_010,
+    kind: 'memo' as const,
+    refs_count: 0,
+    revision: 2,
+    run_id: 'r-anchor',
+    session_id: 's-idx',
+    status: 'ready' as const,
+    title: 'Memo',
+    updated_at: 1_700_000_020,
+    updated_by: 'agent' as const,
+  }
+
+  it('seeds a stale empty index on first session sighting', () => {
+    const base = researchDeskReducer(createEmptyProjectState(), {
+      summary,
+      type: 'upsertAgentRunSummary',
+    })
+    expect(base.agentSessionArtifacts['s-idx']).toEqual({
+      byId: {},
+      order: [],
+      stale: true,
+    })
+  })
+
+  it('stores listing rows with their CURRENT anchor and clears stale', () => {
+    const base = researchDeskReducer(createEmptyProjectState(), {
+      summary,
+      type: 'upsertAgentRunSummary',
+    })
+    const filled = researchDeskReducer(base, {
+      artifacts: [metaWire],
+      sessionId: 's-idx',
+      type: 'setAgentSessionArtifacts',
+    })
+    const index = filled.agentSessionArtifacts['s-idx']
+    expect(index.stale).toBe(false)
+    expect(index.order).toEqual(['a-memo'])
+    expect(index.byId['a-memo'].runId).toBe('r-anchor')
+  })
+
+  it('re-flags the index when a run event invalidates its artifacts', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary,
+      type: 'upsertAgentRunSummary',
+    })
+    state = researchDeskReducer(state, {
+      artifacts: [metaWire],
+      sessionId: 's-idx',
+      type: 'setAgentSessionArtifacts',
+    })
+    // Clear the run's own stale artifact surface first (transition pin).
+    state = researchDeskReducer(state, {
+      artifacts: [],
+      runId: 'r-idx',
+      type: 'setAgentRunArtifacts',
+    })
+    expect(state.agentRuns['r-idx'].artifactsStale).toBe(false)
+    const completed = researchDeskReducer(state, {
+      event: {
+        type: 'inqtrix.run.completed',
+        run_id: 'r-idx',
+        sequence: 10,
+        created_at: 1_700_000_100,
+        data: {},
+      },
+      type: 'appendApiRunEvent',
+    })
+    const index = completed.agentSessionArtifacts['s-idx']
+    expect(index.stale).toBe(true)
+    // Rows survive the re-flag — the menu keeps rendering while refetching.
+    expect(index.order).toEqual(['a-memo'])
+  })
+
+  it('records a fetch failure visibly and clears stale (no tight loop)', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      summary,
+      type: 'upsertAgentRunSummary',
+    })
+    state = researchDeskReducer(state, {
+      artifacts: [metaWire],
+      sessionId: 's-idx',
+      type: 'setAgentSessionArtifacts',
+    })
+    const failed = researchDeskReducer(state, {
+      message: 'Listing fehlgeschlagen',
+      sessionId: 's-idx',
+      type: 'markAgentSessionArtifactsError',
+    })
+    const index = failed.agentSessionArtifacts['s-idx']
+    expect(index.stale).toBe(false)
+    expect(index.error).toBe('Listing fehlgeschlagen')
+    expect(index.order).toEqual(['a-memo'])
+  })
+})
+
+/**
+ * G1 / F-P4-TITLE2: run summaries hydrate NEWEST-FIRST and may beat the
+ * session listing. The fabricated session record must (a) never carry
+ * merge authority (the real server row wins), (b) converge its display
+ * title on the OLDEST run seen, and (c) never be pushed by the autosave
+ * (agentSessionSync fence, pinned there). Live evidence for the old
+ * behavior: a reload retitled the P4 session to the LATEST question and
+ * synced that back durably (DB updated_at == run2.created_at).
+ */
+describe('derived session titles never gain authority (G1)', () => {
+  const g1Summary = (
+    runId: string,
+    createdAt: number,
+    question: string,
+  ): ResearchRunSummary => ({
+    access: { mode: 'owner' },
+    run_id: runId,
+    status: 'completed',
+    queue_position: null,
+    question,
+    stack: 'default',
+    mode: 'agent_kernel',
+    kind: 'agent',
+    session_id: 's-g1',
+    agent_overrides: {},
+    created_at: createdAt,
+    started_at: createdAt,
+    finished_at: createdAt + 10,
+    elapsed_seconds: 10,
+    snapshot: {},
+    error: null,
+    events_url: `/v1/runs/${runId}/events`,
+    result_url: `/v1/runs/${runId}/result`,
+  })
+
+  it('hydration order cannot retitle: server row beats the fabrication', () => {
+    let state = createEmptyProjectState()
+    // Newest run arrives FIRST (hydration replays newest-first).
+    state = researchDeskReducer(state, {
+      hydration: true,
+      summary: g1Summary('r-new', 2_000, 'Aktualisiere das Canvas-Dokument.'),
+      type: 'upsertApiRunSummary',
+    })
+    const fabricated = state.agentSessions['s-g1']
+    expect(fabricated.title).toBe('Aktualisiere das Canvas-Dokument.')
+    expect(fabricated.updatedAt).toBe(DERIVED_AGENT_SESSION_UPDATED_AT)
+
+    // The OLDER run converges the derived title on the first question.
+    state = researchDeskReducer(state, {
+      hydration: true,
+      summary: g1Summary('r-old', 1_000, 'Erstelle im Canvas ein Dokument.'),
+      type: 'upsertApiRunSummary',
+    })
+    expect(state.agentSessions['s-g1'].title).toBe(
+      'Erstelle im Canvas ein Dokument.',
+    )
+    expect(state.agentSessions['s-g1'].updatedAt).toBe(
+      DERIVED_AGENT_SESSION_UPDATED_AT,
+    )
+
+    // The REAL server row (stored title, real timestamp) always wins the
+    // merge against the epoch-stamped fabrication.
+    state = researchDeskReducer(state, {
+      groups: [],
+      sessions: [
+        {
+          id: 's-g1',
+          title: 'Erstelle im Canvas (gespeichert)',
+          group_id: null,
+          created_at: 1_000,
+          updated_at: 1_000,
+        },
+      ],
+      type: 'upsertServerAgentSessions',
+    })
+    const settled = state.agentSessions['s-g1']
+    expect(settled.title).toBe('Erstelle im Canvas (gespeichert)')
+    expect(settled.updatedAt).toBe(new Date(1_000_000).toISOString())
+    // Both runs stayed attached through the merge.
+    expect(settled.runIds).toEqual(['r-new', 'r-old'])
+  })
+
+  it('a user rename lifts the epoch marker (record becomes pushable)', () => {
+    let state = researchDeskReducer(createEmptyProjectState(), {
+      hydration: true,
+      summary: g1Summary('r-new', 2_000, 'Aktualisiere das Canvas-Dokument.'),
+      type: 'upsertApiRunSummary',
+    })
+    state = researchDeskReducer(state, {
+      sessionId: 's-g1',
+      title: 'Mein Batterie-Dossier',
+      type: 'renameAgentSession',
+    })
+    const renamed = state.agentSessions['s-g1']
+    expect(renamed.title).toBe('Mein Batterie-Dossier')
+    expect(renamed.updatedAt).not.toBe(DERIVED_AGENT_SESSION_UPDATED_AT)
+    // And a LATER older-run summary must not undo the rename.
+    state = researchDeskReducer(state, {
+      hydration: true,
+      summary: g1Summary('r-old', 1_000, 'Erstelle im Canvas ein Dokument.'),
+      type: 'upsertApiRunSummary',
+    })
+    expect(state.agentSessions['s-g1'].title).toBe('Mein Batterie-Dossier')
   })
 })

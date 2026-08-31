@@ -15,7 +15,6 @@ import asyncio
 import logging
 from typing import Any
 
-import pytest
 
 from inqtrix.core.context import RunContext, RuntimeContext
 from inqtrix.core.results import RunRequest

@@ -177,8 +177,25 @@ class CallMetrics:
     run_queue_wait: Any
     worker_jobs: Any
     indexing_documents: Any
+    stream_viewers: Any
 
     # ---- recording helpers (fail-safe, never fail-silent) ---------- #
+
+    def observe_stream_viewers(
+        self, *, job_kind: str, concurrent: int
+    ) -> None:
+        """Record the concurrency ONE entity reached when a viewer joined.
+
+        The distribution answers the deferred shared-poller question
+        ("do multiple viewers per run occur at all?") without run ids as
+        labels — cardinality contract of this module.
+        """
+        try:
+            self.stream_viewers.labels(job_kind=job_kind).observe(
+                max(1, int(concurrent))
+            )
+        except Exception:  # noqa: BLE001 — metrics never break the call
+            _warn_once("stream_viewers")
 
     def observe_llm(
         self,
@@ -360,6 +377,17 @@ def build_call_metrics(registry: Any) -> CallMetrics:
         labelnames=("outcome",),
         registry=registry,
     )
+    stream_viewers = Histogram(
+        "inqtrix_stream_concurrent_viewers",
+        "Concurrent live event subscribers on one entity, observed each "
+        "time a STREAM viewer joins (one-shot JSON polling reads do not "
+        "count). Distribution only — deliberately no entity ids as "
+        "labels.",
+        labelnames=("job_kind",),
+        buckets=(1, 2, 3, 4, 5, 8, 13),
+        registry=registry,
+    )
+
     return CallMetrics(
         llm_requests=llm_requests,
         llm_duration=llm_duration,
@@ -371,6 +399,7 @@ def build_call_metrics(registry: Any) -> CallMetrics:
         run_queue_wait=run_queue_wait,
         worker_jobs=worker_jobs,
         indexing_documents=indexing_documents,
+        stream_viewers=stream_viewers,
     )
 
 

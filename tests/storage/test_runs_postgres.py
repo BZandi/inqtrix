@@ -430,6 +430,99 @@ def test_worker_claim_store_dispatches_children_and_parent_wakes(
         dispatching.close()
 
 
+def test_child_park_projects_its_gate_to_the_parent_stream(store) -> None:
+    """A CHILD parking on a human decision must reach the parent stream.
+
+    ``inqtrix.run.waiting`` is on the projection whitelist and the memory
+    twin projects it through its emit chokepoint — the Postgres park write
+    appends events directly, so without an explicit projection a parked
+    child stays invisible on every parent surface (F-P0-CHILDGATE: the
+    parent hangs on a gate nobody can see)."""
+    del store
+    queue = _RecordingDispatchQueue()
+    dispatching = PostgresRunStore(
+        engine=build_engine(TEST_DATABASE_URL),
+        app_role=APP_ROLE,
+        queue=None,
+        dispatch_queue=queue,
+        recover_orphans=False,
+        max_concurrent=2,
+        max_queue_size=10,
+        completed_ttl_seconds=300,
+        worker_id="pytest-child-park",
+    )
+    try:
+        seed_agent_session(
+            dispatching,
+            "session-child-park",
+            workspace_id="ws-agent",
+        )
+        parent = dispatching.submit(
+            question="parent",
+            stack_name="default",
+            work=lambda _handle: None,
+            workspace_id="ws-agent",
+            kind="agent",
+            session_id="session-child-park",
+            request_payload={
+                "question": "parent",
+                "body": {"mode": "agent_kernel"},
+            },
+        )
+        parent_claim = dispatching.claim_for_execution(
+            parent["run_id"], "default", allow_takeover=False
+        )
+        assert parent_claim is not None
+        child = dispatching.submit(
+            question="child",
+            stack_name="default",
+            work=lambda _handle: None,
+            workspace_id="ws-agent",
+            kind="agent_child",
+            parent_run_id=parent["run_id"],
+            root_run_id=parent["run_id"],
+            session_id="session-child-park",
+            request_payload={
+                "question": "child",
+                "body": {
+                    "mode": "workspace_agent",
+                    "parent_task_id": "call_park",
+                    "parent_task_attempt": 1,
+                },
+            },
+        )
+        dispatching.mark_waiting(
+            parent["run_id"],
+            status="waiting_for_children",
+            fence_attempt=parent_claim.attempt,
+        )
+        child_claim = dispatching.claim_for_execution(
+            child["run_id"], "default", allow_takeover=False
+        )
+        assert child_claim is not None
+        dispatching.mark_waiting(
+            child["run_id"],
+            status="waiting_for_approval",
+            fence_attempt=child_claim.attempt,
+        )
+
+        subscription = dispatching.subscribe(parent["run_id"])
+        try:
+            parked = [
+                event
+                for event in subscription.replay
+                if event["type"] == "inqtrix.agent.child.progress"
+                and event["data"].get("run_status") == "waiting_for_approval"
+            ]
+        finally:
+            subscription.close()
+        assert parked, "child park was not projected onto the parent stream"
+        assert parked[-1]["data"]["child_run_id"] == child["run_id"]
+        assert parked[-1]["data"]["task_id"] == "call_park"
+    finally:
+        dispatching.close()
+
+
 @pytest.mark.asyncio
 async def test_migration_scrubs_active_legacy_child_token_budget(
     store,

@@ -418,6 +418,26 @@ def test_deep_canvas_finding_updates_the_target_with_batch_cas():
         review_prompt = llm.structured_calls[0]["prompt"]
         assert "Unsicherheit fehlt" in review_prompt
         assert "Vollstaendiger effektiver Auftrag" in review_prompt
+        # P9: the batch revision was the ONE silent artifact write path —
+        # it must now emit the shared updated payload (file chip + live
+        # canvas refresh depend on it).
+        events = client.get(
+            f"/v1/runs/{run['run_id']}/events?format=json"
+        ).json()["data"]
+        batch_updates = [
+            event["data"]
+            for event in events
+            if event["type"] == "inqtrix.agent.artifact.updated"
+            and event["data"].get("artifact_id") == canvas["artifact_id"]
+            and event["data"].get("revision") == 2
+        ]
+        assert batch_updates, "deep revision emitted no artifact.updated"
+        payload = batch_updates[-1]
+        assert payload["kind"] == "deliverable"
+        assert payload["title"] == detail["title"]
+        assert payload["from_revision"] == 1
+        assert payload["lines_added"] >= 1
+        assert "lines_removed" in payload
 
 
 def test_deep_store_failure_has_terminal_narration_and_preserves_outputs():

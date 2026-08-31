@@ -273,6 +273,10 @@ export type ExplorerHistoryAction = {
  * beyond them would lose its offset and fall to the row's leading edge. */
 const EXPLORER_HISTORY_ACTION_OFFSETS = ['right-1', 'right-7', 'right-13']
 
+/** Backdrop strip width by action count: the icon span plus a fade-out
+ * runway so the truncated title never collides with revealed icons. */
+const EXPLORER_HISTORY_ACTION_BACKDROP_WIDTHS = ['w-12', 'w-[4.75rem]', 'w-24']
+
 function ExplorerHistoryActionButton({
   action,
   offset,
@@ -403,6 +407,24 @@ export function ExplorerHistoryRow({
         >
           {cells}
         </button>
+      )}
+      {/* One area backdrop behind the revealed actions (not per icon):
+          the buttons overlay the truncated title, so without it the
+          icons and text collide. The gradient fades left and matches
+          the row's own hover/active background for a seamless strip. */}
+      {actions.length > 0 && (
+        <span
+          aria-hidden="true"
+          className={cn(
+            'pointer-events-none absolute inset-y-0 right-0 rounded-r-md opacity-0 transition-opacity',
+            'bg-gradient-to-l via-65% to-transparent',
+            active
+              ? 'from-brand-subtle via-brand-subtle'
+              : 'from-surface via-surface',
+            'group-hover/explorer-item:opacity-100 group-focus-within/explorer-item:opacity-100',
+            EXPLORER_HISTORY_ACTION_BACKDROP_WIDTHS[actions.length - 1],
+          )}
+        />
       )}
       {actions.map((action, index) => (
         <ExplorerHistoryActionButton

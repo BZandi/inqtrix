@@ -1,5 +1,11 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import {
+  clearPlanDraftsForRun,
+  planDraftStorageKey,
+  readPlanDraft,
+  writePlanDraft,
+} from './planDraftStorage'
 import type {
   AgentPlanRecord,
   AgentPlanTaskRecord,
@@ -34,6 +40,33 @@ export type AgentPlanDraft = {
    * part of the wire plan, so guidance alone never turns an approve
    * into an edit. */
   reportGuidance: string
+  /** Prompt-library rules attached as the reusable half of the same
+   * requirement. Ids only: the server resolves label, revision and text
+   * from the deciding caller's own catalog, so a client cannot put
+   * unchecked text into the writing prompts. Like the free text, never
+   * part of the wire plan. */
+  reportRuleIds: string[]
+  /** True while the user is writing the note for a rejection. Lives in
+   * the SHARED draft, not in one surface's local state: the gate is
+   * rendered twice (canvas and composer tray) and both must show the
+   * same decision in progress — otherwise the tray still offers a plain
+   * approve and silently discards the note being typed next to it.
+   * Never part of the wire plan. */
+  rejectPending: boolean
+  rejectNote: string
+  /** Whether the user touched the requirement AT THIS GATE.
+   *
+   * The gate draft always starts empty, so an approve that sent the
+   * field unconditionally sent `report_guidance: ''` — which the server
+   * reads, correctly, as "clear it". A requirement set in the composer
+   * before the run was therefore deleted by a plain click on Freigeben,
+   * silently, without ever having been shown at the gate.
+   *
+   * Presence, not truthiness, needs this flag to be honest: untouched
+   * means the key is OMITTED and whatever is in force stays; touched
+   * means the key travels — including the empty string, which is how a
+   * user deliberately clears a requirement here. */
+  reportRequirementTouched: boolean
 }
 
 export function draftFromPlan(
@@ -47,6 +80,10 @@ function rawDraftFromPlan(plan: AgentPlanRecord): AgentPlanDraft {
   return {
     version: plan.version,
     summaryMarkdown: plan.summaryMarkdown,
+    reportRuleIds: [],
+    rejectPending: false,
+    rejectNote: '',
+    reportRequirementTouched: false,
     assumptions: [...plan.assumptions],
     successCriteria: [...plan.successCriteria],
     reportGuidance: '',
@@ -109,6 +146,54 @@ function withEffectiveResearchProfile(
   return changed ? { ...draft, tasks } : draft
 }
 
+/**
+ * The decision body for one plan gate.
+ *
+ * Pure so the two rules it carries can be pinned without a DOM:
+ *
+ * - PRESENCE, not truthiness, for the requirement: an approve sends the
+ *   field even when it is empty, because clearing a requirement IS a
+ *   decision. Sending it only when non-empty made a once-set
+ *   requirement unremovable — the emptied field never left the client.
+ * - The rejection note travels. The gate's own hint asks the user to
+ *   reject with a note and the server has always accepted one, but no
+ *   caller ever passed it, so the note the agent would have read was
+ *   dropped between the button and the request.
+ */
+export function approvalDecisionRequest({
+  decision,
+  draft,
+  edited,
+  note,
+}: {
+  decision: 'approve' | 'reject'
+  draft: AgentPlanDraft | null
+  edited: boolean
+  note?: string
+}): AgentApprovalDecisionRequest {
+  // Only a requirement the user actually touched here travels. An
+  // untouched gate says NOTHING about the result form, so the server
+  // keeps whatever the run was submitted with.
+  const guidancePayload =
+    decision === 'approve' && draft?.reportRequirementTouched
+      ? {
+        report_guidance: (draft.reportGuidance ?? '').trim(),
+        report_rule_ids: [...(draft.reportRuleIds ?? [])],
+      }
+      : {}
+  const notePayload = note?.trim() ? { note: note.trim() } : {}
+  if (edited && draft) {
+    return {
+      decision: 'edit',
+      plan: draftToWirePlan(draft),
+      ...notePayload,
+      ...guidancePayload,
+    }
+  }
+  return { decision, ...notePayload, ...guidancePayload }
+}
+
+
 export function planDraftDiffers(
   draft: AgentPlanDraft,
   plan: AgentPlanRecord,
@@ -155,6 +240,24 @@ export function usePlanApproval({
   )
 
   const plan = run.plan ?? null
+  // A reload empties the reducer slot; the stored draft refills it once
+  // per plan version, so an unsent decision survives the page going
+  // away. Restoring is a WRITE-BACK into the shared slot, not a second
+  // source of truth — both gate surfaces keep reading the one draft, and
+  // the ref keeps the two of them from restoring in a loop.
+  //
+  // Only while the gate is actually OPEN: a draft is an unsent decision,
+  // and a decided plan is read from the receipt, never from a draft.
+  const restoredForRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!plan || draft || !pendingApproval) return
+    const key = planDraftStorageKey(run.runId, plan.version)
+    if (restoredForRef.current === key) return
+    restoredForRef.current = key
+    const stored = readPlanDraft(run.runId, plan.version)
+    if (stored) onDraftChange(stored)
+  }, [draft, onDraftChange, pendingApproval, plan, run.runId])
+
   const effectiveDraft = useMemo(() => {
     if (!plan) return null
     const base = draft && draft.version === plan.version
@@ -170,9 +273,11 @@ export function usePlanApproval({
         draft && draft.version === plan.version
           ? draft
           : draftFromPlan(plan, run.depth)
-      onDraftChange(update(withEffectiveResearchProfile(base, run.depth)))
+      const next = update(withEffectiveResearchProfile(base, run.depth))
+      writePlanDraft(run.runId, next)
+      onDraftChange(next)
     },
-    [draft, onDraftChange, plan, run.depth],
+    [draft, onDraftChange, plan, run.depth, run.runId],
   )
 
   const decide = useCallback(
@@ -188,24 +293,14 @@ export function usePlanApproval({
           decision === 'approve'
           && effectiveDraft !== null
           && planDraftDiffers(effectiveDraft, plan)
-        const guidance = (effectiveDraft?.reportGuidance ?? '').trim()
-        const request: AgentApprovalDecisionRequest = edited
-          ? {
-            decision: 'edit',
-            note,
-            plan: draftToWirePlan(effectiveDraft),
-            ...(decision === 'approve' && guidance
-              ? { report_guidance: guidance }
-              : {}),
-          }
-          : {
-            decision,
-            note,
-            ...(decision === 'approve' && guidance
-              ? { report_guidance: guidance }
-              : {}),
-          }
+        const request = approvalDecisionRequest({
+          decision,
+          draft: effectiveDraft,
+          edited,
+          note,
+        })
         await decideApproval(run.runId, pendingApproval.approvalId, request)
+        clearPlanDraftsForRun(run.runId)
         onDraftChange(null)
       } catch (caught) {
         decidedRef.current.delete(key)

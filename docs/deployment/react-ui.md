@@ -42,6 +42,23 @@ and the Markdown report viewer directly in the app shell; reserve deferred
 loading for future heavy, non-primary tools rather than the views exposed in the
 left rail.
 
+Desk shells have no workspace-wide entry fade. Structural regions use
+`StructuralLoadBoundary` with explicit `pending`, `ready`, `refreshing`,
+`empty`, and `error` phases. Cached/prefetched data and refreshes over usable
+content render directly. A cold target retains the previous complete surface
+as inert (or a quiet body when no previous target exists); only a wait that
+outlives 800 ms shows the target silhouette. A painted silhouette stays for at
+least 300 ms and exits with the shared 150 ms reveal after registered geometry
+work and scroll preparation settle. Reduced-motion mode keeps the readiness and
+minimum-display ordering but removes shimmer and the exit animation.
+
+Hover and keyboard focus reuse each feature's selection loader to prefetch
+threads, knowledge sessions, editor documents, and server collections. Mermaid
+diagrams and directly permitted Markdown images block only while a target is
+staged; syntax highlighting remains progressive because it preserves geometry.
+Known empty states are immediate, and long-running Agent/Research work uses
+local progressive activity instead of a region-wide fallback.
+
 ## Shared Markdown rendering
 
 Chat, Knowledge Desk, reports, file previews, Agent Canvas, and direct Agent Desk
@@ -748,7 +765,7 @@ INQTRIX_BACKEND_URL=http://inqtrix-backend.svc.cluster.local:5100 \
 | `INQTRIX_BACKEND_URL` | `http://localhost:5100` | Origin the gateway proxies `/v1/*`, `/api/*`, `/health`, and `/collaboration` to. |
 | `INQTRIX_PUBLIC_BASE_URL` | unset | Explicit browser origin when a trusted reverse proxy terminates TLS before the gateway; pins the forwarded scheme AND host. |
 | `INQTRIX_EXTERNAL_SCHEME` | unset | Optional scheme-only override: pins `X-Forwarded-Proto` while the forwarded host follows the request. If `INQTRIX_PUBLIC_BASE_URL` is also set, both schemes must match or startup fails. |
-| `INQTRIX_MAX_UPSTREAM_CONNECTIONS` | `200` | Per-worker ceiling for pooled backend connections; each browser tab holds one long-lived SSE stream. |
+| `INQTRIX_MAX_UPSTREAM_CONNECTIONS` | `512` | Per-worker ceiling for pooled backend connections; each browser tab holds one long-lived SSE stream. Sized against the API's own admission caps: chat and native runs each admit up to 100, and every open event stream holds a connection for the run's whole duration on top of that. Exhaustion is a `503` with a warning naming this variable, never a silent wait. Connections open on demand, so the ceiling costs nothing until the load arrives.  Helm: set via `web.maxUpstreamConnections`; the web pod has no `envFrom`, so `config:` entries never reach it. |
 | `INQTRIX_PROXY_MAX_BODY_BYTES` | derived | Explicit request-body cap in bytes. Unset derives `INQTRIX_MAX_FILE_BYTES` + 10 MiB; mirror the backend variable in split-container setups or the gateway warns and uses the packaged default. |
 | `INQTRIX_DIST_DIR` | `<repo>/apps/research-desk/dist` | Override when serving a `dist/` from a release artifact path. |
 | `INQTRIX_COLLABORATION_MAX_FRAME_BYTES` / `INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES` | `2097152` / `32` | Collaboration relay frame-size and queue-depth limits; keep in sync with the collaboration service. |

@@ -25,6 +25,16 @@ export type ResearchJob = {
   error?: string
   events: Array<{
     active?: boolean
+    /** Carried from the record: present only for events that arrived on the
+     * live side of their stream. History (replay, first poll page, imported
+     * records) lacks it and renders in place — only live rows animate. */
+    arrivedLive?: boolean
+    /** Stable per-event identity (`<runId>-<sequence>`), carried straight
+     * through from the stored record. React keys the live-status rows on it:
+     * `time` has only MINUTE resolution, so keying on it let the sliding
+     * window reuse a row for a different event within one minute and remount
+     * every row at once across a minute boundary. */
+    id: string
     kind: 'progress' | 'system'
     phase?: JobPhase
     severity: 'error' | 'info' | 'success' | 'warning'
@@ -45,6 +55,8 @@ export type ResearchJob = {
   startedAt?: string
   status: JobStatus
   submittedAt: string
+  /** The event channel answered 404/401: calm lock, not an error. */
+  unavailable?: boolean
   title: LocalizedText
 }
 

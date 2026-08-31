@@ -189,6 +189,15 @@ class EditorSuggestionDraft:
     publication_command_id: str
     proposed_text: str = field(repr=False)
     anchor_version: int = 1
+    #: Wo die Aenderung greift. Der Kommentarweg ersetzt immer den markierten
+    #: Bereich und brauchte die Angabe nie; ein Assistentenlauf fuegt in drei
+    #: von vier Faellen ein. Fehlt sie, baut der Uebernahmepfad den Vorschlag
+    #: als Ersetzung neu auf und der Nutzer verliert still Text.
+    edit_position: str | None = None
+    #: Der Suchtext der Ankerstelle. Beim Kommentarweg traegt ihn der
+    #: Kommentar des Nutzers; ein Assistentenlauf hat keinen, also gehoert er
+    #: in den Entwurf -- sonst ist die Stelle nach einem Neuladen verloren.
+    anchor_text: str | None = None
     revision: int = 1
     change_summary: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -201,9 +210,11 @@ class EditorSuggestionDraft:
 def suggestion_draft_payload(draft: EditorSuggestionDraft) -> dict[str, Any]:
     """Return the canonical JSON-compatible private-draft representation."""
     return {
+        "anchor_text": draft.anchor_text,
         "anchor_version": draft.anchor_version,
         "change_summary": list(draft.change_summary),
         "created_at": draft.created_at,
+        "edit_position": draft.edit_position,
         "evidence": dict(draft.evidence) if draft.evidence is not None else None,
         "group_id": draft.group_id,
         "patch_id": draft.patch_id,
@@ -243,6 +254,19 @@ def suggestion_draft_from_payload(value: Any) -> EditorSuggestionDraft | None:
         publication_command_id=str(value["publication_command_id"]),
         proposed_text=str(value["proposed_text"]),
         anchor_version=int(value["anchor_version"]),
+        # Bestandsentwuerfe kennen die beiden Felder nicht. Sie fehlen dort
+        # legitim und bedeuten "Ersetzung ohne eigenen Suchtext" -- genau das
+        # Verhalten, das der Kommentarweg immer schon hatte.
+        edit_position=(
+            str(value["edit_position"])
+            if value.get("edit_position") is not None
+            else None
+        ),
+        anchor_text=(
+            str(value["anchor_text"])
+            if value.get("anchor_text") is not None
+            else None
+        ),
         revision=int(value["revision"]),
         change_summary=tuple(str(item) for item in value.get("change_summary", [])),
         warnings=tuple(str(item) for item in value.get("warnings", [])),

@@ -453,6 +453,21 @@ class AuthorizationService:
         self._restrict_to_workspace_members = restrict_to_workspace_members
         self._sharing_enabled = sharing_enabled
 
+    async def authorization_generation(
+        self, *, tenant_id: str, user_id: uuid.UUID
+    ) -> int | None:
+        """Commit-ordered per-user generation, or None when unsupported.
+
+        None means the membership backend has no generation (memory mode,
+        api-key principals): frame gates then fall back to the full
+        authorization chain on every frame — today's behavior, never a
+        silently weaker check.
+        """
+        reader = getattr(self._members, "authorization_generation", None)
+        if reader is None:
+            return None
+        return await reader(tenant_id=tenant_id, user_id=user_id)
+
     @property
     def audit_sink(self) -> AuditSink:
         """The append-only audit sink behind this service.

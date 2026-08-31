@@ -3,7 +3,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import {
+  advanceEditorIdentityPublication,
   editorDocumentShareDisabled,
+  editorDocumentStructuralLoadPhase,
   EditorRemoteDeletionRecoveryBar,
   editorRecoveryMarkdown,
 } from './EditorWorkspace'
@@ -83,5 +85,64 @@ describe('editor recovery markdown', () => {
       isDirty: false,
       sharingAvailable: true,
     })).toBe(false)
+  })
+})
+
+describe('editor structural loading', () => {
+  it('accepts readiness only for the active document identity', () => {
+    expect(editorDocumentStructuralLoadPhase('document-b', {
+      documentId: 'document-a',
+      error: null,
+      phase: 'ready',
+    })).toBe('pending')
+    expect(editorDocumentStructuralLoadPhase('document-b', {
+      documentId: 'document-b',
+      error: null,
+      phase: 'ready',
+    })).toBe('ready')
+  })
+
+  it('renders the no-document state immediately', () => {
+    expect(editorDocumentStructuralLoadPhase(null, {
+      documentId: 'document-a',
+      error: null,
+      phase: 'pending',
+    })).toBe('empty')
+  })
+
+  it('retains and deactivates the published header until the requested body is visible', () => {
+    const current = {
+      displayedIdentity: 'document-a:local',
+      visible: true,
+    }
+
+    const hidden = advanceEditorIdentityPublication(current, 'document-b:local', {
+      identity: 'document-b:local',
+      visible: false,
+    })
+    expect(hidden).toEqual({
+      displayedIdentity: 'document-a:local',
+      visible: false,
+    })
+
+    expect(advanceEditorIdentityPublication(hidden, 'document-b:local', {
+      identity: 'document-b:local',
+      visible: true,
+    })).toEqual({
+      displayedIdentity: 'document-b:local',
+      visible: true,
+    })
+  })
+
+  it('ignores a late visibility edge from an aborted document switch', () => {
+    const current = {
+      displayedIdentity: 'document-a:local',
+      visible: false,
+    }
+
+    expect(advanceEditorIdentityPublication(current, 'document-c:local', {
+      identity: 'document-b:local',
+      visible: true,
+    })).toBe(current)
   })
 })

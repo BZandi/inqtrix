@@ -69,7 +69,10 @@ export function rawCodeLanguageFromClassName(className: unknown): string | null 
   return null
 }
 
-function normalizeMarkdownCodeLanguage(value: unknown): string | null {
+/** Alias-fold and whitelist one language token (`js`→`javascript`;
+ * unknown → null). Shared by the chat renderer and the editor's code
+ * blocks (P5) — the ONE vocabulary the highlighter understands. */
+export function normalizeMarkdownCodeLanguage(value: unknown): string | null {
   if (typeof value !== 'string') return null
 
   const token = value

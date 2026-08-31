@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, FileText, Plus, RotateCcw, Users, XCircle } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Skeleton } from '@/components/ui/skeleton'
 import { listKnowledgeDocuments, type ServerDeletionOperation } from '@/api/inqtrixClient'
 import type {
   FileAssetRecord,
@@ -13,6 +14,7 @@ import type {
   KnowledgeDocumentInfo,
 } from '@/features/researchRuns/types'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { StructuralLoadBoundary, type StructuralLoadPhase } from '@/motion/StructuralLoadBoundary'
 import { AddDocsPanel } from './AddDocsPanel'
 import { ConfirmDelete } from './controls'
 import {
@@ -41,6 +43,9 @@ export type ServerCollectionJobState = {
 
 type ServerCollectionPanelProps = {
   assets: FileAssetRecord[]
+  /** Project/principal/backend lifecycle fence. Cached documents from another
+   * authenticated identity must never become a provisional warm snapshot. */
+  cacheScopeKey: string
   collection: KnowledgeCollectionInfo
   deletionOperations: Readonly<Record<string, ServerDeletionOperation>>
   ensureAssetBodiesLoaded?: (assetIds: readonly string[]) => Promise<Map<string, string>>
@@ -64,11 +69,92 @@ type ServerCollectionPanelProps = {
   sections: FileLibrarySectionRecord[]
 }
 
+type ServerCollectionDocumentCacheEntry = {
+  documents?: KnowledgeDocumentInfo[]
+  inFlight?: Promise<KnowledgeDocumentInfo[]>
+}
+
+// The weak connection object bounds lifetime; the nested lifecycle key fences
+// project, authenticated principal and backend. Cookie-account switches can
+// reuse transport options, so object identity alone is not an authorization
+// boundary.
+const serverCollectionDocumentCaches = new WeakMap<
+  KnowledgeSyncOptions,
+  Map<string, Map<string, ServerCollectionDocumentCacheEntry>>
+>()
+
+function serverCollectionCache(
+  options: KnowledgeSyncOptions,
+  scopeKey: string,
+): Map<string, ServerCollectionDocumentCacheEntry> {
+  const scopes = serverCollectionDocumentCaches.get(options)
+    ?? new Map<string, Map<string, ServerCollectionDocumentCacheEntry>>()
+  if (!serverCollectionDocumentCaches.has(options)) {
+    serverCollectionDocumentCaches.set(options, scopes)
+  }
+  const current = scopes.get(scopeKey)
+  if (current) return current
+  const created = new Map<string, ServerCollectionDocumentCacheEntry>()
+  scopes.set(scopeKey, created)
+  return created
+}
+
+function cachedServerCollectionDocuments(
+  collectionId: string,
+  options: KnowledgeSyncOptions,
+  scopeKey: string,
+): KnowledgeDocumentInfo[] | undefined {
+  return serverCollectionCache(options, scopeKey).get(collectionId)?.documents
+}
+
+async function fetchServerCollectionDocuments(
+  collectionId: string,
+  options: KnowledgeSyncOptions,
+  scopeKey: string,
+): Promise<KnowledgeDocumentInfo[]> {
+  const cache = serverCollectionCache(options, scopeKey)
+  const entry = cache.get(collectionId) ?? {}
+  if (entry.inFlight) return entry.inFlight
+
+  const request = (async () => {
+    const incoming: KnowledgeDocumentInfo[] = []
+    let cursor: string | undefined
+    do {
+      const page = await listKnowledgeDocuments(collectionId, {
+        ...options,
+        cursor,
+        limit: 100,
+      })
+      incoming.push(...page.data)
+      cursor = page.next_cursor ?? undefined
+    } while (cursor)
+    entry.documents = incoming
+    return incoming
+  })()
+  entry.inFlight = request
+  cache.set(collectionId, entry)
+  const release = () => {
+    if (entry.inFlight === request) delete entry.inFlight
+  }
+  void request.then(release, release)
+  return request
+}
+
+/** Pointer/focus intent path shared with the selected collection's loader. */
+export async function prefetchServerCollectionDocuments(
+  collectionId: string,
+  options: KnowledgeSyncOptions,
+  scopeKey: string,
+): Promise<void> {
+  await fetchServerCollectionDocuments(collectionId, options, scopeKey)
+}
+
 /** Canonical server collection view. Accepted shares stay server objects: the
  * recipient never gets a synthetic local VectorIndex that could drift from
  * access, documents, or maintenance state. */
 export function ServerCollectionPanel({
   assets,
+  cacheScopeKey,
   collection,
   deletionOperations,
   ensureAssetBodiesLoaded,
@@ -92,9 +178,18 @@ export function ServerCollectionPanel({
   sections,
 }: ServerCollectionPanelProps) {
   const { t } = useLocale()
-  const [documents, setDocuments] = useState<KnowledgeDocumentInfo[]>([])
+  const initialDocuments = cachedServerCollectionDocuments(
+    collection.id,
+    knowledgeSync,
+    cacheScopeKey,
+  )
+  const [documents, setDocuments] = useState<KnowledgeDocumentInfo[]>(initialDocuments ?? [])
+  const [documentsIdentity, setDocumentsIdentity] = useState<string | null>(
+    initialDocuments ? collection.id : null,
+  )
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [errorIdentity, setErrorIdentity] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [mutating, setMutating] = useState(false)
   const generationRef = useRef(0)
@@ -129,28 +224,27 @@ export function ServerCollectionPanel({
     if (collectionDeleting) return
     const generation = ++generationRef.current
     setLoading(true)
+    setError(null)
+    setErrorIdentity(null)
     try {
-      const incoming: KnowledgeDocumentInfo[] = []
-      let cursor: string | undefined
-      do {
-        const page = await listKnowledgeDocuments(collection.id, {
-          ...knowledgeSync,
-          cursor,
-          limit: 100,
-        })
-        incoming.push(...page.data)
-        cursor = page.next_cursor ?? undefined
-      } while (cursor)
+      const incoming = await fetchServerCollectionDocuments(
+        collection.id,
+        knowledgeSync,
+        cacheScopeKey,
+      )
       if (generation !== generationRef.current) return
       setDocuments(incoming)
+      setDocumentsIdentity(collection.id)
       setError(null)
+      setErrorIdentity(null)
     } catch (cause) {
       if (generation !== generationRef.current) return
       setError(cause instanceof Error ? cause.message : String(cause))
+      setErrorIdentity(collection.id)
     } finally {
       if (generation === generationRef.current) setLoading(false)
     }
-  }, [collection.id, collectionDeleting, knowledgeSync])
+  }, [cacheScopeKey, collection.id, collectionDeleting, knowledgeSync])
 
   useEffect(() => {
     void loadDocuments()
@@ -158,6 +252,14 @@ export function ServerCollectionPanel({
       generationRef.current += 1
     }
   }, [loadDocuments, refreshToken])
+
+  useEffect(() => {
+    if (documentsIdentity !== collection.id) return
+    const cache = serverCollectionCache(knowledgeSync, cacheScopeKey)
+    const entry = cache.get(collection.id) ?? {}
+    entry.documents = documents
+    cache.set(collection.id, entry)
+  }, [cacheScopeKey, collection.id, documents, documentsIdentity, knowledgeSync])
 
   useEffect(() => {
     if (
@@ -185,23 +287,37 @@ export function ServerCollectionPanel({
     }
   }, [collectionDeletion, documentDeletions, onCollectionDeleted, onCollectionMutated])
 
+  const cachedCurrentDocuments = cachedServerCollectionDocuments(
+    collection.id,
+    knowledgeSync,
+    cacheScopeKey,
+  )
+  const hasCurrentSnapshot = documentsIdentity === collection.id
+    || cachedCurrentDocuments !== undefined
+  const currentDocuments = documentsIdentity === collection.id
+    ? documents
+    : cachedCurrentDocuments ?? []
+  const currentError = errorIdentity === null || errorIdentity === collection.id ? error : null
+  const structuralPhase: StructuralLoadPhase = hasCurrentSnapshot
+    ? loading ? 'refreshing' : currentDocuments.length === 0 ? 'empty' : 'ready'
+    : currentError ? 'error' : 'pending'
   const owner = collection.access.mode === 'owner'
   const editable = owner
     || (collection.access.mode === 'shared' && collection.access.permission === 'edit')
   const memberIds = useMemo(() => new Set(
-    documents
+    currentDocuments
       .map((document) => document.metadata.fileId)
       .filter((value): value is string => typeof value === 'string'),
-  ), [documents])
+  ), [currentDocuments])
   const activeJob = job?.status === 'error' ? null : job
   const paused = activeJob?.status === 'paused_dependency'
     || activeJob?.status === 'paused_validation'
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const visibleDocuments = useMemo(
     () => normalizedQuery.length === 0
-      ? documents
-      : documents.filter((document) => document.title.toLocaleLowerCase().includes(normalizedQuery)),
-    [documents, normalizedQuery],
+      ? currentDocuments
+      : currentDocuments.filter((document) => document.title.toLocaleLowerCase().includes(normalizedQuery)),
+    [currentDocuments, normalizedQuery],
   )
 
   const startReindex = async () => {
@@ -326,6 +442,12 @@ export function ServerCollectionPanel({
   }
 
   return (
+    <StructuralLoadBoundary
+      className="min-h-0 flex-1"
+      fallback={<ServerCollectionSkeleton />}
+      identity={`library:server-collection:${collection.id}`}
+      phase={structuralPhase}
+    >
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 px-4 pt-0.5 md:px-6">
         <div className="rounded-lg border border-border bg-card p-3.5 shadow-[0_1px_2px_var(--shadow-hairline)]">
@@ -338,7 +460,7 @@ export function ServerCollectionPanel({
               <div className="mt-1 flex flex-wrap items-center gap-2 t-meta text-muted-foreground">
                 <span>{collection.embedding_model}</span>
                 <span>·</span>
-                <span>{t.vectorIndex.serverDocumentCount.replace('{count}', String(documents.length))}</span>
+                <span>{t.vectorIndex.serverDocumentCount.replace('{count}', String(currentDocuments.length))}</span>
                 {collection.access.mode === 'shared' ? (
                   <span className="rounded-md border border-brand/25 bg-brand-subtle px-1.5 py-0.5 t-meta-sm font-medium text-brand">
                     {collection.access.permission === 'edit'
@@ -476,7 +598,7 @@ export function ServerCollectionPanel({
             </div>
           ) : null}
           {job?.error ? <p className="mt-2 t-meta text-destructive">{job.error}</p> : null}
-          {error ? <p className="mt-2 t-meta text-destructive">{error}</p> : null}
+          {currentError ? <p className="mt-2 t-meta text-destructive">{currentError}</p> : null}
         </div>
       </div>
 
@@ -505,9 +627,7 @@ export function ServerCollectionPanel({
               />
             </div>
           ) : null}
-          {loading ? (
-            <p className="t-meta text-muted-foreground">{t.knowledge.viewerLoading}</p>
-          ) : visibleDocuments.length === 0 ? (
+          {!hasCurrentSnapshot && loading ? null : visibleDocuments.length === 0 ? (
             <div className="rounded-lg border border-dashed border-border px-6 py-10 text-center">
               <p className="t-label text-foreground">
                 {normalizedQuery.length > 0
@@ -577,6 +697,34 @@ export function ServerCollectionPanel({
           )}
         </div>
       </ScrollArea>
+    </div>
+    </StructuralLoadBoundary>
+  )
+}
+
+function ServerCollectionSkeleton() {
+  return (
+    <div aria-hidden className="flex h-full min-h-0 flex-col bg-background">
+      <div className="shrink-0 px-4 pt-0.5 md:px-6">
+        <div className="rounded-lg border border-border bg-card p-3.5">
+          <div className="flex items-center gap-3">
+            <Skeleton className="size-10 rounded-lg" />
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <Skeleton className="h-4 w-48" />
+              <Skeleton className="h-3.5 w-64 max-w-full" />
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-4 pb-4 pt-4 md:px-6 md:pb-6">
+        {Array.from({ length: 12 }, (_, index) => (
+          <div className="flex items-center gap-3 rounded-md border border-border px-3 py-2.5" key={index}>
+            <Skeleton className="size-4 shrink-0" />
+            <Skeleton className="h-4 w-[42%]" />
+            <Skeleton className="ml-auto h-3.5 w-20" />
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

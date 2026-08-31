@@ -33,6 +33,17 @@ import {
 } from './collaborationCrypto'
 
 export const COLLABORATION_UPDATE_BATCH_MS = 50
+// Beide Zweige, die einen 409 ohne Kompatibilitaetsgrund beenden, nennen
+// denselben Satz. Er behauptet nur, was fuer JEDEN der Konfliktgruende
+// beweisbar ist: die Sitzung ist beendet und wird mit diesem Stand nicht
+// fortgesetzt. Nicht "Ihr Stand ist veraltet" -- das waere fuer
+// instance_fenced, tenant_conflict, invalid_room oder einen Versatz zwischen
+// Sidecar und API falsch. Als Schluessel der Lokalisierungstabelle muss der
+// Text an beiden Stellen zeichengleich sein, deshalb steht er hier einmal.
+const COLLABORATION_SESSION_ENDED =
+  'The collaboration service ended this session and will not resume it with '
+  + 'the current state. Reload the page to continue.'
+
 export const COLLABORATION_RECONNECT_DELAYS_MS = [
   1_000,
   2_000,
@@ -710,8 +721,16 @@ export class CollaborationDocumentController {
     // in band reaches the provider with its code rewritten to 1000 and only
     // the reason preserved, so branching on the code first is blind to every
     // close the collaboration service itself initiates.
-    if (isCompatibilityReason(reason) || code === 4409) {
-      this.enterIncompatible('The collaboration protocol is not compatible with this client.')
+    // Code 4409 traegt zweierlei: die vier echten Kompatibilitaetsgruende und
+    // -- ueber errors.ts:104-122 -- JEDEN sonstigen 409 der internen API,
+    // etwa einen patch_metadata_conflict, wenn zwei Nutzer denselben
+    // Vorschlag entscheiden. Beendet wird die Sitzung in beiden Faellen; nur
+    // die Begruendung darf nicht erfunden sein.
+    const versionMismatch = isCompatibilityReason(reason)
+    if (versionMismatch || code === 4409) {
+      this.enterIncompatible(versionMismatch
+        ? 'The collaboration protocol is not compatible with this client.'
+        : COLLABORATION_SESSION_ENDED)
       return
     }
     if (reason.includes('origin_rejected')) {
@@ -938,8 +957,13 @@ export class CollaborationDocumentController {
     if (this.destroyed) return
     const status = requestStatus(error)
     const reason = requestReason(error)
-    if (status === 409 || isCompatibilityReason(reason)) {
-      this.enterIncompatible('The collaboration protocol or schema is not compatible.')
+    // Derselbe Schnitt wie in handleClose: ein 409 ohne Kompatibilitaetsgrund
+    // ist ein gewoehnlicher Konflikt und keine Aussage ueber die App-Version.
+    const versionMismatch = isCompatibilityReason(reason)
+    if (versionMismatch || status === 409) {
+      this.enterIncompatible(versionMismatch
+        ? 'The collaboration protocol or schema is not compatible.'
+        : COLLABORATION_SESSION_ENDED)
       return
     }
     if (status === 403 || status === 404 || reason === 'access_revoked') {

@@ -23,6 +23,7 @@ from inqtrix.project.agent_sessions_ports import (
     AgentSessionNotFound,
 )
 from inqtrix.runs.deletion_operations import DeletionOperationConflict
+from inqtrix.server.routers.agent_runs import artifact_meta_payload
 from inqtrix.services.request_parsing import (
     error_response,
     workspace_id_from_request,
@@ -137,6 +138,35 @@ def build_router(container: "AppContainer") -> APIRouter:
             )
         except AgentSessionGroupNotFound:
             return error_response(404, "Ordner nicht gefunden", "not_found")
+
+    control_service = container.agent_control_service
+
+    @router.get("/v1/agent-sessions/{session_id}/artifacts")
+    async def list_session_artifacts(
+        session_id: str,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        """Session-scoped artifact metadata, anchor-independent (P4).
+
+        A session artifact's ``run_id`` re-anchors to the newest updating
+        run, so run-scoped listings silently lose it from older runs —
+        this listing keys on the SESSION and therefore never does. Rows
+        are meta-only (bodies stay on the run detail route) and carry the
+        CURRENT ``run_id`` anchor for the client's follow-up reads.
+        Owner-private like every session route (indistinct 404).
+        """
+        if control_service is None:
+            return error_response(404, "Sitzung nicht gefunden", "not_found")
+        try:
+            await service.get_session(session_id, visible_to=visible_to)
+        except AgentSessionNotFound:
+            return error_response(404, "Sitzung nicht gefunden", "not_found")
+        artifacts = await control_service.list_session_artifacts(session_id)
+        return {
+            "object": "list",
+            "data": [artifact_meta_payload(row) for row in artifacts],
+        }
 
     @router.get("/v1/agent-sessions/{session_id}")
     async def get_session(

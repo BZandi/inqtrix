@@ -2002,6 +2002,76 @@ async def test_artifact_upsert_versioning_and_user_edit_matrix(
 
 
 @pytest.mark.asyncio
+async def test_rename_artifact_is_metadata_only(
+    service: AgentControlService, run_store: RunStore
+) -> None:
+    """P9 (K3): a rename changes title + updated_at and NOTHING else —
+    no revision bump, no revision row, so the content history never
+    records it and no change badge can appear for it."""
+    run_id = _parked_agent_run(run_store)
+    store = service.store
+    await store.upsert_artifact(
+        run_id=run_id,
+        kind="deliverable",
+        session_id="sess-1",
+        title="Alter Titel",
+        status="ready",
+        content_markdown="# Inhalt",
+        payload={},
+        refs=[],
+        updated_by="agent",
+        artifact_id="art_doc",
+    )
+    renamed = await service.rename_artifact(
+        run_id=run_id,
+        artifact_id="art_doc",
+        title="Neuer Titel",
+        principal=PRINCIPAL,
+    )
+    assert renamed.title == "Neuer Titel"
+    assert renamed.revision == 1
+    row, revisions = await store.get_artifact(run_id, "art_doc")
+    assert row.title == "Neuer Titel"
+    assert row.revision == 1
+    assert len(revisions) == 1
+    assert row.content_markdown == "# Inhalt"
+
+    with pytest.raises(ArtifactNotFound):
+        await service.rename_artifact(
+            run_id=run_id,
+            artifact_id="art_unbekannt",
+            title="X",
+            principal=PRINCIPAL,
+        )
+
+
+@pytest.mark.asyncio
+async def test_rename_is_locked_while_the_agent_writes(
+    service: AgentControlService, run_store: RunStore
+) -> None:
+    run_id = _parked_agent_run(run_store)
+    await service.store.upsert_artifact(
+        run_id=run_id,
+        kind="deliverable",
+        session_id="sess-1",
+        title="Titel",
+        status="writing",
+        content_markdown="# schreibt",
+        payload={},
+        refs=[],
+        updated_by="agent",
+        artifact_id="art_doc",
+    )
+    with pytest.raises(ArtifactLocked):
+        await service.rename_artifact(
+            run_id=run_id,
+            artifact_id="art_doc",
+            title="Neu",
+            principal=PRINCIPAL,
+        )
+
+
+@pytest.mark.asyncio
 async def test_artifact_edit_and_revoke_have_one_memory_linearization_order(
     service: AgentControlService,
     run_store: RunStore,
@@ -2516,3 +2586,160 @@ async def test_failed_run_settles_control_rows_too(
         run_id, "art_settle_failed"
     )
     assert released.status == "ready"
+
+
+# -- P6B: approval_scope (run-wide tool grants) ----------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_approval_scope_run_rides_decision_payload_and_replays(
+    service: AgentControlService, run_store: RunStore
+) -> None:
+    """approve+run stores {"approval_scope": "run"}; the SAME retry
+    replays 200, a retry with a DIFFERENT scope conflicts — the payload
+    IS replay identity, exactly like an edited plan."""
+    run_id = _parked_agent_run(run_store)
+    approval = await service.store.create_approval(_tool_approval(run_id))
+
+    decided, _summary, replayed = await service.decide_approval(
+        run_id=run_id,
+        approval_id=approval.approval_id,
+        decision="approve",
+        plan_body=None,
+        note="",
+        principal=PRINCIPAL,
+        approval_scope="run",
+    )
+    assert not replayed
+    assert decided.decision_payload == {"approval_scope": "run"}
+
+    again, _summary, replayed = await service.decide_approval(
+        run_id=run_id,
+        approval_id=approval.approval_id,
+        decision="approve",
+        plan_body=None,
+        note="",
+        principal=PRINCIPAL,
+        approval_scope="run",
+    )
+    assert replayed
+    assert again.decision_payload == {"approval_scope": "run"}
+
+    with pytest.raises(ApprovalAlreadyDecided):
+        await service.decide_approval(
+            run_id=run_id,
+            approval_id=approval.approval_id,
+            decision="approve",
+            plan_body=None,
+            note="",
+            principal=PRINCIPAL,
+        )
+
+
+@pytest.mark.asyncio
+async def test_approval_scope_once_stores_nothing(
+    service: AgentControlService, run_store: RunStore
+) -> None:
+    """"once" keeps the plain-approve replay identity: a later plain
+    approve retry replays 200."""
+    run_id = _parked_agent_run(run_store)
+    approval = await service.store.create_approval(_tool_approval(run_id))
+
+    decided, _summary, _replayed = await service.decide_approval(
+        run_id=run_id,
+        approval_id=approval.approval_id,
+        decision="approve",
+        plan_body=None,
+        note="",
+        principal=PRINCIPAL,
+        approval_scope="once",
+    )
+    assert decided.decision_payload == {}
+
+    _again, _summary, replayed = await service.decide_approval(
+        run_id=run_id,
+        approval_id=approval.approval_id,
+        decision="approve",
+        plan_body=None,
+        note="",
+        principal=PRINCIPAL,
+    )
+    assert replayed
+
+
+@pytest.mark.asyncio
+async def test_approval_scope_validation_matrix(
+    service: AgentControlService, run_store: RunStore
+) -> None:
+    run_id = _parked_agent_run(run_store)
+
+    # Unknown scope value.
+    tool_gate = await service.store.create_approval(_tool_approval(run_id))
+    with pytest.raises(AgentControlValidationError) as exc_info:
+        await service.decide_approval(
+            run_id=run_id,
+            approval_id=tool_gate.approval_id,
+            decision="approve",
+            plan_body=None,
+            note="",
+            principal=PRINCIPAL,
+            approval_scope="forever",
+        )
+    assert "Unbekannter approval_scope" in str(exc_info.value)
+
+    # Scope on a non-approve decision.
+    with pytest.raises(AgentControlValidationError) as exc_info:
+        await service.decide_approval(
+            run_id=run_id,
+            approval_id=tool_gate.approval_id,
+            decision="reject",
+            plan_body=None,
+            note="",
+            principal=PRINCIPAL,
+            approval_scope="run",
+        )
+    assert "nur bei decision=approve" in str(exc_info.value)
+
+    # Scope on a plan gate.
+    plan_gate = await service.store.create_approval(_approval(run_id))
+    with pytest.raises(AgentControlValidationError) as exc_info:
+        await service.decide_approval(
+            run_id=run_id,
+            approval_id=plan_gate.approval_id,
+            decision="approve",
+            plan_body=None,
+            note="",
+            principal=PRINCIPAL,
+            approval_scope="run",
+        )
+    assert "nur bei Tool-Freigaben" in str(exc_info.value)
+
+    # A run grant must never cover an always-gated tool.
+    patch_gate = await service.store.create_approval(
+        ApprovalRecord(
+            approval_id=f"apr_{uuid.uuid4().hex[:8]}",
+            run_id=run_id,
+            kind="tool",
+            payload={
+                "actions": [
+                    {
+                        "tool": "propose_editor_patch",
+                        "args": {"instruction": "x"},
+                        "summary": "Patch",
+                    }
+                ]
+            },
+        )
+    )
+    with pytest.raises(AgentControlValidationError) as exc_info:
+        await service.decide_approval(
+            run_id=run_id,
+            approval_id=patch_gate.approval_id,
+            decision="approve",
+            plan_body=None,
+            note="",
+            principal=PRINCIPAL,
+            approval_scope="run",
+        )
+    assert "propose_editor_patch" in str(exc_info.value)
+    assert "pro Aufruf" in str(exc_info.value)

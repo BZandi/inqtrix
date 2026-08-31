@@ -82,6 +82,7 @@ use (add a model card) or override traffic worth investigating.
 | `inqtrix_retrieval_duration_seconds` | histogram | `step` | Knowledge retrieval stages (`hybrid_search`, `rerank`). |
 | `inqtrix_run_duration_seconds` | histogram | `mode`, `outcome` | Worker execution **segments** per run mode — parked runs resume as fresh segments, so one deep run contributes several samples. Outcomes: `completed`, `failed`, `cancelled`, `parked`. Fenced-out attempts are not recorded (the winning attempt records the segment). Edge case: a park that the store resolves as an immediately-cancelled run still counts as `parked` — the segment did run up to the park attempt. |
 | `inqtrix_run_queue_wait_seconds` | histogram | — | Time from enqueue to worker claim, native **runs only** and only for first deliveries — redelivered messages keep their original enqueue timestamp and would fold the prior attempt's runtime into the wait. |
+| `inqtrix_stream_concurrent_viewers` | histogram | `job_kind` | Concurrent live event subscribers on ONE entity, observed each time a viewer joins (buckets 1–13). Deliberately carries no entity ids: the distribution alone answers whether multiple viewers per run occur at all — the evidence gate for a shared event poller. A histogram whose mass sits entirely at `le=1` means every viewer watches alone. |
 | `inqtrix_worker_jobs_total` | counter | `loop`, `outcome` | Worker job terminations per loop (`runs`, `indexing`, `uploads`) and outcome (`terminal`, `parked`, `fenced`, `finalization_failed`); the uploads loop currently emits only `finalization_failed`. |
 | `inqtrix_indexing_documents_total` | counter | `outcome` | Documents finishing an indexing pass (`completed`, `failed` — pauses/cancellations are not failures and stay uncounted). |
 
@@ -136,9 +137,13 @@ projection-lag diagnosis instead of adding document IDs to Prometheus.
 `/metrics` is for scraping, not health checks. Kubernetes probes use:
 
 - `/health` — liveness/startup (process up; unauthenticated).
-- `/readyz` — readiness: database `SELECT 1` and the queue `PING` must pass
-  (503 when either is down); a dead vector store degrades to `200` with a
-  `degraded` body, since research/chat/files still work.
+- `/readyz` — readiness: the database contract probe and the queue `PING`
+  must pass (503 when either is down); a dead vector store degrades to
+  `200` with a `degraded` body, since research/chat/files still work. The
+  body's `database_contract` field distinguishes a confirmed contract
+  break (`violation`) from unreachability (`unavailable`): only the
+  confirmed break closes the product gate immediately, unreachability
+  keeps product routes serving until it persists past a bounded window.
 
 The collaboration process has separate private probes: `/health/live` means
 the Node process is running, while `/health/ready` additionally requires its

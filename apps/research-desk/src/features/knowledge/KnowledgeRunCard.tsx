@@ -153,7 +153,6 @@ export function KnowledgeRunCard({
             )}
           >
             <KnowledgeStepList
-              animateIn
               collectionCount={collectionCount}
               failed={failed}
               steps={steps}

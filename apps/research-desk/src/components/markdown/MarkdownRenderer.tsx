@@ -11,7 +11,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type ComponentPropsWithoutRef,
   type ReactElement,
   type ReactNode,
@@ -20,9 +19,6 @@ import Markdown, { type Components } from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
-import type { Highlighter, ThemedToken } from 'shiki'
-import { createBundledHighlighter } from 'shiki/core'
-import { createJavaScriptRegexEngine } from 'shiki/engine/javascript'
 import type { PluggableList } from 'unified'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -44,12 +40,21 @@ import {
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/theme/ThemeProvider'
+import { useStructuralRenderBlocker } from '@/motion/StructuralLoadBoundary'
 import {
   plainCodeLanguageFromClassName,
   rawCodeLanguageFromClassName,
 } from './markdownLanguage'
-import { BoundedLruCache, MARKDOWN_RENDER_CACHE_CAPACITY } from './boundedLruCache'
+import {
+  ensureMarkdownCodeHighlight,
+  markdownCodeCacheKey,
+  markdownCodeTheme,
+  markdownTokenCache,
+  markdownTokenStyle,
+  shikiCodeLanguage,
+} from './codeHighlight'
 import { classifyMarkdownImageSource } from './markdownImagePolicy'
+import { rehypeNormalizeMathMlScripts } from './mathMl'
 import { useMarkdownCacheEntry } from './useMarkdownCacheEntry'
 import { useProgressiveMarkdownWork } from './useProgressiveMarkdownWork'
 import { copyTextToClipboard } from '@/lib/clipboard'
@@ -79,49 +84,8 @@ const MarkdownSourceContext = createContext<string | null>(null)
 
 type StreamingMarkdownPendingKind = 'code' | 'math' | null
 
-const createMarkdownHighlighter = createBundledHighlighter({
-  engine: () => createJavaScriptRegexEngine(),
-  langs: {
-    bash: () => import('shiki/dist/langs/shellscript.mjs'),
-    css: () => import('shiki/dist/langs/css.mjs'),
-    html: () => import('shiki/dist/langs/html.mjs'),
-    javascript: () => import('shiki/dist/langs/javascript.mjs'),
-    json: () => import('shiki/dist/langs/json.mjs'),
-    jsonc: () => import('shiki/dist/langs/jsonc.mjs'),
-    jsx: () => import('shiki/dist/langs/jsx.mjs'),
-    markdown: () => import('shiki/dist/langs/markdown.mjs'),
-    python: () => import('shiki/dist/langs/python.mjs'),
-    sh: () => import('shiki/dist/langs/shellscript.mjs'),
-    shellscript: () => import('shiki/dist/langs/shellscript.mjs'),
-    tsx: () => import('shiki/dist/langs/tsx.mjs'),
-    typescript: () => import('shiki/dist/langs/typescript.mjs'),
-  },
-  themes: {
-    'github-dark': () => import('shiki/dist/themes/github-dark.mjs'),
-    'github-light': () => import('shiki/dist/themes/github-light.mjs'),
-  },
-})
-
-type MarkdownHighlighterOptions = Parameters<typeof createMarkdownHighlighter>[0]
-type MarkdownLoadLanguage = Parameters<Highlighter['loadLanguage']>[0]
-type MarkdownTokenizeLanguage = NonNullable<Parameters<Highlighter['codeToTokens']>[1]['lang']>
-type MarkdownCodeTheme = 'github-dark' | 'github-light'
-type MarkdownHighlightedLine = Array<Pick<ThemedToken, 'color' | 'content' | 'fontStyle'>>
-
-let markdownHighlighterPromise: Promise<Highlighter> | null = null
-const markdownTokenCache = new BoundedLruCache<string, MarkdownHighlightedLine[]>(
-  MARKDOWN_RENDER_CACHE_CAPACITY,
-)
-const markdownTokenPending = new Set<string>()
-
-function getMarkdownHighlighter(options: MarkdownHighlighterOptions): Promise<Highlighter> {
-  markdownHighlighterPromise ??= createMarkdownHighlighter(options)
-    .then((highlighter) => highlighter as unknown as Highlighter)
-  return markdownHighlighterPromise
-}
-
 const MARKDOWN_REMARK_PLUGINS: PluggableList = [remarkGfm, remarkMath]
-const MARKDOWN_REHYPE_PLUGINS: PluggableList = [rehypeKatex]
+const MARKDOWN_REHYPE_PLUGINS: PluggableList = [rehypeKatex, rehypeNormalizeMathMlScripts]
 
 const MARKDOWN_COMPONENTS_BY_VARIANT: Record<MarkdownRendererVariant, Components> = {
   chat: {
@@ -484,6 +448,8 @@ function MarkdownImage({
   className,
   linkedAnchor,
   node,
+  onError,
+  onLoad,
   src,
   ...props
 }: MarkdownImageProps) {
@@ -497,13 +463,27 @@ function MarkdownImage({
 
   const policy = classifyMarkdownImageSource(src, window.location.href)
   const label = alt?.trim() || t.markdown.imageFallbackAlt
+  const sourceState = policy.kind === 'invalid'
+    ? undefined
+    : imageStateContext.states.get(policy.src)
+  const failed = sourceState?.failed ?? false
+  const approved = policy.kind !== 'invalid'
+    && (policy.kind === 'direct' || sourceState?.approved === true)
+  const imageKey = policy.kind !== 'invalid' && approved && !failed
+    ? `${policy.src}\0${sourceState?.attempt ?? 0}`
+    : null
+  const [settledImageKey, setSettledImageKey] = useState<string | null>(null)
+  const blocksStructuralReveal = useStructuralRenderBlocker(
+    imageKey !== null && settledImageKey !== imageKey,
+  )
+  const settleImage = useCallback((key: string | null) => {
+    if (key !== null) setSettledImageKey(key)
+  }, [])
+
   if (policy.kind === 'invalid') {
     return <span className="text-muted-foreground">{label}</span>
   }
 
-  const sourceState = imageStateContext.states.get(policy.src)
-  const failed = sourceState?.failed ?? false
-  const approved = policy.kind === 'direct' || sourceState?.approved === true
   if (!approved || failed) {
     const message = failed
       ? t.markdown.externalImageError
@@ -536,8 +516,19 @@ function MarkdownImage({
       className={cn('my-3 h-auto max-w-full rounded-md border border-border', className)}
       decoding="async"
       key={`${policy.src}-${sourceState?.attempt ?? 0}`}
-      loading="lazy"
-      onError={() => imageStateContext.fail(policy.src)}
+      loading={blocksStructuralReveal ? 'eager' : 'lazy'}
+      onError={(event) => {
+        settleImage(imageKey)
+        imageStateContext.fail(policy.src)
+        onError?.(event)
+      }}
+      onLoad={(event) => {
+        settleImage(imageKey)
+        onLoad?.(event)
+      }}
+      ref={(imageElement) => {
+        if (imageElement?.complete && imageElement.naturalWidth > 0) settleImage(imageKey)
+      }}
       referrerPolicy="no-referrer"
       src={policy.src}
     />
@@ -1041,76 +1032,6 @@ function parsePendingCodeFence(text: string) {
     body: text.slice(match[0].length),
     language,
   }
-}
-
-function markdownCodeTheme(resolvedTheme: 'light' | 'dark'): MarkdownCodeTheme {
-  return resolvedTheme === 'dark' ? 'github-dark' : 'github-light'
-}
-
-function shikiCodeLanguage(language: string): string {
-  return language === 'text' ? 'plaintext' : language
-}
-
-function markdownCodeCacheKey(code: string, language: string, theme: MarkdownCodeTheme): string {
-  return `${theme}\u0000${language}\u0000${code}`
-}
-
-async function ensureMarkdownCodeHighlight({
-  code,
-  language,
-  theme,
-}: {
-  code: string
-  language: string
-  theme: MarkdownCodeTheme
-}): Promise<void> {
-  const normalizedLanguage = shikiCodeLanguage(language)
-  const cacheKey = markdownCodeCacheKey(code, normalizedLanguage, theme)
-  if (markdownTokenCache.has(cacheKey) || markdownTokenPending.has(cacheKey)) return
-
-  markdownTokenPending.add(cacheKey)
-  try {
-    const highlighter = await getMarkdownHighlighter({
-      langs: ['plaintext'],
-      themes: ['github-dark', 'github-light'],
-    })
-    if (normalizedLanguage !== 'plaintext') {
-      await highlighter.loadLanguage(normalizedLanguage as MarkdownLoadLanguage)
-    }
-    const result = highlighter.codeToTokens(code, {
-      lang: normalizedLanguage as MarkdownTokenizeLanguage,
-      theme,
-      tokenizeMaxLineLength: 900,
-      tokenizeTimeLimit: 200,
-    })
-    markdownTokenCache.set(
-      cacheKey,
-      result.tokens.map((line) =>
-        line.map((token) => ({
-          color: token.color,
-          content: token.content,
-          fontStyle: token.fontStyle,
-        })),
-      ),
-    )
-  } catch (error) {
-    console.warn('Inqtrix markdown code highlight failed.', error)
-  } finally {
-    markdownTokenPending.delete(cacheKey)
-  }
-}
-
-function markdownTokenStyle(token: Pick<ThemedToken, 'color' | 'fontStyle'>): CSSProperties | undefined {
-  const style: CSSProperties = {}
-  if (token.color) style.color = token.color
-
-  if (typeof token.fontStyle === 'number' && token.fontStyle > 0) {
-    if (token.fontStyle & 1) style.fontStyle = 'italic'
-    if (token.fontStyle & 2) style.fontWeight = 700
-    if (token.fontStyle & 4) style.textDecoration = 'underline'
-  }
-
-  return Object.keys(style).length > 0 ? style : undefined
 }
 
 function codeLanguageFromReactNode(node: ReactNode): string | null {

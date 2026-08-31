@@ -144,6 +144,48 @@ export function SystemStatusPanel({
                 ) : null}
               </RuntimeValueGroup>
             </SystemValueRow>
+            {/* Effective concurrency of THIS api process, read from the
+                admin-gated runtime endpoint -- the panel's answer to "which
+                value actually governs here". The wording names the scope:
+                admission vs. execution is decided by the dispatch badge
+                above, and the worker fleet's total capacity is unknown to
+                the api and deliberately not claimed. */}
+            {/* Version-skew guard, same idiom as queue_consumers above: an
+                older api image does not publish these fields, and a row
+                that would read "undefined" is worse than no row. */}
+            {runtime.runs.admission_max_concurrent != null ? (
+              <SystemValueRow title={t.adminSystem.runAdmissionLimit}>
+                <RuntimeValueGroup>
+                  <RuntimeCode
+                    value={String(runtime.runs.admission_max_concurrent)}
+                  />
+                  {runtime.runs.queue_max_size != null ? (
+                    <span className="t-meta text-muted-foreground">
+                      {t.adminSystem.runQueueSize(runtime.runs.queue_max_size)}
+                    </span>
+                  ) : null}
+                </RuntimeValueGroup>
+              </SystemValueRow>
+            ) : null}
+            {runtime.api.chat_max_concurrent != null ? (
+              <SystemValueRow title={t.adminSystem.chatConcurrencyLimit}>
+                <RuntimeCode value={String(runtime.api.chat_max_concurrent)} />
+              </SystemValueRow>
+            ) : null}
+            {runtime.api.stream_reader_workers != null ? (
+              <SystemValueRow title={t.adminSystem.streamReaderWorkers}>
+                <RuntimeCode
+                  value={String(runtime.api.stream_reader_workers)}
+                />
+              </SystemValueRow>
+            ) : null}
+            {runtime.agents?.checkpointer_pool_size != null ? (
+              <SystemValueRow title={t.adminSystem.agentCheckpointerPool}>
+                <RuntimeCode
+                  value={String(runtime.agents.checkpointer_pool_size)}
+                />
+              </SystemValueRow>
+            ) : null}
           </>
         ) : (
           <RuntimeUnavailable error={runtimeError} status={runtimeStatus} />

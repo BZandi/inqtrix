@@ -152,3 +152,53 @@ def test_partial_choice_is_terminal_only_after_answer_is_persisted() -> None:
     assert parsed == gate
     assert choice == LIMIT_CHOICE_PARTIAL
     assert record.status == "answered"
+
+
+def test_effective_tool_grants_folds_only_run_scoped_tool_approves() -> None:
+    """P6B fold: only approve + kind=tool + approval_scope=run grants;
+    always-gated tools stay excluded even if such a row slipped in."""
+    from inqtrix.agents.control_ports import ApprovalRecord
+    from inqtrix.agents.limit_contract import effective_tool_grants
+
+    store = MemoryAgentControlStore()
+    run_id = "run_grants567890"
+
+    def _row(
+        approval_id: str,
+        *,
+        kind: str = "tool",
+        decision: str = "approve",
+        scope: str | None = "run",
+        tool: str = "web_instant",
+    ) -> ApprovalRecord:
+        return ApprovalRecord(
+            approval_id=approval_id,
+            run_id=run_id,
+            kind=kind,
+            status="approved" if decision else "pending",
+            payload={"actions": [{"tool": tool, "args": {}, "summary": ""}]},
+            decision=decision,
+            decision_payload=(
+                {"approval_scope": scope} if scope is not None else {}
+            ),
+        )
+
+    rows = [
+        _row("apr_granted"),
+        _row("apr_once", scope=None),
+        _row("apr_rejected", decision="reject"),
+        _row("apr_plan", kind="plan"),
+        _row("apr_skill", tool="load_skill"),
+        # Defense in depth: the service refuses this, and the fold
+        # refuses to honor one that slipped in anyway.
+        _row("apr_patch", tool="propose_editor_patch"),
+    ]
+    for row in rows:
+        run_coro(store.create_approval(row))
+
+    grants = effective_tool_grants(store, run_id=run_id, run_async=run_coro)
+    assert grants == frozenset({"web_instant", "load_skill"})
+    assert (
+        effective_tool_grants(store, run_id="run_other", run_async=run_coro)
+        == frozenset()
+    )

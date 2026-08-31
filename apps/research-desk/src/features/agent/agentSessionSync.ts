@@ -5,6 +5,7 @@
  */
 
 import type { AgentSessionGroupRecord, AgentSessionRecord } from './model'
+import { DERIVED_AGENT_SESSION_UPDATED_AT } from './model'
 import type { ServerAgentSession, ServerAgentSessionGroup } from './types'
 import {
   agentModelSelectionKey,
@@ -49,14 +50,22 @@ export function serverAgentSessionFingerprint(
 }
 
 /** Ordered sessions admitted to the persistence API. Shared-run view sessions
- * stay entirely client-derived and are deliberately absent. */
+ * stay entirely client-derived and are deliberately absent — and so is an
+ * UNTOUCHED fabrication from a run summary (epoch `updatedAt`, G1): it
+ * represents nothing user-authored, and pushing it once resurrected a
+ * question-derived title over the stored one (F-P4-TITLE2). Any user
+ * mutation stamps a real `updatedAt` and re-admits the row. */
 export function persistableAgentSessionsInOrder(
   sessions: Readonly<Record<string, AgentSessionRecord>>,
   sessionOrder: readonly string[],
 ): AgentSessionRecord[] {
   return sessionOrder.flatMap((sessionId) => {
     const session = sessions[sessionId]
-    return session && session.persistable !== false ? [session] : []
+    return session
+      && session.persistable !== false
+      && session.updatedAt !== DERIVED_AGENT_SESSION_UPDATED_AT
+      ? [session]
+      : []
   })
 }
 

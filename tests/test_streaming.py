@@ -21,6 +21,15 @@ from inqtrix.core.results import RunRequest
 from inqtrix.research.web_research import WebResearchAlgorithm
 from inqtrix.server.streaming import guarded_stream, stream_response
 from inqtrix.settings import AgentSettings
+from inqtrix.server.execution import ExecutionLanes
+
+# Shared per module: these tests' fake agents return promptly, so a narrow
+# lane never becomes the bottleneck under test. Released at module teardown.
+_LANES = ExecutionLanes(ai_workers=8, stream_workers=8)
+
+
+def teardown_module(module) -> None:  # noqa: ARG001 - pytest hook signature
+    _LANES.close()
 
 
 def _run_request(question: str = "Meine Frage") -> RunRequest:
@@ -52,6 +61,7 @@ async def test_stream_response_includes_progress_by_default(monkeypatch):
             providers=None,
             strategies=None,
             settings=AgentSettings(),
+            lanes=_LANES,
         )
     )
 
@@ -80,6 +90,7 @@ async def test_stream_response_can_omit_progress(monkeypatch):
             providers=None,
             strategies=None,
             settings=AgentSettings(),
+            lanes=_LANES,
             include_progress=False,
         )
     )
@@ -123,6 +134,7 @@ async def test_stream_response_emits_model_resolution_metadata(monkeypatch):
             providers=None,
             strategies=None,
             settings=AgentSettings(),
+            lanes=_LANES,
             include_progress=False,
         )
     )
@@ -166,6 +178,7 @@ async def test_guarded_stream_passes_include_progress(monkeypatch):
             providers=None,
             strategies=None,
             settings=AgentSettings(),
+            lanes=_LANES,
             include_progress=False,
         )
     )
@@ -209,6 +222,7 @@ async def test_stream_response_dispatches_event_only_algorithm_answer_only():
             providers=None,
             strategies=None,
             settings=AgentSettings(),
+            lanes=_LANES,
         )
     )
 
@@ -255,6 +269,7 @@ async def test_stream_response_never_marks_returned_terminal_failure_as_stop():
             providers=None,
             strategies=None,
             settings=AgentSettings(),
+            lanes=_LANES,
             include_progress=False,
         )
     )
@@ -303,6 +318,7 @@ async def test_stream_response_returns_timeout_chunk(monkeypatch):
             providers=None,
             strategies=None,
             settings=settings,
+            lanes=_LANES,
         )
     )
 

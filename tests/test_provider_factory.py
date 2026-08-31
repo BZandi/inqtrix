@@ -273,3 +273,52 @@ def test_inapplicable_temperature_warns_for_litellm(caplog: pytest.LogCaptureFix
         logger.removeHandler(caplog.handler)
     assert provider_label(ctx.llm) == "LiteLLM"
     assert any("INQTRIX_TEMPERATURE" in r.message for r in caplog.records)
+
+
+def test_absent_provider_group_falls_back_to_the_field_default() -> None:
+    """The no-group fallback must BE the field's default, not equal it.
+
+    Checked at the call site, because value equality proves nothing here:
+    a literal ``6`` restored at the call site still equals the field's
+    current default, so an assertion on the value alone goes green on
+    exactly the regression it names. What must hold is that the fallback
+    is derived, so it follows the field the day the field changes.
+    """
+    import ast
+    import inspect
+
+    from inqtrix import providers as module
+
+    tree = ast.parse(inspect.getsource(module._make_azure_foundry))
+    fallbacks = [
+        node.args[2]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_sel"
+        and len(node.args) == 3
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "azure_foundry_max_concurrency"
+    ]
+    assert len(fallbacks) == 1, "expected exactly one concurrency lookup"
+    fallback = fallbacks[0]
+    assert not isinstance(fallback, ast.Constant), (
+        "the fallback is a literal again: it is a second default that keeps "
+        "the old number the day the field changes"
+    )
+    assert (
+        isinstance(fallback, ast.Call)
+        and isinstance(fallback.func, ast.Name)
+        and fallback.func.id == "_field_default"
+    )
+
+
+def test_the_derived_fallback_follows_the_field(monkeypatch) -> None:
+    """And it must follow a CHANGED default, which is the whole point."""
+    from inqtrix.providers import _field_default
+    from inqtrix.settings import ProviderSettings
+
+    attr = "azure_foundry_max_concurrency"
+    field = ProviderSettings.model_fields[attr]
+    monkeypatch.setattr(field, "default", 4321)
+    assert _field_default(attr) == 4321

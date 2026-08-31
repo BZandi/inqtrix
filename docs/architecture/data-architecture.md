@@ -390,7 +390,15 @@ Lists are split by how they grow:
   - **`/v1/knowledge/collections`**, **`/v1/prompt-templates`**, and
     **`/v1/skills`** are list-all today, an intentional scale ceiling rather
     than an accidental omission. Prompt templates are expected to remain a
-    small per-user library of chat rules and saved prompts. Each query joins
+    small per-user library of chat rules and saved prompts. The listing is
+    also the lazy seeding chokepoint for the stock prompts (Lektor,
+    Sprechzettel, Summarizer, Translator): a scoped user's FIRST listing
+    installs them once — the per-user marker row
+    (`prompt_template_seed_markers`) is claimed atomically with the inserts,
+    so a deleted default stays deleted forever and a library that already
+    holds templates is never injected into. Unscoped deployments never seed;
+    on the memory backend the marker is as volatile as the store itself.
+    Each query joins
     owned rows with accepted direct user shares and returns an `access`
     annotation. There is no separate `/v1/shares/shared-with-me` resource union
     and no group expansion. The lifecycle-only `/v1/shares/inbox` and

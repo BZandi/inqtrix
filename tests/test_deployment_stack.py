@@ -455,3 +455,28 @@ def test_nginx_public_origin_uses_one_explicit_or_runtime_source(
         "https",
         "desk.example:8443",
     ]
+
+
+def test_bundled_postgres_connection_ceiling_is_configurable() -> None:
+    """The bundled server must be sizeable without editing the stack file.
+
+    An api and a worker together ask for more connections than the image
+    default allows, and each process reports its own budget at startup —
+    so the operator can see the shortfall but, without this, cannot act
+    on it except by abandoning the bundled database.
+    """
+    stack = yaml.safe_load(
+        (_ROOT / "deploy" / "compose" / "compose.stack.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    command = stack["services"]["postgres"]["command"]
+    assert command[0] == "postgres"
+    assert "-c" in command
+    setting = command[command.index("-c") + 1]
+    name, _, value = setting.partition("=")
+    assert name == "max_connections"
+    # Interpolated, so an operator sets it without touching this file, and
+    # the image default stays in force for anyone who does not.
+    assert value.startswith("${INQTRIX_BUNDLED_POSTGRES_MAX_CONNECTIONS")
+    assert value.endswith(":-300}")

@@ -72,8 +72,6 @@ class TierPolicy:
     response_form: Literal["auto", "chat", "canvas"]
     """Server-side deliverable default; ``chat``/``canvas`` override the
     intake routing, ``auto`` keeps it."""
-    latency_hint: str
-    """Human latency expectation, published to the composer."""
 
 
 TIER_POLICIES: dict[AgentTier, TierPolicy] = {
@@ -89,7 +87,6 @@ TIER_POLICIES: dict[AgentTier, TierPolicy] = {
         rag_default_profile="schnell",
         verify="labels",
         response_form="chat",
-        latency_hint="schnellste Stufe · unter ~3 min",
     ),
     "gruendlich": TierPolicy(
         tier="gruendlich",
@@ -103,7 +100,6 @@ TIER_POLICIES: dict[AgentTier, TierPolicy] = {
         rag_default_profile="standard",
         verify="standard",
         response_form="auto",
-        latency_hint="1-3 min",
     ),
     "tief": TierPolicy(
         tier="tief",
@@ -117,7 +113,6 @@ TIER_POLICIES: dict[AgentTier, TierPolicy] = {
         rag_default_profile="gruendlich",
         verify="escalating",
         response_form="canvas",
-        latency_hint="5-15 min",
     ),
 }
 
@@ -164,7 +159,6 @@ def tier_capabilities_payload(
             "rag_default_profile": policy.rag_default_profile,
             "verify": policy.verify,
             "response_form": policy.response_form,
-            "latency_hint": policy.latency_hint,
         }
         for policy in (TIER_POLICIES[tier] for tier in AGENT_TIERS)
     ]

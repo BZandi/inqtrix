@@ -67,6 +67,18 @@ services:
       POSTGRES_USER: ${INQTRIX_PG_USER:-inqtrix}
       POSTGRES_PASSWORD: ${INQTRIX_PG_PASSWORD:-}
       POSTGRES_DB: ${INQTRIX_PG_DB:-inqtrix}
+    # Server ceiling on concurrent client connections. The image default of
+    # 100 does not cover the shipped run cap: run threads open a connection
+    # per database operation, and an API plus a worker each add their own
+    # pooled budget, which both report at startup. 300 carries headroom for that
+    # sum; it is an engineering estimate, not a figure measured at the run cap
+    # -- lower it on a memory-tight host, and raise this service's memory when
+    # raising it further. A non-numeric value fails the server
+    # start rather than being ignored.
+    command:
+      - postgres
+      - -c
+      - max_connections=${INQTRIX_BUNDLED_POSTGRES_MAX_CONNECTIONS:-300}
     volumes:
       # postgres:18 moved PGDATA into a version-scoped subdir and declares
       # VOLUME /var/lib/postgresql — mount the named volume THERE.
@@ -266,7 +278,7 @@ services:
       # wins.
       INQTRIX_MAX_FILE_BYTES: ${INQTRIX_MAX_FILE_BYTES:-104857600}
       INQTRIX_PROXY_MAX_BODY_BYTES: ${INQTRIX_PROXY_MAX_BODY_BYTES:-}
-      INQTRIX_MAX_UPSTREAM_CONNECTIONS: ${INQTRIX_MAX_UPSTREAM_CONNECTIONS:-200}
+      INQTRIX_MAX_UPSTREAM_CONNECTIONS: ${INQTRIX_MAX_UPSTREAM_CONNECTIONS:-512}
       INQTRIX_COLLABORATION_MAX_FRAME_BYTES: ${INQTRIX_COLLABORATION_MAX_FRAME_BYTES:-2097152}
       INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES: ${INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES:-32}
       RESEARCH_DESK_WORKERS: ${RESEARCH_DESK_WORKERS:-1}

@@ -58,11 +58,19 @@ if TYPE_CHECKING:
 _VALID_SOURCES = frozenset(
     {"blank", "imported-research-report", "pasted", "agent-artifact"}
 )
-_VALID_COMMENT_KINDS = frozenset({"collect", "inline_edit", "evidence_review"})
+# "assistant_edit" ist der Maschinentraeger eines Assistentenlaufs: eine
+# creator-private Kommentarzeile, die es nur gibt, damit ein privater Entwurf
+# einen Anker hat. Sie ist bewusst KEINE Notiz des Nutzers -- die Notizliste
+# und ihre Zaehler zeigen sie nicht, und sie ist nicht erneut ausfuehrbar.
+_VALID_COMMENT_KINDS = frozenset(
+    {"collect", "inline_edit", "evidence_review", "assistant_edit"}
+)
 _VALID_COMMENT_STATUSES = frozenset({"open", "resolved", "stale"})
 _VALID_EVIDENCE_PRESETS = frozenset({"add_sources", "fact_check", "verify_citations"})
 _VALID_DRAFT_REVISION_SOURCES = frozenset({"llm_refine", "manual_edit"})
+_VALID_EDIT_POSITIONS = frozenset({"replace", "before", "after", "append"})
 _PRIVATE_DRAFT_ANCHOR_VERSION = 1
+_MAX_PRIVATE_DRAFT_ANCHOR_TEXT = 4_096
 _MAX_PRIVATE_DRAFT_BYTES = 1_048_576
 _MAX_PRIVATE_DRAFT_HISTORY = 50
 _MAX_PRIVATE_DRAFT_LIST_ITEMS = 50
@@ -870,8 +878,10 @@ class EditorPersistenceService:
         now: float,
     ) -> EditorSuggestionDraft:
         allowed = {
+            "anchor_text",
             "anchor_version",
             "change_summary",
+            "edit_position",
             "evidence",
             "group_id",
             "patch_id",
@@ -884,6 +894,22 @@ class EditorPersistenceService:
         anchor_version = payload.get("anchor_version")
         if anchor_version != _PRIVATE_DRAFT_ANCHOR_VERSION:
             raise EditorValidationError("unsupported suggestion anchor_version")
+        # Nur bei der Erstanlage: Ankerstelle und Einfuegeart gehoeren zur
+        # Identitaet des Vorschlags. Eine Revision darf den Vorschlag
+        # umformulieren, aber nicht anderswohin wandern lassen -- deshalb
+        # nimmt _parse_revised_suggestion_draft die Felder nicht entgegen.
+        edit_position = payload.get("edit_position")
+        if edit_position is not None and edit_position not in _VALID_EDIT_POSITIONS:
+            raise EditorValidationError(
+                f"unknown suggestion edit_position: {edit_position!r}"
+            )
+        anchor_text = payload.get("anchor_text")
+        if anchor_text is not None:
+            anchor_text = cls._bounded_string(
+                anchor_text,
+                field="anchor_text",
+                maximum=_MAX_PRIVATE_DRAFT_ANCHOR_TEXT,
+            )
         return EditorSuggestionDraft(
             suggestion_id=cls._bounded_string(
                 payload.get("suggestion_id"),
@@ -904,6 +930,10 @@ class EditorPersistenceService:
             ),
             proposed_text=cls._draft_proposed_text(payload.get("proposed_text")),
             anchor_version=_PRIVATE_DRAFT_ANCHOR_VERSION,
+            edit_position=(
+                str(edit_position) if edit_position is not None else None
+            ),
+            anchor_text=anchor_text,
             revision=1,
             change_summary=cls._metadata_strings(
                 payload.get("change_summary", []), field="change_summary"

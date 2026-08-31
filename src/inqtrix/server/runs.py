@@ -40,6 +40,7 @@ from inqtrix.execution_failures import terminate_native_run
 from inqtrix.pagination import keyset_page
 from inqtrix.runs.ports import RunStoreMetrics
 from inqtrix.runs.shared import (
+    clipped_question,
     CHILD_PROGRESS_EVENT,
     TERMINAL_RUN_STATUS_VALUES,
     access_annotation,
@@ -311,6 +312,7 @@ class RunHandle:
         self,
         answer: str,
         *,
+        reference_labels: "list[str] | None" = None,
         before_ready: Callable[[], None] | None = None,
     ) -> None:
         """Publish final Markdown through one explicit answer lifecycle.
@@ -333,6 +335,19 @@ class RunHandle:
                 "artifact_id": artifact_id,
                 "publication_id": publication_id,
                 "status": "writing",
+                # The labels the finished answer cites. They are known
+                # here — the model turn and the citation validation are
+                # both done before publication starts — and a surface
+                # that has them can render citations from the FIRST
+                # delta. Without them the streamed text carries plain
+                # `[W1]` and the whole body is rewritten the moment the
+                # answer settles, which reads as the message being
+                # re-inserted.
+                **(
+                    {"reference_labels": list(reference_labels)}
+                    if reference_labels
+                    else {}
+                ),
             },
         )
         offset = 0
@@ -718,7 +733,7 @@ class RunStore:
             run_id = self._new_unique_run_id_locked()
             record = RunRecord(
                 run_id=run_id,
-                question=question[:500],
+                question=clipped_question(question),
                 stack_name=stack_name,
                 workspace_id=workspace_id,
                 created_at=time.time(),
@@ -824,7 +839,7 @@ class RunStore:
             run_id = self._new_unique_run_id_locked()
             record = RunRecord(
                 run_id=run_id,
-                question=question[:500],
+                question=clipped_question(question),
                 stack_name=stack_name,
                 workspace_id=workspace_id,
                 created_at=created_at if created_at is not None else now,
@@ -1351,8 +1366,14 @@ class RunStore:
         *,
         workspace_id: str | None = None,
         visible_to: "UserContext | None" = None,
+        stream: bool = True,
     ) -> RunSubscription:
-        """Subscribe to a run's event stream, replaying buffered events."""
+        """Subscribe to a run's event stream, replaying buffered events.
+
+        ``stream=False`` is the one-shot replay read (JSON polling
+        fallback): same visibility check and replay, but the queue is
+        never registered — ``close()`` then finds nothing to detach.
+        """
         with self._lock:
             self._cleanup_locked()
             record, _shared = self._record_locked(
@@ -1361,7 +1382,8 @@ class RunStore:
                 visible_to=visible_to,
             )
             queue: Queue = Queue()
-            record.subscribers.append(queue)
+            if stream:
+                record.subscribers.append(queue)
             return RunSubscription(
                 run_id=run_id,
                 queue=queue,

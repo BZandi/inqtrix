@@ -1042,6 +1042,7 @@ function ViewOnlyAiFixture() {
           onRejectSuggestion={noOp}
           onSelectSuggestion={noOp}
           publishDisabledReason={publishDisabledReason}
+          suggestionErrors={{}}
           suggestions={[suggestion]}
         />
       </section>

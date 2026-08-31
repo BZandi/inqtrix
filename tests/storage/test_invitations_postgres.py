@@ -293,8 +293,11 @@ async def test_disable_cascade_is_atomic(factory):
             revoked_at=None,
         )
     )
-    assert await directory.disable_user(
-        tenant_id="default", user_id=user.user_id, now=time.time()
+    # The port method carrying the cascade today: disable_if_not_last_admin
+    # (the removed disable_user ancestor lacked the last-admin guard and the
+    # local_credentials write — this superset is the ONE disable cascade).
+    assert await directory.disable_if_not_last_admin(
+        tenant_id="default", user_id=user.user_id, disabled_at=time.time()
     )
     found = await directory.find_by_user_id(
         tenant_id="default", user_id=user.user_id
@@ -302,7 +305,12 @@ async def test_disable_cascade_is_atomic(factory):
     assert found is not None and found.disabled_at is not None
     assert await sessions.get("sess-1") is None
     assert (await pat_store.get("tok1")).revoked_at is not None
-    # Second disable is a guarded no-op.
-    assert not await directory.disable_user(
-        tenant_id="default", user_id=user.user_id, now=time.time()
+    # Unlike the removed ancestor's guarded no-op, the superset reports the
+    # row write on a repeat call — and the state stays disabled either way.
+    assert await directory.disable_if_not_last_admin(
+        tenant_id="default", user_id=user.user_id, disabled_at=time.time()
     )
+    still = await directory.find_by_user_id(
+        tenant_id="default", user_id=user.user_id
+    )
+    assert still is not None and still.disabled_at is not None

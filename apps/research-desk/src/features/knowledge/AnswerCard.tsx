@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type SyntheticEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, useReducedMotion } from 'motion/react'
-import { BadgeCheck, Check, ChevronDown, Copy, FileSearch, Info, ListChecks, MoreHorizontal, Quote, Type } from '@/components/icons'
+import { BadgeCheck, Check, ChevronRight, Copy, FileSearch, Info, ListChecks, MoreHorizontal, Quote, Type } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
@@ -73,6 +73,7 @@ export function AnswerCard({
   const [copied, setCopied] = useState(false)
   const [preview, setPreview] = useState<CitationPreview | null>(null)
   const [stepsOpen, setStepsOpen] = useState(false)
+  const [sourcesOpen, setSourcesOpen] = useState(false)
   const hideTimerRef = useRef<number | null>(null)
   const hasSteps = steps.length > 0
 
@@ -195,7 +196,9 @@ export function AnswerCard({
                   variant="ghost"
                 >
                   <ListChecks className="size-3.5" />
-                  <ChevronDown className={cn('size-3 transition-transform', stepsOpen && 'rotate-180')} />
+                  {/* App-wide disclosure convention: chevron points right
+                      collapsed, down expanded (agent-desk parity). */}
+                  <ChevronRight className={cn('size-3 transition-transform', stepsOpen && 'rotate-90')} />
                 </Button>
               </TooltipTrigger>
               <TooltipContent>{t.knowledge.answerStepsHint}</TooltipContent>
@@ -206,7 +209,6 @@ export function AnswerCard({
         {hasSteps && stepsOpen && (
           <div className="mb-2 rounded-lg border border-border bg-surface/50 px-3 py-3">
             <KnowledgeStepList
-              animateIn={false}
               collectionCount={collectionCount}
               failed={false}
               steps={steps}
@@ -269,8 +271,28 @@ export function AnswerCard({
 
         {answer.references.length > 0 && (
           <div className="mt-4 border-t border-border/70 pt-3">
-            <h4 className="t-caption text-muted-foreground">{t.knowledge.sources}</h4>
-            <div className="mt-1.5">
+            {/* Default-collapsed disclosure (agent-desk parity): a long
+                citation list must not dominate the conversation. */}
+            <button
+              aria-expanded={sourcesOpen}
+              className="flex items-center gap-1 t-meta-sm font-semibold text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => setSourcesOpen((current) => !current)}
+              type="button"
+            >
+              {answer.references.length === 1
+                ? t.knowledge.sourcesSummaryOne
+                : t.knowledge.sourcesSummary.replace(
+                  '{count}',
+                  String(answer.references.length),
+                )}
+              <ChevronRight
+                className={cn(
+                  'size-3 shrink-0 transition-transform',
+                  sourcesOpen && 'rotate-90',
+                )}
+              />
+            </button>
+            {sourcesOpen && <div className="mt-1.5">
               <CitationGroupList
                 activeKey={null}
                 groups={groupCitationsByDocument(
@@ -282,7 +304,7 @@ export function AnswerCard({
                   if (view) onOpenReference(view.reference)
                 }}
               />
-            </div>
+            </div>}
           </div>
         )}
 

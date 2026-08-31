@@ -8,6 +8,7 @@ import {
   PencilLine,
   Pin,
   PinOff,
+  RotateCcw,
   SquarePen,
   Trash2,
 } from '@/components/icons'
@@ -39,6 +40,9 @@ import {
 } from '@/features/project/selectors'
 import { QuotaUsageFooter } from '@/features/quota/QuotaUsageFooter'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { ExplorerSortMenu } from '@/components/ui/explorer-sort-menu'
+import { orderPinnedExplorerItems } from '@/features/project/explorerSort'
+import type { ExplorerSortMode } from '@/features/project/explorerSort'
 import type { Locale, TranslationDictionary } from '@/i18n/translations'
 import { cn } from '@/lib/utils'
 import { AnimatePresence, motion } from 'motion/react'
@@ -68,6 +72,11 @@ type ChatHistoryPanelProps = {
   onDeleteThreadGroup: (groupId: string) => void
   onMoveThreadGroup: (groupId: string, targetIndex: number) => void
   onMoveThreadToGroup: (threadId: string, groupId: string | null, targetIndex: number) => void
+  /** Sort program: a drag in an automatic mode first adopts the visible
+   * order (items, folders) so the switch to manual never jumps. */
+  onAdoptVisibleOrder: (itemIds: string[], folderIds: string[]) => void
+  onChangeSortMode: (mode: ExplorerSortMode) => void
+  sortMode: ExplorerSortMode
   onRenameThread: (threadId: string, title: string) => void
   onRenameThreadGroup: (groupId: string, title: string) => void
   onSelectThread: (threadId: string) => void
@@ -78,6 +87,8 @@ type ChatHistoryPanelProps = {
   isLoadingMoreThreads?: boolean
   /** Load the next page of older threads. */
   onLoadMoreThreads?: () => void
+  /** Pointer/focus intent may warm a server thread before selection. */
+  onPrefetchThread?: (threadId: string) => void
   reduceMotion: boolean | null
   pinnedThreadIds: readonly string[]
   runningThreadIds: ReadonlySet<string>
@@ -97,6 +108,9 @@ export function ChatHistoryPanel({
   onDeleteThreadGroup,
   onMoveThreadGroup,
   onMoveThreadToGroup,
+  onAdoptVisibleOrder,
+  onChangeSortMode,
+  sortMode,
   onRenameThread,
   onRenameThreadGroup,
   onSelectThread,
@@ -104,6 +118,7 @@ export function ChatHistoryPanel({
   hasMoreThreads,
   isLoadingMoreThreads,
   onLoadMoreThreads,
+  onPrefetchThread,
   reduceMotion,
   pinnedThreadIds,
   runningThreadIds,
@@ -280,6 +295,7 @@ export function ChatHistoryPanel({
       const nextDropTarget = didStartDrag ? readGroupDropTarget(upEvent.clientY, groupId) : null
       cleanupPointerDrag()
       if (nextDropTarget === null) return
+      adoptVisibleOrderRef.current()
       onMoveThreadGroup(groupId, nextDropTarget)
     }
 
@@ -372,6 +388,7 @@ export function ChatHistoryPanel({
       const nextDropTarget = didStartDrag ? readThreadDropTarget(upEvent.clientY, threadId) : null
       cleanupPointerDrag()
       if (!nextDropTarget) return
+      adoptVisibleOrderRef.current()
       onMoveThreadToGroup(threadId, nextDropTarget.groupId, nextDropTarget.targetIndex)
     }
 
@@ -406,11 +423,31 @@ export function ChatHistoryPanel({
       : []),
     [isSearching, threads, trimmedSearchQuery],
   )
-  const pinnedThreads = threads.filter((thread) => pinnedThreadIdSet.has(thread.id))
+  const pinnedThreads = orderPinnedExplorerItems(
+    threads.filter((thread) => pinnedThreadIdSet.has(thread.id)),
+    pinnedThreadIds,
+    sortMode,
+    (thread) => thread.id,
+  )
   const explorerSections = chatHistorySections.map((section) => ({
     ...section,
     threads: section.threads.filter((thread) => !pinnedThreadIdSet.has(thread.id)),
   })) as ChatHistorySection[]
+  // The drag handlers are document-level listeners frozen at pointer-
+  // down; the ref always points at the LATEST render's adopt closure so
+  // the adopted order matches the DOM the drop index was read from.
+  const adoptVisibleOrderIfAutomatic = () => {
+    if (sortMode === 'manual') return
+    onAdoptVisibleOrder(
+      [
+        ...pinnedThreads.map((thread) => thread.id),
+        ...explorerSections.flatMap((section) => section.threads.map((thread) => thread.id)),
+      ],
+      explorerSections.flatMap((section) => (section.kind === 'group' ? [section.groupId] : [])),
+    )
+  }
+  const adoptVisibleOrderRef = useRef(adoptVisibleOrderIfAutomatic)
+  adoptVisibleOrderRef.current = adoptVisibleOrderIfAutomatic
   const hasHistoryStructure = pinnedThreads.length > 0
     || explorerSections.some((section) => section.threads.length > 0 || section.kind === 'group')
   const showUngroupedHistoryHeader = explorerSections.some((section) => section.kind === 'group')
@@ -421,8 +458,19 @@ export function ChatHistoryPanel({
     ? groupSectionIds.filter((groupId) => groupId !== draggedGroupId)
     : groupSectionIds
 
+  const prefetchThreadFromTarget = (target: EventTarget | null) => {
+    if (!onPrefetchThread || !(target instanceof Element)) return
+    const row = target.closest<HTMLElement>('[data-chat-history-thread-id]')
+    const threadId = row?.dataset.chatHistoryThreadId
+    if (threadId) onPrefetchThread(threadId)
+  }
+
   return (
-    <aside className="inqtrix-contained-panel flex min-h-0 flex-col border-b border-border bg-surface/60 lg:h-full lg:border-b-0">
+    <aside
+      className="inqtrix-contained-panel flex min-h-0 flex-col border-b border-border bg-surface/60 lg:h-full lg:border-b-0"
+      onFocusCapture={(event) => prefetchThreadFromTarget(event.target)}
+      onPointerOver={(event) => prefetchThreadFromTarget(event.target)}
+    >
       <div className="flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
           <h1 className="truncate t-section text-foreground">
@@ -430,6 +478,7 @@ export function ChatHistoryPanel({
           </h1>
         </div>
         <div className="flex items-center gap-1.5">
+          <ExplorerSortMenu mode={sortMode} onChangeMode={onChangeSortMode} />
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -952,6 +1001,8 @@ function ChatThreadHistoryItem({
 }) {
   const isEditingTitle = editingHistoryThreadId === thread.id
   const timeLabel = displayRelativeAge(chatThreadHistoryTimeIso(thread), locale)
+  const deleting = thread.deletion?.status === 'deleting'
+  const deleteFailed = thread.deletion?.status === 'delete_failed'
 
   return (
     <motion.div
@@ -965,32 +1016,48 @@ function ChatThreadHistoryItem({
         <span className="pointer-events-none absolute -bottom-1 left-1 right-1 h-0.5 rounded-full bg-brand shadow-[0_0_0_1px_var(--background)]" />
       )}
       <ExplorerHistoryRow
-        actions={[
-          {
-            ariaLabel: `${isPinned ? t.chat.unpinThread : t.chat.pinThread}: ${thread.title}`,
-            icon: isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />,
-            label: isPinned ? t.chat.unpinThread : t.chat.pinThread,
-            onSelect: () => onTogglePinnedThread(thread.id),
-          },
-          ...(!isIncognito
-            ? [
-                {
-                  ariaLabel: `${t.chat.delete}: ${thread.title}`,
-                  destructive: true,
-                  icon: <Trash2 className="icon-sm" />,
-                  label: t.chat.delete,
-                  onSelect: () => onDeleteThread(thread.id),
-                },
-              ]
-            : []),
-        ]}
+        actions={thread.deletion
+          ? (deleteFailed
+            ? [{
+              ariaLabel: `${t.chat.retryDelete}: ${thread.title}`,
+              icon: <RotateCcw className="icon-sm" />,
+              label: t.chat.retryDelete,
+              onSelect: () => onDeleteThread(thread.id),
+            }]
+            : [])
+          : [
+            {
+              ariaLabel: `${isPinned ? t.chat.unpinThread : t.chat.pinThread}: ${thread.title}`,
+              icon: isPinned ? <PinOff className="icon-sm" /> : <Pin className="icon-sm" />,
+              label: isPinned ? t.chat.unpinThread : t.chat.pinThread,
+              onSelect: () => onTogglePinnedThread(thread.id),
+            },
+            ...(!isIncognito
+              ? [
+                  {
+                    ariaLabel: `${t.chat.delete}: ${thread.title}`,
+                    destructive: true,
+                    icon: <Trash2 className="icon-sm" />,
+                    label: t.chat.delete,
+                    onSelect: () => onDeleteThread(thread.id),
+                  },
+                ]
+              : []),
+          ]}
         active={isActive}
+        disabled={Boolean(thread.deletion)}
         dragging={isDragging}
-        indicator={isThreadRunning ? <ExplorerRunningIndicator label={t.chat.generating} /> : undefined}
+        indicator={deleting
+          ? <ExplorerRunningIndicator label={t.chat.deleting} />
+          : isThreadRunning ? <ExplorerRunningIndicator label={t.chat.generating} /> : undefined}
         nested={isNested}
-        onPointerDown={(event) => beginThreadDrag(event, thread.id)}
+        onPointerDown={thread.deletion
+          ? undefined
+          : (event) => beginThreadDrag(event, thread.id)}
         onSelect={() => onSelectThread(thread.id)}
-        onStartRename={() => startHistoryThreadTitleEdit(thread.id, thread.title)}
+        onStartRename={thread.deletion
+          ? undefined
+          : () => startHistoryThreadTitleEdit(thread.id, thread.title)}
         renameEditor={isEditingTitle ? (
           <ExplorerHistoryTitleInput
             inputRef={historyThreadTitleInputRef}
@@ -1001,8 +1068,10 @@ function ChatThreadHistoryItem({
             value={historyThreadTitleDraft}
           />
         ) : undefined}
-        renameLabel={t.chat.renameTitle}
-        timeLabel={timeLabel}
+        renameLabel={thread.deletion ? undefined : t.chat.renameTitle}
+        timeLabel={deleting
+          ? t.chat.deleting
+          : deleteFailed ? t.chat.deleteFailed : timeLabel}
         title={thread.title}
       />
     </motion.div>
@@ -1010,5 +1079,7 @@ function ChatThreadHistoryItem({
 }
 
 function chatThreadHistoryTimeIso(thread: ChatThread) {
+  // Same derivation as selectors.chatThreadActivityTimeIso (the sidebar
+  // sort key) — label and order must agree.
   return thread.messages[thread.messages.length - 1]?.createdAt ?? thread.updatedAt
 }

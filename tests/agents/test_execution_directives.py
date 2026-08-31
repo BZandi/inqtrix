@@ -248,6 +248,7 @@ def test_quick_web_is_one_search_without_plan_child_rag_or_canvas() -> None:
                     "reason": "direct_route_single_search",
                 }
             },
+            "tool_grants": [],
         }
         assert summary["snapshot"]["execution"] == expected_execution
         assert result["execution"] == expected_execution
@@ -283,7 +284,7 @@ def test_quick_web_preserves_provider_grounded_numbers_and_sources() -> None:
         ]
 
     answer_prompt = llm.calls[1]["prompt"]
-    assert "einschließlich darin genannter Zahlen, Preise und Daten" in answer_prompt
+    assert "einschliesslich darin genannter Zahlen, Preise und Daten" in answer_prompt
     assert "entferne vorhandene Providerinformationen nicht" in answer_prompt
     assert "Grounded provider answer." in answer_prompt
 
@@ -444,3 +445,20 @@ def test_capabilities_and_legacy_directive_conflict_are_explicit() -> None:
         )
         assert response.status_code == 400
         assert "nicht gleichzeitig" in response.json()["error"]["message"]
+
+
+def test_the_quick_lane_refuses_a_result_requirement_it_cannot_honor() -> None:
+    """The quick lane returns from `_run_quick_web` before the kernel
+    user message is ever built (kernel/algorithm.py: the early return at
+    `execution_directive == "quick_web"`), so a requirement sent with it
+    would be validated, composed, persisted — and never reach a single
+    prompt. Same refusal as canvas_context, for the same reason: a silent
+    drop is exactly what this feature exists to prevent."""
+    with _client(QuickWebLLM(), CountingSearch()) as client:
+        body = _quick_body()
+        body["report_guidance"] = "Antworte in genau drei Stichpunkten."
+        response = client.post("/v1/runs", json=body)
+        assert response.status_code == 400
+        message = response.json()["error"]["message"]
+        assert "report_guidance" in message
+        assert "execution_directive" in message

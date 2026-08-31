@@ -394,10 +394,15 @@ def build_kernel_agent(
 
     from inqtrix.agents.kernel.middleware import (
         KernelChildBatchGuardMiddleware,
+        KernelModelTurnMiddleware,
         KernelSufficiencyMiddleware,
     )
 
     middleware: list[Any] = [
+        # Outermost wrap so the model-turn activity brackets EVERYTHING the
+        # model boundary does (incl. a compaction pass). wrap_model_call
+        # only — a node-creating hook would re-price the pinned supersteps.
+        KernelModelTurnMiddleware(),
         KernelSkillInputMiddleware(),
         # The advisory sufficiency nudge is always compiled
         # in — the runtime flag short-circuits inside the hook, so the

@@ -18,6 +18,9 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.auth.sessions import AuthSession, LoginFlow
+from inqtrix.storage.authorization_generation import (
+    bump_authorization_generation,
+)
 from inqtrix.storage.auth_orm import auth_flows, auth_sessions
 from inqtrix.storage.db import tenant_session
 from inqtrix.storage.identity_orm import tenant_security_state, users
@@ -126,13 +129,26 @@ class PostgresSessionStore:
         )
 
     async def delete(self, session_id: str) -> None:
-        """Remove one session; missing ids are a no-op."""
+        """Remove one session; missing ids are a no-op.
+
+        The generation bump rides the same transaction: a logout of ONE
+        session must drop that session's live streams within a frame,
+        not only at the gate's time ceiling.
+        """
         async with self._scope() as db:
-            await db.execute(
-                delete(auth_sessions).where(
-                    auth_sessions.c.id == session_id
+            row = (
+                await db.execute(
+                    delete(auth_sessions)
+                    .where(auth_sessions.c.id == session_id)
+                    .returning(auth_sessions.c.user_id)
                 )
-            )
+            ).one_or_none()
+            if row is not None and row.user_id is not None:
+                await bump_authorization_generation(
+                    db,
+                    tenant_id=DEFAULT_TENANT,
+                    target_user_ids=(row.user_id,),
+                )
 
     async def delete_for_user(self, *, user_id: uuid.UUID) -> int:
         """Purge every session of one identity (admin disable cut-off)."""
@@ -142,6 +158,12 @@ class PostgresSessionStore:
                     auth_sessions.c.user_id == user_id,
                 )
             )
+            if int(result.rowcount or 0) > 0:
+                await bump_authorization_generation(
+                    db,
+                    tenant_id=DEFAULT_TENANT,
+                    target_user_ids=(user_id,),
+                )
         return int(result.rowcount or 0)
 
 
@@ -449,50 +471,6 @@ class PostgresUserDirectory:
             )
             for row in rows
         )
-
-    async def disable_user(
-        self, *, tenant_id: str, user_id: uuid.UUID, now: float
-    ) -> bool:
-        """Disable cascade in ONE transaction: mirror flag, session
-        purge, and PAT revocation land together or not at all — a
-        half-disabled user (flag set, sessions alive) would be a
-        security hole disguised as success.
-        """
-        import datetime as dt
-
-        from inqtrix.storage.pat_orm import personal_access_tokens as pats
-
-        disabled_at = dt.datetime.fromtimestamp(now, tz=dt.timezone.utc)
-        async with tenant_session(
-            self._session_factory,
-            tenant_id=tenant_id,
-            app_role=self._app_role,
-        ) as db:
-            result = await db.execute(
-                update(users)
-                .where(
-                    users.c.id == user_id,
-                    users.c.disabled_at.is_(None),
-                )
-                .values(disabled_at=disabled_at)
-            )
-            if not result.rowcount:
-                return False
-            await db.execute(
-                delete(auth_sessions).where(
-                    auth_sessions.c.user_id == user_id,
-                )
-            )
-            await db.execute(
-                update(pats)
-                .where(
-                    pats.c.tenant_id == tenant_id,
-                    pats.c.owner_user_id == user_id,
-                    pats.c.revoked_at.is_(None),
-                )
-                .values(revoked_at=now)
-            )
-        return True
 
     async def set_instance_role(
         self, *, tenant_id: str, user_id: uuid.UUID, role: str

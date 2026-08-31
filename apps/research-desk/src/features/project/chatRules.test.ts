@@ -24,7 +24,7 @@ describe('normalizeChatRule', () => {
       category: 'instruction',
       includeInAutocomplete: true,
       linkedContextRefs: [],
-      visibility: { chat: true, editor: true },
+      visibility: { agent: false, chat: true, editor: true },
     })
   })
 })

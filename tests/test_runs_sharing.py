@@ -573,6 +573,51 @@ def test_run_stream_stops_before_replay_when_credential_is_revoked(monkeypatch):
     assert events.text == ""
 
 
+def test_json_polling_is_a_one_shot_read_not_a_stream_viewer(monkeypatch):
+    """``?format=json`` must subscribe with ``stream=False``, SSE with True.
+
+    Without the flag every ~3s poll of the 4a fallback registers a full
+    subscription: a throwaway poller thread per poll and one viewer-
+    histogram join per poll, biasing the 5b evidence gate. Killing
+    mutant: dropping ``stream=not wants_json`` from the router call.
+    """
+    from inqtrix.server.runs import RunStore
+
+    seen: list[bool] = []
+    original = RunStore.subscribe
+
+    def recording(
+        self, run_id, *, workspace_id=None, visible_to=None, stream=True
+    ):
+        seen.append(stream)
+        return original(
+            self,
+            run_id,
+            workspace_id=workspace_id,
+            visible_to=visible_to,
+            stream=stream,
+        )
+
+    monkeypatch.setattr(RunStore, "subscribe", recording)
+    client = make_sharing_client(monkeypatch)
+    with client:
+        run_id = create_completed_run(client)
+        seen.clear()
+        polled = client.get(
+            f"/v1/runs/{run_id}/events?format=json",
+            headers=user_headers(OWNER),
+        )
+        assert polled.status_code == 200
+        streamed = client.get(
+            f"/v1/runs/{run_id}/events", headers=user_headers(OWNER)
+        )
+        assert streamed.status_code == 200
+    assert seen == [False, True], (
+        "the JSON polling fallback must be a one-shot replay read; "
+        "only the SSE path is a stream viewer"
+    )
+
+
 def test_run_polling_rechecks_credential_before_returning_replay(monkeypatch):
     """The JSON fallback has the same final authorization boundary as SSE."""
     client = make_sharing_client(monkeypatch)

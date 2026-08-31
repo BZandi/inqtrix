@@ -9,8 +9,11 @@ from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Sequence
 
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, func, insert, select, true
 
+from inqtrix.storage.authorization_generation import (
+    bump_authorization_generation,
+)
 from inqtrix.storage.db import tenant_session
 from inqtrix.storage.identity_orm import users
 from inqtrix.storage.user_event_orm import user_events
@@ -61,6 +64,13 @@ async def append_user_invalidation(
     normalized_scope = scope.strip()
     if not normalized_scope:
         raise ValueError("scope must be non-empty")
+    # Same transaction as the mutation AND the event: the user-row lock
+    # makes the generation commit-ordered per user, and a rollback takes
+    # event and generation back together. Callers with multiple targets
+    # iterate in sorted order (deadlock protection).
+    await bump_authorization_generation(
+        session, tenant_id=tenant_id, target_user_ids=(target_user_id,)
+    )
     row = (
         await session.execute(
             insert(user_events)
@@ -122,7 +132,22 @@ async def append_instance_admin_invalidations(
 
 
 class PostgresUserEventStore:
-    """Tenant-scoped event replay with bounded polling and lazy retention."""
+    """Tenant-scoped event replay with bounded polling and lazy retention.
+
+    Retention is enforced lazily by the traffic that reads and writes the
+    stream, exactly as before -- but coalesced: at most one retention
+    DELETE per tenant per STORE INSTANCE per ``cleanup_interval_seconds``
+    (one instance per api process in practice; the NullPool twin built
+    for run threads never runs cleanup on Postgres, where repositories
+    write invalidations atomically inside their own transactions).
+    Uncoalesced, every ``page_after`` poll of every open browser tab paid
+    a tenant-wide DELETE (a sequential scan -- the table has no
+    ``created_at`` index) that, at a 24h retention, almost always deleted
+    nothing. A deliberately NOT built alternative was a process-owned
+    sweeper task: it would need lifespan wiring, tenant enumeration, and
+    a second code path per topology, while this store's caller-scoped
+    session already carries the right tenant and loop.
+    """
 
     def __init__(
         self,
@@ -131,15 +156,22 @@ class PostgresUserEventStore:
         app_role: str,
         retention_seconds: float = USER_EVENT_RETENTION_SECONDS,
         poll_seconds: float = 0.5,
+        cleanup_interval_seconds: float = 300.0,
     ) -> None:
         if retention_seconds <= 0:
             raise ValueError("retention_seconds must be positive")
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
+        if cleanup_interval_seconds <= 0:
+            raise ValueError("cleanup_interval_seconds must be positive")
         self._session_factory = session_factory
         self._app_role = app_role
         self._retention_seconds = float(retention_seconds)
         self._poll_seconds = float(poll_seconds)
+        self._cleanup_interval_seconds = float(cleanup_interval_seconds)
+        # Monotonic deadline per tenant. Per tenant, not per process: one
+        # busy tenant must not starve another tenant's retention.
+        self._cleanup_due: dict[str, float] = {}
 
     def _session(
         self, tenant_id: str
@@ -160,7 +192,7 @@ class PostgresUserEventStore:
         resource_id: str | None = None,
     ) -> UserInvalidation:
         async with self._session(tenant_id) as session:
-            await self._cleanup(session)
+            await self._maybe_cleanup(session, tenant_id)
             return await append_user_invalidation(
                 session,
                 tenant_id=tenant_id,
@@ -182,42 +214,57 @@ class PostgresUserEventStore:
             raise ValueError("cursor must be non-negative")
         bounded_limit = max(1, min(int(limit), USER_EVENT_REPLAY_LIMIT))
         async with self._session(tenant_id) as session:
-            await self._cleanup(session)
+            await self._maybe_cleanup(session, tenant_id)
+            # Bounds and page rows travel in ONE statement, i.e. one READ
+            # COMMITTED snapshot. As two statements, a CONCURRENT process's
+            # retention DELETE could commit in between: bounds computed
+            # before the sweep, rows after it -- a partial replay delivered
+            # as complete, with the reset check blind to the gap. (Before
+            # the coalesced retention this could not happen, because the
+            # local DELETE always ran first in the same transaction.)
             bounds = (
-                await session.execute(
-                    select(
-                        func.min(user_events.c.id),
-                        func.max(user_events.c.id),
-                    ).where(user_events.c.tenant_id == tenant_id)
+                select(
+                    func.min(user_events.c.id).label("oldest"),
+                    func.max(user_events.c.id).label("current"),
                 )
-            ).one()
-            oldest = int(bounds[0]) if bounds[0] is not None else 0
-            current = int(bounds[1]) if bounds[1] is not None else 0
+                .where(user_events.c.tenant_id == tenant_id)
+                .cte("bounds")
+            )
+            page = (
+                select(user_events)
+                .where(
+                    user_events.c.tenant_id == tenant_id,
+                    user_events.c.target_user_id == target_user_id,
+                    user_events.c.id > cursor,
+                )
+                .order_by(user_events.c.id)
+                .limit(bounded_limit + 1)
+                .subquery("page")
+            )
+            rows = (
+                await session.execute(
+                    select(bounds.c.oldest, bounds.c.current, page)
+                    .select_from(bounds.outerjoin(page, true()))
+                    .order_by(page.c.id)
+                )
+            ).all()
+            head = rows[0]
+            oldest = int(head.oldest) if head.oldest is not None else 0
+            current = int(head.current) if head.current is not None else 0
+            events = [row for row in rows if row.id is not None]
             if cursor > current and cursor != 0:
                 return UserEventPage((), current, reset_required=True)
             if cursor and oldest and cursor < oldest - 1:
                 return UserEventPage((), current, reset_required=True)
-            rows = (
-                await session.execute(
-                    select(user_events)
-                    .where(
-                        user_events.c.tenant_id == tenant_id,
-                        user_events.c.target_user_id == target_user_id,
-                        user_events.c.id > cursor,
-                    )
-                    .order_by(user_events.c.id)
-                    .limit(bounded_limit + 1)
-                )
-            ).all()
-            if len(rows) > bounded_limit:
+            if len(events) > bounded_limit:
                 return UserEventPage((), current, reset_required=True)
             return UserEventPage(
-                tuple(_event_from_row(row) for row in rows), current
+                tuple(_event_from_row(row) for row in events), current
             )
 
     async def current_cursor(self, *, tenant_id: str) -> int:
         async with self._session(tenant_id) as session:
-            await self._cleanup(session)
+            await self._maybe_cleanup(session, tenant_id)
             value = await session.scalar(
                 select(func.max(user_events.c.id)).where(
                     user_events.c.tenant_id == tenant_id
@@ -251,8 +298,31 @@ class PostgresUserEventStore:
                 min(self._poll_seconds, max(0.0, deadline - time.monotonic()))
             )
 
-    async def _cleanup(self, session: "AsyncSession") -> None:
+    async def _maybe_cleanup(
+        self, session: "AsyncSession", tenant_id: str
+    ) -> None:
+        """Run the retention DELETE at most once per tenant per interval.
+
+        The deadline moves BEFORE the DELETE runs: if the database is
+        struggling, the failure propagates to the caller exactly as it
+        always did, but the next polls do not hammer the same DELETE at a
+        struggling database -- retention waits one interval instead. The
+        unsynchronized check is deliberate: a concurrent race costs at
+        worst one extra idempotent DELETE.
+
+        The tenant filter is explicit even though the RLS policy
+        (tenant_isolation, migration 0047) already scopes the session:
+        retention must not depend on which enforcement mode the
+        connection role happens to run under.
+        """
+        now = time.monotonic()
+        if now < self._cleanup_due.get(tenant_id, 0.0):
+            return
+        self._cleanup_due[tenant_id] = now + self._cleanup_interval_seconds
         cutoff = datetime.now(UTC) - timedelta(seconds=self._retention_seconds)
         await session.execute(
-            delete(user_events).where(user_events.c.created_at < cutoff)
+            delete(user_events).where(
+                user_events.c.tenant_id == tenant_id,
+                user_events.c.created_at < cutoff,
+            )
         )

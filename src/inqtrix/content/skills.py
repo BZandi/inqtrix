@@ -25,8 +25,14 @@ if TYPE_CHECKING:
     from inqtrix.auth.memory_authority import MemoryAuthorityCoordinator
 
 SKILL_DELIVERABLES = ("", "chat", "canvas", "email", "talking_points")
-"""Output-form hint the skill pins ('' = the agent decides). ``email``
-stays a pure format hint until a sending integration exists."""
+"""Output form the skill pins ('' = the agent decides).
+
+Two dimensions in one field: ``chat`` and ``canvas`` name the SURFACE the
+result lands on and are enforced by routing; ``email`` and
+``talking_points`` name the FORM the text takes on the canvas and are
+enforced through the prompt
+(:data:`~inqtrix.agents.skills_runtime.SKILL_DELIVERABLE_FORMAT_LINES`).
+``email`` shapes the text only — there is no sending integration."""
 
 SKILL_REQUIRES_PLAN = ("always", "auto", "never")
 """Plan-gate policy (plan `3.5`): ``always`` forces the gate even in
@@ -43,6 +49,8 @@ SKILL_ALLOWED_TOOLS = (
     "run_web_research",
     "run_deep_mission",
     "write_canvas",
+    "read_editor_document",
+    "search_editor_document",
     "propose_editor_patch",
 )
 """The closed ``allowed_tools`` vocabulary (kernel tool names; the

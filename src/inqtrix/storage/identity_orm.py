@@ -112,7 +112,31 @@ users = Table(
     ),
     Index("ix_users_tenant", "tenant_id"),
 )
+
 """Local mirror of IdP-provisioned users (JIT on first login)."""
+
+
+# Commit-ordered per-user authorization counter, in its OWN table on
+# purpose: authorization reads deliberately hold ``FOR SHARE`` on the
+# users row (see ``lock_active_users``), and an in-transaction UPDATE of
+# that same row would be a share-to-exclusive upgrade — two concurrent
+# permission mutations then deadlock. The separate row makes the bump's
+# exclusive lock the clean serialization point: per-user commit order,
+# no interaction with the users-row locking discipline. SSE frame gates
+# read it as a cheap hint; it is never itself an authorization decision.
+user_authorization_generations = Table(
+    "user_authorization_generations",
+    identity_metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("user_id", UUID(as_uuid=True), primary_key=True),
+    Column(
+        "generation",
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    ),
+)
+"""Per-user authorization generation (frame-gate hint)."""
 
 
 tenant_security_state = Table(

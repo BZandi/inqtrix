@@ -66,6 +66,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     router = APIRouter()
     resolver = container.resolver
     quota_service = container.quota_service
+    lanes = container.execution_lanes
 
     @router.post("/v1/editor/suggest")
     async def editor_suggest(
@@ -137,7 +138,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 async with disconnect_watch(req) as cancel_event:
                     result, consumed = await asyncio.wait_for(
                         loop.run_in_executor(
-                            None,
+                            lanes.ai,
                             bound_thread_call(partial(
                                 run_editor_suggest,
                                 suggest_request,
@@ -270,7 +271,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 async with disconnect_watch(req) as cancel_event:
                     result, consumed = await asyncio.wait_for(
                         loop.run_in_executor(
-                            None,
+                            lanes.ai,
                             bound_thread_call(partial(
                                 run_editor_instruct,
                                 instruct_request,

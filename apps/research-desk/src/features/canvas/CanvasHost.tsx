@@ -1,11 +1,22 @@
 import {
   useLayoutEffect,
   useRef,
+  useState,
   type ComponentType,
 } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { Pin, X } from '@/components/icons'
+import { FileText, MoreVertical, Pin, X } from '@/components/icons'
+import type { LucideIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
+  OptionMenuItem,
+  optionMenuContentClassName,
+} from '@/components/ui/option-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
@@ -21,6 +32,8 @@ import {
 export type CanvasHostLabels = {
   close: string
   closeTab: string
+  /** Aria label of the tab-overflow dots menu (P9e). */
+  tabOverflow: string
   follow: string
   pinTab: string
   pinned: string
@@ -78,6 +91,21 @@ export function CanvasHost({
   const transitionKey = canvasTransitionKey(active)
   const scrollPositionsRef = useRef(new Map<string, number>())
   const activePaneRef = useRef<HTMLDivElement>(null)
+  // P9e: tabs that no longer fit stay reachable through the dots menu
+  // (the VS Code open-editors pattern) — detected by real overflow, so
+  // the menu appears exactly when captions start to vanish.
+  const tabStripRef = useRef<HTMLDivElement>(null)
+  const [tabsOverflow, setTabsOverflow] = useState(false)
+  useLayoutEffect(() => {
+    const node = tabStripRef.current
+    if (!node) return
+    const measure = () =>
+      setTabsOverflow(node.scrollWidth > node.clientWidth + 1)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [canvas.tabs])
 
   useLayoutEffect(() => {
     const viewport = activePaneRef.current?.querySelector<HTMLElement>(
@@ -98,6 +126,7 @@ export function CanvasHost({
       <header className="z-10 flex inqtrix-panel-header shrink-0 items-center gap-2 border-b border-border bg-background px-3">
         <div
           className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          ref={tabStripRef}
           role="tablist"
         >
           {canvas.tabs.map((tab) => (
@@ -115,6 +144,52 @@ export function CanvasHost({
           ))}
           {addMenu}
         </div>
+
+        {tabsOverflow && (
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label={labels.tabOverflow}
+                className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <MoreVertical className="size-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              className={cn(optionMenuContentClassName, 'w-72')}
+              side="bottom"
+              sideOffset={6}
+            >
+              <div className="py-1">
+                {canvas.tabs.map((tab) => (
+                  <div className="group/tabrow relative" key={tab.key}>
+                    <OptionMenuItem
+                      active={tab.key === canvas.activeTabId}
+                      icon={(iconFor?.(tab.descriptor) ?? FileText) as LucideIcon}
+                      label={labelFor(tab.descriptor)}
+                      onSelect={() => onActivateTab(tab.key)}
+                    />
+                    <button
+                      aria-label={labels.closeTab}
+                      className="absolute right-1.5 top-1/2 grid size-5 -translate-y-1/2 place-items-center rounded text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/tabrow:opacity-100"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onCloseTab(tab.key)
+                      }}
+                      type="button"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
 
         <button
           aria-pressed={canvas.pinned}

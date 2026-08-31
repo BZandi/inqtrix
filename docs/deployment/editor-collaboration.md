@@ -14,8 +14,12 @@ guest access.
 Collaboration is disabled by default. Enabling it requires all of the
 following:
 
-- `INQTRIX_STORAGE_BACKEND=postgres` with the current migration head
-  (`0052_editor_review`) applied;
+- `INQTRIX_STORAGE_BACKEND=postgres` migrated to the head this source tree
+  ships. The head moves with the tree, so it is named in exactly one place —
+  `SCHEMA_HEAD_REVISION` in `src/inqtrix/storage/migration_contract.py` — and
+  readiness compares the installed revision against it. A number written into
+  prose here goes stale the moment a migration lands, which is what happened
+  to the one that stood here before;
 - cookie-session authentication: `INQTRIX_AUTH_MODE=local`, `ldap`, or `oidc`;
 - the canonical PostgreSQL session/user stores used by those auth modes;
 - the private Node HTTP and WebSocket URLs;

@@ -10,15 +10,18 @@ import type {
   AgentRunRecord,
   AgentStepEntry,
   AgentTaskLiveState,
+  AgentTouchedArtifact,
 } from './model'
 import {
   agentPhaseStation,
+  isGateAgentRun,
   MAX_STEP_LOG,
   TERMINAL_AGENT_TASK_STATUSES,
 } from './model'
 import type {
   ResearchRunEvent,
   ResearchRunSnapshot,
+  ResearchRunStatus,
 } from '@/features/researchRuns/types'
 import { asFiniteNumber, asString } from '@/lib/coerce'
 import { isoFromUnixSeconds, unixSecondsFromIso } from '@/lib/time'
@@ -89,6 +92,7 @@ function monotonicTaskStatus(
 export function applyAgentRunEvent(
   record: AgentRunRecord,
   event: ResearchRunEvent,
+  options?: { arrivedLive: boolean },
 ): AgentRunRecord {
   // Replayed/duplicate frames must be no-ops (reconnects replay history).
   if (event.sequence <= record.lastSequence) return record
@@ -181,12 +185,47 @@ export function applyAgentRunEvent(
       return next
     }
 
-    case 'inqtrix.agent.approval.requested':
+    case 'inqtrix.agent.approval.requested': {
       next.approvalsStale = true
+      // The transcript remembers WHAT was asked, not only the decision —
+      // history shows the gate after it settled. Requests can re-emit
+      // across segments, so the marker dedupes on its subject id.
+      const approvalId = stringField(data, 'approval_id')
+      if (
+        approvalId
+        && !record.stepLog.some(
+          (item) =>
+            item.kind === 'gate_requested' && item.approvalId === approvalId,
+        )
+      ) {
+        appendStep(next, {
+          approvalId,
+          detail: stringField(data, 'kind') || undefined,
+          kind: 'gate_requested',
+        })
+      }
       return next
+    }
     case 'inqtrix.agent.approval.decided': {
       next.approvalsStale = true
       const approvalId = stringField(data, 'approval_id')
+      // Settle the LOCAL row immediately: a decision made elsewhere
+      // (second tab, server auto-decide) otherwise keeps the gate card
+      // mounted for the whole refetch round trip — on a degraded
+      // transport that read as a stuck gate (F-P0-GATE-STALE). The
+      // refetched rows stay the truth; the merge never regresses.
+      const decidedStatus = stringField(data, 'status')
+      if (
+        approvalId
+        && (decidedStatus === 'approved'
+          || decidedStatus === 'rejected'
+          || decidedStatus === 'edited')
+      ) {
+        next.approvals = record.approvals.map((item) =>
+          item.approvalId === approvalId && item.status === 'pending'
+            ? { ...item, decidedAt: event.created_at, status: decidedStatus }
+            : item)
+      }
       const approvalKind =
         stringField(data, 'kind')
         || stringField(data, 'approval_kind')
@@ -205,9 +244,24 @@ export function applyAgentRunEvent(
       return next
     }
 
-    case 'inqtrix.agent.clarification.requested':
+    case 'inqtrix.agent.clarification.requested': {
       next.clarificationsStale = true
+      const clarificationId = stringField(data, 'clarification_id')
+      if (
+        clarificationId
+        && !record.stepLog.some(
+          (item) =>
+            item.kind === 'gate_requested'
+            && item.clarificationId === clarificationId,
+        )
+      ) {
+        appendStep(next, {
+          clarificationId,
+          kind: 'gate_requested',
+        })
+      }
       return next
+    }
     case 'inqtrix.node.model_resolution': {
       // R5-light: only the ANSWER-shaped nodes drive the chip — the
       // resolution of intake/critic/... is provenance noise here.
@@ -230,9 +284,17 @@ export function applyAgentRunEvent(
     }
     case 'inqtrix.agent.clarification.answered': {
       next.clarificationsStale = true
+      const clarificationId = stringField(data, 'clarification_id')
+      // Same immediate local settle as approval.decided.
+      if (clarificationId) {
+        next.clarifications = record.clarifications.map((item) =>
+          item.clarificationId === clarificationId
+          && item.status === 'pending'
+            ? { ...item, answeredAt: event.created_at, status: 'answered' }
+            : item)
+      }
       appendStep(next, {
-        clarificationId:
-          stringField(data, 'clarification_id') || undefined,
+        clarificationId: clarificationId || undefined,
         kind: 'clarification_answered',
       })
       return next
@@ -391,6 +453,29 @@ export function applyAgentRunEvent(
       const metrics = recordField(data, 'metrics') ?? previousChild?.metrics
       const attempt = numberField(data, 'attempt') ?? previousChild?.attempt
       const updatedAt = numberField(data, 'updated_at') ?? event.created_at
+      // Which unit of work a delegated MISSION is on. The status comes
+      // from the EVENT, not from the payload's carried-forward value: a
+      // task that just started must not inherit the previous task's
+      // `completed`, which would freeze the line on a finished step.
+      // Which units of work a delegated MISSION has open. A mission
+      // starts its whole parallel wave in ONE burst — five tasks in the
+      // same millisecond, in the run that motivated this — so a single
+      // "current ordinal" named one of five and read as if the other
+      // four did not exist. The SET is the honest answer.
+      const childEvent = stringField(data, 'event_type')
+      const ordinal = numberField(data, 'ordinal')
+      const openTasks = nextOpenChildTasks(
+        previousChild?.openTasks,
+        childEvent,
+        ordinal,
+      )
+      const taskToolKind = stringField(data, 'tool_kind') || previousChild?.taskToolKind
+      // A grounded knowledge answer is the child's unit of visible
+      // progress: one arrives every 20-60 s during execution. Counting
+      // them turns "the same line for twenty minutes" into a number
+      // that moves — the difference between "working" and "hung".
+      const checkedAnswers = (previousChild?.checkedAnswers ?? 0)
+        + (childEvent === 'inqtrix.knowledge.grounding.checked' ? 1 : 0)
       next.children = {
         ...record.children,
         [childRunId]: {
@@ -402,10 +487,34 @@ export function applyAgentRunEvent(
           ...(message ? { message } : {}),
           ...(metrics ? { metrics } : {}),
           ...(attempt !== undefined ? { attempt } : {}),
+          ...(openTasks ? { openTasks } : {}),
+          ...(taskToolKind ? { taskToolKind } : {}),
+          ...(checkedAnswers > 0 ? { checkedAnswers } : {}),
           ...(error ? { error } : {}),
           ...(errorCode ? { errorCode } : {}),
           updatedAt,
         },
+      }
+      // A child parking on a human decision blocks the whole delegation,
+      // and its approval/clarification rows live under the CHILD run id —
+      // flag them for the parent's control loop so the composer tray can
+      // offer the gate (F-P0-CHILDGATE). Only the transition flags: while
+      // the child stays parked, further progress events must not refetch.
+      if (
+        runStatus !== undefined
+        && isGateAgentRun(runStatus as ResearchRunStatus)
+        && previousChild?.runStatus !== runStatus
+      ) {
+        const gates = record.childGates[childRunId]
+        next.childGates = {
+          ...record.childGates,
+          [childRunId]: {
+            approvals: gates?.approvals ?? [],
+            clarifications: gates?.clarifications ?? [],
+            ...(gates?.question ? { question: gates.question } : {}),
+            stale: true,
+          },
+        }
       }
       if (taskId) {
         const previousTask = record.taskStates[taskId]
@@ -464,6 +573,12 @@ export function applyAgentRunEvent(
           publicationId,
           publicationOffset: 0,
           publicationNeedsReconcile: true,
+          // The labels the finished answer cites, known to the server
+          // before the first delta. With them the streamed text can
+          // render its citations immediately; without them the whole
+          // body was rewritten the moment the answer settled, which
+          // reads as the message being re-inserted.
+          publicationRefLabels: stringListField(data, 'reference_labels'),
         },
       }
       next.artifactOrder = record.artifactOrder.includes(artifactId)
@@ -552,8 +667,94 @@ export function applyAgentRunEvent(
       // edit_conflict rides the same refetch: the agent preserved the
       // user's text and appended its update, so the canvas reloads the
       // reconciled memo instead of the user's stale local copy.
+      // Document writes also land as the turn's file chip (P4). The
+      // conflict marker is excluded — its resolving write emits its own
+      // updated event; a user PUT carries no kind and never chips.
+      if (event.type !== 'inqtrix.agent.artifact.edit_conflict') {
+        const touchedKind = stringField(data, 'kind')
+        const touchedId = stringField(data, 'artifact_id')
+        if (touchedId && (touchedKind === 'memo' || touchedKind === 'deliverable')) {
+          const touched = [...record.touchedArtifacts]
+          const existing = touched.findIndex(
+            (item) => item.artifactId === touchedId,
+          )
+          const previous = existing === -1 ? undefined : touched[existing]
+          const touchedTitle = stringField(data, 'title') || previous?.title
+          const touchedArrived = previous?.arrivedLive ?? options?.arrivedLive
+          const touchedRevision =
+            numberField(data, 'revision') ?? previous?.revision ?? 1
+          // The turn diff's `from` side is the revision BEFORE the
+          // run's FIRST touch; revisions increment by one, so the
+          // event's from_revision (or revision-1 for pre-P9 rows) is
+          // exact on the first touch and sticky afterwards.
+          const touchedFrom =
+            previous?.fromRevision
+            ?? numberField(data, 'from_revision')
+            ?? touchedRevision - 1
+          // Accumulate the server-counted delta; one number-less
+          // contributor makes the whole sum honestly unknown (P9).
+          const eventAdded = numberField(data, 'lines_added')
+          const eventRemoved = numberField(data, 'lines_removed')
+          const summable =
+            eventAdded !== undefined
+            && eventRemoved !== undefined
+            && (previous === undefined
+              || (previous.linesAdded !== undefined
+                && previous.linesRemoved !== undefined))
+          const entry: AgentTouchedArtifact = {
+            artifactId: touchedId,
+            kind: touchedKind,
+            revision: touchedRevision,
+            fromRevision: touchedFrom,
+            created:
+              previous?.created
+              ?? (event.type === 'inqtrix.agent.artifact.created'),
+            at: event.created_at,
+            ...(summable
+              ? {
+                linesAdded: (previous?.linesAdded ?? 0) + eventAdded,
+                linesRemoved: (previous?.linesRemoved ?? 0) + eventRemoved,
+              }
+              : {}),
+            ...(touchedTitle !== undefined ? { title: touchedTitle } : {}),
+            ...(touchedArrived !== undefined
+              ? { arrivedLive: touchedArrived }
+              : {}),
+          }
+          if (existing === -1) touched.push(entry)
+          else touched[existing] = entry
+          next.touchedArtifacts = touched
+        }
+      }
       next.artifactsStale = true
       return next
+
+    case 'inqtrix.agent.canvas_context.attached': {
+      // P9d: the durable record of the submission's canvas comments —
+      // rebuilt identically on live delivery and replay.
+      const contextArtifactId = stringField(data, 'artifact_id')
+      if (!contextArtifactId) return next
+      const rawComments = Array.isArray(data.comments) ? data.comments : []
+      next.canvasContextMeta = {
+        artifactId: contextArtifactId,
+        revision: numberField(data, 'revision') ?? 1,
+        comments: rawComments.flatMap((item) => {
+          if (typeof item !== 'object' || item === null) return []
+          const record = item as Record<string, unknown>
+          return [
+            {
+              comment:
+                typeof record.comment === 'string' ? record.comment : '',
+              quotePreview:
+                typeof record.quote_preview === 'string'
+                  ? record.quote_preview
+                  : '',
+            },
+          ]
+        }),
+      }
+      return next
+    }
 
     case 'inqtrix.agent.patch.proposed': {
       const patchId = stringField(data, 'patch_id')
@@ -705,8 +906,9 @@ export function applyAgentRunEvent(
       // Kernel ReAct-loop tool events ride the ONE activity-step
       // protocol: started appends a running row,
       // finished settles THAT row via the shared activityKey upsert.
-      // write_todos has its own todo channel; ask_user parks the run
-      // (clarification rows are the story there).
+      // write_todos travels as todo.updated -> run.todos (the checklist
+      // block), so its tool row would duplicate the list; ask_user
+      // parks the run (clarification rows are the story there).
       const tool = stringField(data, 'tool')
       const started = event.type === 'inqtrix.agent.tool.started'
       const callId = stringField(data, 'invocation_id')
@@ -755,6 +957,77 @@ export function applyAgentRunEvent(
       return next
     }
 
+    case 'inqtrix.agent.todo.updated': {
+      // The kernel's task list replaces itself wholesale per event; the
+      // checklist block renders run.todos, so no step row is appended.
+      const todos = Array.isArray(data.todos) ? data.todos : []
+      next.todos = todos
+        .filter((item): item is Record<string, unknown> =>
+          typeof item === 'object' && item !== null)
+        .map((item) => ({
+          content: asString(item.content) ?? '',
+          status: asString(item.status) ?? '',
+        }))
+        .filter((item) => item.content !== '')
+      // A todo list is a REPORT, valid as of when the model wrote it —
+      // never a live signal. Keeping its timestamp lets the surface say
+      // so instead of presenting a stale entry as the present.
+      next.todosAt = event.created_at
+      return next
+    }
+
+    case 'inqtrix.agent.tool_limit.reached': {
+      // The one silent hard stop: the backend rejects the batch without
+      // any narration — without this notice the run just "ends".
+      appendStep(next, {
+        current: numberField(data, 'attempted'),
+        kind: 'notice',
+        noticeCode: 'tool_limit',
+        total: numberField(data, 'limit'),
+      })
+      return next
+    }
+
+    case 'inqtrix.agent.quick_web.fallback': {
+      appendStep(next, {
+        detail: stringField(data, 'stage') || undefined,
+        kind: 'notice',
+        noticeCode: 'quick_web_fallback',
+      })
+      return next
+    }
+
+    case 'inqtrix.agent.citation.validation': {
+      const labels = Array.isArray(data.unknown_labels)
+        ? data.unknown_labels.map((item) => asString(item) ?? '').filter(Boolean)
+        : []
+      appendStep(next, {
+        detail: labels.join(', ') || undefined,
+        kind: 'notice',
+        noticeCode: 'citation_validation',
+        status: stringField(data, 'status') || undefined,
+      })
+      return next
+    }
+
+    case 'inqtrix.agent.sufficiency.judged': {
+      // Only the NEGATIVE verdict is user-relevant (the gaps steer the
+      // next searches); a covered verdict is followed by the answer
+      // itself, and error markers are internal.
+      const coverage = stringField(data, 'coverage')
+      const nudged = data.nudge === true
+      if (!nudged || !coverage || coverage === 'covered') return next
+      const missing = Array.isArray(data.missing)
+        ? data.missing.map((item) => asString(item) ?? '').filter(Boolean)
+        : []
+      appendStep(next, {
+        detail: missing.join('; ') || undefined,
+        kind: 'notice',
+        noticeCode: 'sufficiency_gap',
+      })
+      return next
+    }
+
     case 'inqtrix.agent.narration': {
       const text = stringField(data, 'text')
       if (text) {
@@ -783,6 +1056,9 @@ export function applyAgentRunEvent(
     target: AgentRunRecord,
     entry: Omit<AgentStepEntry, 'at' | 'seq'>,
   ): void {
+    const arrival = options
+      ? { arrivedLive: options.arrivedLive }
+      : undefined
     const log =
       target.stepLog === record.stepLog
         ? [...record.stepLog]
@@ -797,6 +1073,7 @@ export function applyAgentRunEvent(
         log[existing] = {
           ...log[existing],
           ...entry,
+          ...arrival,
           at: event.created_at,
           seq: log[existing].seq,
         }
@@ -804,7 +1081,12 @@ export function applyAgentRunEvent(
         return
       }
     }
-    log.push({ ...entry, at: event.created_at, seq: event.sequence })
+    log.push({
+      ...entry,
+      ...arrival,
+      at: event.created_at,
+      seq: event.sequence,
+    })
     target.stepLog =
       log.length > MAX_STEP_LOG ? log.slice(log.length - MAX_STEP_LOG) : log
   }
@@ -846,6 +1128,7 @@ export function applyAgentRunEvent(
     log[existing] = {
       ...log[existing],
       ...entry,
+      ...(options ? { arrivedLive: options.arrivedLive } : undefined),
       detail: entry.detail ?? log[existing].detail,
       label: entry.label ?? log[existing].label,
       activityOperation:
@@ -920,6 +1203,43 @@ function numberField(
   key: string,
 ): number | undefined {
   return asFiniteNumber(data[key])
+}
+
+/**
+ * The ordinals a delegated mission currently has open.
+ *
+ * A mission starts its whole parallel wave in one burst, so "the current
+ * task" is not a single number. Keeping the SET means the surface can
+ * say how many run at once instead of naming one of five as if it were
+ * the only one. A `finished` event closes exactly its own ordinal, so a
+ * straggler stays visible after its siblings settle — which is the case
+ * a reader most needs to see.
+ */
+export function nextOpenChildTasks(
+  current: readonly number[] | undefined,
+  eventType: string,
+  ordinal: number | undefined,
+): number[] | undefined {
+  if (ordinal === undefined) return current ? [...current] : undefined
+  const open = new Set(current ?? [])
+  if (eventType === 'inqtrix.agent.task.started') open.add(ordinal)
+  else if (eventType === 'inqtrix.agent.task.finished') open.delete(ordinal)
+  else return current ? [...current] : undefined
+  return [...open].sort((left, right) => left - right)
+}
+
+/** A list of non-empty strings from an event payload, else undefined. */
+function stringListField(
+  data: Record<string, unknown>,
+  key: string,
+): string[] | undefined {
+  const value = data[key]
+  if (!Array.isArray(value)) return undefined
+  const items = value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter(Boolean)
+  return items.length > 0 ? items : undefined
 }
 
 function recordField(

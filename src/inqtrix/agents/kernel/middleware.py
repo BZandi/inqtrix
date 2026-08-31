@@ -450,6 +450,62 @@ class KernelToolBudgetMiddleware(AgentMiddleware):
 
 
 
+ACTIVITY_EVENT = "inqtrix.agent.activity"
+MODEL_TURN_OPERATION = "agent.model.turn"
+MODEL_TURN_ACTIVITY_ID = "model-turn"
+
+
+class KernelModelTurnMiddleware(AgentMiddleware):
+    """Make the model boundary visible as ONE upserting activity row.
+
+    The kernel's longest silent stretches are model turns (deep reasoning
+    can run minutes without any event). ``wrap_model_call`` runs INSIDE
+    the model node — it adds no graph node, so the pinned superstep price
+    (``test_supersteps_per_tool_turn_is_pinned``) stays untouched; a
+    ``before_model``/``after_model`` hook would each cost a superstep.
+    The constant ``activity_id`` makes every turn upsert the SAME desk
+    row (started -> completed) instead of stacking one row per turn.
+    """
+
+    def wrap_model_call(self, request: Any, handler: Any) -> Any:
+        from inqtrix.agents.kernel.deps import kernel_deps
+
+        try:
+            deps = kernel_deps()
+        except RuntimeError:
+            deps = None
+
+        def emit(status: str) -> None:
+            if deps is None:
+                return
+            deps.emit(
+                ACTIVITY_EVENT,
+                {
+                    "activity_id": MODEL_TURN_ACTIVITY_ID,
+                    "kind": "working",
+                    "scope": "run",
+                    "phase": "execution",
+                    "operation": MODEL_TURN_OPERATION,
+                    "status": status,
+                },
+            )
+
+        emit("started")
+        try:
+            response = handler(request)
+        except Exception:
+            emit("failed")
+            raise
+        emit("completed")
+        return response
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        raise RuntimeError(
+            "KernelModelTurnMiddleware ist sync-only — der Kernel laeuft "
+            "in einem synchronen Worker-Segment."
+        )
+
+
 CONTEXT_COMPACTED_EVENT = "inqtrix.agent.context.compacted"
 
 KERNEL_SUMMARY_PROMPT = (

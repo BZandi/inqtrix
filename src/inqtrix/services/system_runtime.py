@@ -29,6 +29,20 @@ class RuntimeProbeResults:
     queue_depth: int | None = None
 
 
+def _checkpointer_pool_size(container: Any) -> int | None:
+    """The agent checkpointer's effective pool ceiling, or None.
+
+    Reads the handle (like the startup budget line), never the raw
+    setting: a disabled agent, a missing extra, or the volatile escape
+    has no psycopg pool, and publishing the configured knob there would
+    name a pool that cannot exist.
+    """
+    handle = getattr(container, "agent_checkpointer", None)
+    if handle is None or not getattr(handle, "durable", False):
+        return None
+    return int(handle.max_connections)
+
+
 async def system_runtime_payload_checked(
     container: "AppContainer",
 ) -> dict[str, Any]:
@@ -83,6 +97,22 @@ def system_runtime_payload(
     return {
         "api": {
             "openapi": settings.server.enable_openapi,
+            # Effective values, straight from the settings this process
+            # runs with. Deliberately HERE and not in /v1/capabilities:
+            # that endpoint is unauthenticated by design, and capacity
+            # ceilings have no browser consumer -- unlike the timeouts
+            # block, which the client needs for its own AbortController.
+            # getattr-defensive like _observability_payload below, and for
+            # the same documented reason: the capabilities route derives
+            # its feature flags from THIS payload, and capability tests
+            # pass settings doubles without these fields. None here never
+            # reaches production -- real Settings always carry the fields.
+            "chat_max_concurrent": getattr(
+                settings.server, "max_concurrent", None
+            ),
+            "stream_reader_workers": getattr(
+                settings.server, "stream_reader_workers", None
+            ),
         },
         "files": {
             "blob_storage": _blob_storage_label(object_store),
@@ -112,6 +142,30 @@ def system_runtime_payload(
                 "postgres" if settings.storage.backend == "postgres" else "memory"
             ),
             "worker_dispatch": queue_backend == "valkey",
+            # Admission limits of THIS api process. The "execution" field
+            # above says which value governs how runs actually execute:
+            # "in_process" means these are also the execution width, while
+            # "worker_dispatch" means execution belongs to the worker
+            # fleet, whose total capacity this process does not know and
+            # therefore does not claim.
+            "admission_max_concurrent": (
+                getattr(settings.server, "run_max_concurrent", None)
+                or getattr(settings.server, "max_concurrent", None)
+            ),
+            "queue_max_size": getattr(
+                settings.server, "run_queue_max_size", None
+            ),
+        },
+        "agents": {
+            # EFFECTIVE, not configured: the value the psycopg pool was
+            # actually built with, read from the HANDLE exactly like the
+            # startup budget line -- one source, three displays
+            # (INQTRIX_AGENT_CHECKPOINTER_POOL_SIZE). None when no
+            # durable checkpointer exists (agent disabled, extra
+            # missing, volatile mode): the panel row hides instead of
+            # naming a pool that can never open. getattr-defensive for
+            # capability-test doubles, degrading visibly to None.
+            "checkpointer_pool_size": _checkpointer_pool_size(container),
         },
         "storage": {
             "backend": settings.storage.backend,
@@ -403,16 +457,17 @@ async def readiness_payload(
     timeouts; memory backends stay zero-infrastructure.
     """
     (
-        database_ok,
+        database_state,
         queue_result,
         vector_ok,
         object_store_ok,
     ) = await asyncio.gather(
-        _probe_database(container),
+        _probe_database_state(container),
         _probe_queue(container, include_info=False),
         _probe_vector_store_ready(container),
         _probe_object_store_ready(container),
     )
+    database_ok = database_state in ("ok", "skipped")
     # _probe_queue returns (available, info); readiness consumes ONLY the
     # bool — treating the tuple itself as truth would report a dead
     # queue as ready.
@@ -437,7 +492,15 @@ async def readiness_payload(
             skipped=getattr(container, "file_service", None) is None,
         ),
     }
-    return (200 if ready else 503), {"status": status, "checks": checks}
+    return (200 if ready else 503), {
+        "status": status,
+        "checks": checks,
+        # Additive detail for the product gate: ``checks.database`` keeps
+        # its coarse ok/unavailable/skipped labels for orchestrators,
+        # while this field says WHETHER an unavailable reading was a
+        # confirmed contract violation or mere unreachability.
+        "database_contract": database_state,
+    }
 
 
 def _check_label(ok: bool, *, skipped: bool) -> str:
@@ -446,33 +509,91 @@ def _check_label(ok: bool, *, skipped: bool) -> str:
     return "ok" if ok else "unavailable"
 
 
-async def _probe_database(container: "AppContainer") -> bool:
+async def _probe_database_state(container: "AppContainer") -> str:
+    """Three-way database verdict: ``ok`` | ``unavailable`` | ``violation``.
+
+    The distinction is load-bearing for the product gate: a probe that
+    cannot REACH the database within its bound proves nothing about the
+    schema/role contract, while a probe that connected and found a wrong
+    contract is a confirmed break. Collapsing both into one bool once
+    turned a single slow 2s probe under a load spike into a
+    full-healthcheck-interval outage for every product route. Taxonomy
+    matches the worker claim guard: unavailability pauses, only a
+    confirmed (or unclassifiable) failure latches.
+    """
     settings = container.settings
     if settings.storage.backend != "postgres":
-        return True
+        return "skipped"
     session_factory = container.session_factory
     if session_factory is None:
-        # postgres declared but no factory wired — a composition bug
-        # that must read as not-ready, never as silently green.
+        # postgres declared but no factory wired — a composition bug,
+        # permanent for this process, never a transient outage.
         log.warning(
             "Readiness: Storage-Backend postgres ohne Session-Factory — "
-            "Datenbank-Probe meldet unavailable."
+            "Datenbank-Probe meldet Kontraktbruch."
         )
-        return False
+        return "violation"
+    from inqtrix.storage.runtime_contract import (
+        DatabaseRuntimeContractError,
+        DatabaseRuntimeUnavailableError,
+        _is_database_runtime_unavailable,
+        verify_database_runtime_contract,
+    )
 
-    async def probe() -> bool:
-        from inqtrix.storage.runtime_contract import (
-            verify_database_runtime_contract,
+    try:
+        await asyncio.wait_for(
+            verify_database_runtime_contract(
+                session_factory,
+                app_role=settings.storage.app_role,
+                login_policy=settings.storage.runtime_login_policy,
+            ),
+            timeout=_RUNTIME_PROBE_TIMEOUT_SECONDS,
         )
-
-        await verify_database_runtime_contract(
-            session_factory,
-            app_role=settings.storage.app_role,
-            login_policy=settings.storage.runtime_login_policy,
+    except TimeoutError:
+        log.warning(
+            "Runtime availability probe failed for database: timed out "
+            "after %.1fs; the probed backend logs its own detailed probe "
+            "warning when it fails before this bound.",
+            _RUNTIME_PROBE_TIMEOUT_SECONDS,
         )
-        return True
+        return "unavailable"
+    except DatabaseRuntimeUnavailableError as exc:
+        log.warning(
+            "Runtime availability probe failed for database "
+            "(transient, error_type=%s)",
+            type(exc.__cause__ or exc).__name__,
+        )
+        return "unavailable"
+    except DatabaseRuntimeContractError as exc:
+        # error_type only: this module's log calls must never render
+        # exception text (it can carry DSNs); the contract checker's own
+        # output names the violated invariant.
+        log.error(
+            "Datenbank-Laufzeitvertrag verletzt (error_type=%s).",
+            type(exc).__name__,
+        )
+        return "violation"
+    except Exception as exc:  # noqa: BLE001 - classified below, never silent.
+        if _is_database_runtime_unavailable(exc):
+            log.warning(
+                "Runtime availability probe failed for database "
+                "(transient, error_type=%s)",
+                type(exc).__name__,
+            )
+            return "unavailable"
+        # Unclassifiable failures latch like the worker guard: integrity
+        # over availability when the probe itself cannot say why it died.
+        log.error(
+            "Datenbank-Sonde mit unklassifizierbarem Fehler "
+            "(error_type=%s) — als Kontraktbruch behandelt.",
+            type(exc).__name__,
+        )
+        return "violation"
+    return "ok"
 
-    return await _bounded_probe("database", probe)
+
+async def _probe_database(container: "AppContainer") -> bool:
+    return await _probe_database_state(container) in {"ok", "skipped"}
 
 
 async def database_runtime_contract_ready(container: "AppContainer") -> bool:

@@ -20,6 +20,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
+from inqtrix.agents.report_requirement import (
+    REPORT_GUIDANCE_MAX_CHARS,
+    REPORT_RULE_IDS_MAX,
+)
 from inqtrix.agents.control_ports import (
     ApprovalAlreadyDecided,
     ApprovalNotFound,
@@ -330,12 +334,27 @@ def build_router(container: "AppContainer") -> APIRouter:
         report_guidance = body.get("report_guidance")
         if report_guidance is not None and (
             not isinstance(report_guidance, str)
-            or len(report_guidance) > 2000
+            or len(report_guidance) > REPORT_GUIDANCE_MAX_CHARS
         ):
             return error_response(
                 400,
-                "report_guidance muss ein String mit maximal 2000 "
-                "Zeichen sein.",
+                "report_guidance muss ein String mit maximal "
+                f"{REPORT_GUIDANCE_MAX_CHARS} Zeichen sein.",
+                "invalid_request_error",
+            )
+        report_rule_ids = body.get("report_rule_ids")
+        if report_rule_ids is not None and (
+            not isinstance(report_rule_ids, list)
+            or not all(
+                isinstance(item, str) and item.strip()
+                for item in report_rule_ids
+            )
+            or len(report_rule_ids) > REPORT_RULE_IDS_MAX
+        ):
+            return error_response(
+                400,
+                "report_rule_ids muss eine Liste von hoechstens "
+                f"{REPORT_RULE_IDS_MAX} Regel-Ids sein.",
                 "invalid_request_error",
             )
         plan_body = body.get("plan")
@@ -348,6 +367,13 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(
                 400, "actions muss eine Liste sein.", "invalid_request_error"
             )
+        approval_scope = body.get("approval_scope")
+        if approval_scope is not None and not isinstance(approval_scope, str):
+            return error_response(
+                400,
+                "approval_scope muss ein String sein.",
+                "invalid_request_error",
+            )
         try:
             approval, summary, _replayed = await service.decide_approval(
                 run_id=run_id,
@@ -355,10 +381,16 @@ def build_router(container: "AppContainer") -> APIRouter:
                 decision=decision,
                 plan_body=plan_body,
                 note=note or "",
-                report_guidance=(report_guidance or "").strip(),
+                report_guidance=(
+                    None
+                    if report_guidance is None
+                    else report_guidance.strip()
+                ),
+                report_rule_ids=report_rule_ids,
                 principal=principal,
                 visible_to=visible_to,
                 actions_body=actions_body,
+                approval_scope=(approval_scope or "").strip(),
             )
         except AgentControlValidationError as exc:
             return error_response(
@@ -622,6 +654,68 @@ def build_router(container: "AppContainer") -> APIRouter:
             "updated_by": artifact.updated_by,
         }
 
+    @router.patch("/v1/runs/{run_id}/artifacts/{artifact_id}")
+    async def rename_run_artifact(
+        run_id: str,
+        artifact_id: str,
+        req: Request,
+        principal: Principal = Depends(principal_dep),
+        visible_to: UserContext | None = Depends(user_context_dep),
+    ):
+        """Metadata-only rename (P9, K3): title changes, revision does
+        not — the content history never records a rename."""
+        resolved = await _resolve_run(
+            req, run_id, visible_to, mutation=True
+        )
+        if isinstance(resolved, JSONResponse):
+            return resolved
+        body = await _json_object(req)
+        if body is None:
+            return error_response(
+                400, "Ungueltiger JSON-Body", "invalid_request_error"
+            )
+        title = body.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return error_response(
+                400,
+                "title ist erforderlich (nicht leerer String).",
+                "invalid_request_error",
+            )
+        if len(title.strip()) > 200:
+            # Visible bound, never a silent cut (rule 9b).
+            return error_response(
+                400,
+                "title darf hoechstens 200 Zeichen lang sein "
+                f"(uebergeben: {len(title.strip())}).",
+                "invalid_request_error",
+            )
+        try:
+            artifact = await service.rename_artifact(
+                run_id=run_id,
+                artifact_id=artifact_id,
+                title=title.strip(),
+                principal=principal,
+                visible_to=visible_to,
+                workspace_id=resolved.get("workspace_id"),
+            )
+        except RunNotFound:
+            return error_response(404, *_RUN_NOT_FOUND)
+        except ArtifactNotFound:
+            return error_response(404, "Artefakt nicht gefunden", "not_found")
+        except ArtifactLocked:
+            return error_response(
+                409,
+                "Der Agent schreibt gerade in dieses Artefakt.",
+                "conflict",
+                locked_by="agent",
+            )
+        return {
+            "id": artifact.artifact_id,
+            "revision": artifact.revision,
+            "title": artifact.title,
+            "updated_by": artifact.updated_by,
+        }
+
     @router.post(
         "/v1/runs/{run_id}/artifacts/{artifact_id}/export", status_code=201
     )
@@ -754,6 +848,7 @@ def _approval_payload(approval: ApprovalRecord) -> dict[str, Any]:
         "subject_id": approval.subject_id,
         "payload": dict(approval.payload),
         "decision": approval.decision,
+        "decision_payload": dict(approval.decision_payload),
         "note": approval.note,
         "decided_by_user_id": approval.decided_by_user_id,
         "created_at": approval.created_at,
@@ -779,6 +874,11 @@ def _clarification_payload(clarification: ClarificationRecord) -> dict[str, Any]
         "created_at": clarification.created_at,
         "answered_at": clarification.answered_at,
     }
+
+
+def artifact_meta_payload(artifact: "ArtifactRecord") -> dict[str, Any]:
+    """Shared meta row (run routes + the session artifacts route)."""
+    return _artifact_meta_payload(artifact)
 
 
 def _artifact_meta_payload(artifact: ArtifactRecord) -> dict[str, Any]:

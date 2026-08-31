@@ -792,3 +792,40 @@ def test_file_lifecycle_cleanup_removes_blob_without_registry_row(
             spooled.path.unlink(missing_ok=True)
 
     asyncio.run(scenario())
+
+
+def test_reconciler_stops_on_schema_head_mismatch_instead_of_retrying():
+    """A fence hit is fatal for THIS process's reconciler, not a warning.
+
+    The expected schema head is a code constant, so a mismatch can never
+    heal for the running process; retrying every pass would downgrade a
+    fatal state to warning spam (the no-silent-fallback rule). ``_run``
+    must return on the first fence hit -- with ``stop`` never set, a
+    swallowed mismatch would keep this call looping forever.
+    """
+    import threading
+
+    from inqtrix.services.upload_operation_service import UploadReconciler
+    from inqtrix.storage.migration_contract import SchemaHeadMismatch
+
+    calls: list[float] = []
+    stop = threading.Event()
+
+    class FencedOperations:
+        def stale_dispatches(self, *, older_than_seconds):
+            calls.append(older_than_seconds)
+            if len(calls) >= 3:
+                # Regression guard: a swallowed mismatch would loop forever
+                # (no timeout plugin runs in this suite). Bound it so the
+                # test FAILS on the call count instead of hanging.
+                stop.set()
+            raise SchemaHeadMismatch("Schema-Kopf bewegt: 0079 statt 0078")
+
+    service = Mock()
+    service.operations = FencedOperations()
+    reconciler = UploadReconciler(service=service, interval_seconds=1.0)
+
+    # Direct call on this thread: returns promptly on the fence hit.
+    reconciler._run(stop)
+
+    assert calls == [30.0], "exactly one pass, then a hard stop"

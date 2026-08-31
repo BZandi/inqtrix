@@ -5,7 +5,7 @@ import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
-import { precompressAssets } from './build/precompress-assets'
+import { precompressAssets } from './scripts/precompress-assets'
 
 const apiProxyTarget = process.env.VITE_INQTRIX_API_BASE_URL || 'http://localhost:5100'
 

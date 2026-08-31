@@ -10,11 +10,52 @@ from __future__ import annotations
 import re
 from typing import Final
 
-SCHEMA_HEAD_REVISION: Final = "0078_chat_thread_model_selection"
+SCHEMA_HEAD_REVISION: Final = "0082_prompt_seed_markers"
 """Single Alembic head shipped by this source tree."""
 
 TENANT_RLS_POLICY: Final = "tenant_isolation"
 """Required fail-closed policy name on every tenant-scoped table."""
+
+
+class SchemaHeadMismatch(RuntimeError):
+    """A durable write met a schema whose head has moved.
+
+    Raised inside the claim transaction, so the transaction rolls back and
+    the claim is never taken; the triggering queue entry stays unacked for a
+    worker whose code matches the installed schema. This is the CUTOVER
+    fence: it catches a stale worker after a completed migration. A
+    migration still in flight carries the old revision until its step
+    commits and is therefore out of scope -- the canonical migration
+    workflow stops the clients first.
+    """
+
+
+async def assert_schema_head(session: "object") -> None:
+    """One-row fence inside a durable-claim transaction.
+
+    Reads the installed Alembic revision in the SAME transaction that takes
+    the claim, so a stale worker cannot bump fencing counters or write event
+    rows against a schema its code no longer matches. The runtime contract
+    guarantees the effective role explicit SELECT access to
+    ``alembic_version``, so this read cannot fail for permission reasons on
+    a contract-passing deployment.
+
+    SQLAlchemy is imported lazily: this module is deliberately
+    dependency-free at import time (see the module docstring), and only this
+    helper needs the query construct.
+    """
+    from sqlalchemy import text
+
+    revision = (
+        await session.execute(text("SELECT version_num FROM alembic_version"))
+    ).scalar()
+    if revision != SCHEMA_HEAD_REVISION:
+        raise SchemaHeadMismatch(
+            "Schema-Kopf hat sich unter dem Worker bewegt: installiert "
+            f"{revision or 'fehlend'}, erwartet {SCHEMA_HEAD_REVISION}. "
+            "Der Claim wurde nicht genommen; der Eintrag bleibt fuer einen "
+            "aktualisierten Worker unbestaetigt."
+        )
 
 _TENANT_POLICY_EXPRESSION: Final[re.Pattern[str]] = re.compile(
     r"^\(*\s*tenant_id\s*=\s*(?:inqtrix_current_tenant_id\(\)|"
@@ -69,6 +110,7 @@ TENANT_RLS_TABLES: Final[tuple[str, ...]] = (
     "llm_usage",
     "local_credentials",
     "personal_access_tokens",
+    "prompt_template_seed_markers",
     "prompt_templates",
     "quota_limits",
     "quota_stock_lifecycles",
@@ -89,6 +131,7 @@ TENANT_RLS_TABLES: Final[tuple[str, ...]] = (
     "upload_operation_events",
     "upload_operation_outbox",
     "upload_operations",
+    "user_authorization_generations",
     "user_events",
     "users",
     "vector_index_history",

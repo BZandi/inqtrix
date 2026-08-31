@@ -122,7 +122,12 @@ class DiscoveryGap(BaseModel):
             "web_research | web_instant | rag_query | file_analysis"
         )
     )
-    suggested_queries: list[str]
+    suggested_queries: list[str] = Field(
+        description=(
+            "Self-contained, naturally phrased evidence questions for "
+            "the recommended capability — never keyword chains."
+        )
+    )
     blocking: bool = Field(
         description="True only when planning cannot proceed without an answer."
     )
@@ -306,8 +311,10 @@ class QuickWebQuery(BaseModel):
     query: str = Field(
         min_length=1,
         description=(
-            "One self-contained search query derived from the current "
-            "question and relevant conversation context."
+            "One self-contained, naturally phrased evidence question "
+            "(subject, region if relevant, time range, and the evidence "
+            "sought) derived from the current question and relevant "
+            "conversation context — never a keyword chain."
         ),
     )
     """The single query sent to ``web.search.instant`` after any required approval."""

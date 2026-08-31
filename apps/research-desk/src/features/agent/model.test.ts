@@ -3,13 +3,16 @@ import { describe, expect, it } from 'vitest'
 import {
   agentArtifactFromWire,
   agentCenterScreen,
+  agentRunFromSummary,
   agentSessionHistoryTimeIso,
   canEditAgentRun,
   isActiveAgentRun,
   isGateAgentRun,
+  resolveAgentArtifact,
   restoredAgentSessionId,
+  sessionArtifactMetaFromWire,
 } from './model'
-import type { ResearchRunStatus } from '@/features/researchRuns/types'
+import type { ResearchRunStatus, ResearchRunSummary } from '@/features/researchRuns/types'
 
 describe('agent artifact detail projection', () => {
   it('retains the evidence payload only after the detail row is fetched', () => {
@@ -251,5 +254,161 @@ describe('agentCenterScreen', () => {
       serverEnabled: false,
       sessionsKnown: false,
     })).toBe('welcome')
+  })
+})
+
+/**
+ * P4 anchor independence: an artifact update RE-ANCHORS the server row
+ * to the updating run, so a descriptor's runId can go stale while the
+ * artifact itself lives on. The resolver walks hint → same-session
+ * runs → session index and returns the runId every artifact API call
+ * must use.
+ */
+describe('resolveAgentArtifact (P4 anchor independence)', () => {
+  const artifactWire = (artifactId: string, runId: string) => ({
+    artifact_id: artifactId,
+    content_markdown: 'Inhalt',
+    created_at: 1,
+    kind: 'memo' as const,
+    refs: [],
+    refs_count: 0,
+    revision: 3,
+    revisions: [],
+    run_id: runId,
+    session_id: 's1',
+    status: 'ready' as const,
+    title: 'Memo',
+    updated_at: 2,
+    updated_by: 'agent' as const,
+  })
+  const run = (runId: string, sessionId: string, artifactIds: string[] = []) => {
+    const record = agentRunFromSummary({
+      access: { mode: 'owner' },
+      run_id: runId,
+      status: 'completed',
+      queue_position: null,
+      question: 'Frage',
+      stack: 'default',
+      mode: 'agent_kernel',
+      kind: 'agent',
+      agent_overrides: { autonomy: 'balanced' },
+      session_id: sessionId,
+      created_at: 1,
+      started_at: 1,
+      finished_at: 2,
+      elapsed_seconds: 1,
+      snapshot: { current_node: 'agent_kernel', last_message: '' },
+      error: null,
+      events_url: `/v1/runs/${runId}/events`,
+      result_url: `/v1/runs/${runId}/result`,
+    } as ResearchRunSummary)
+    const artifacts: typeof record.artifacts = {}
+    for (const artifactId of artifactIds) {
+      artifacts[artifactId] = agentArtifactFromWire(artifactWire(artifactId, runId))
+    }
+    return { ...record, artifactOrder: artifactIds, artifacts }
+  }
+  const index = (
+    byId: Record<string, { artifactId: string; runId: string }>,
+  ) => ({
+    byId: Object.fromEntries(
+      Object.entries(byId).map(([key, meta]) => [key, {
+        artifactId: meta.artifactId,
+        kind: 'memo' as const,
+        revision: 3,
+        runId: meta.runId,
+        status: 'ready' as const,
+        title: 'Memo',
+        updatedAt: 2,
+      }]),
+    ),
+    order: Object.keys(byId),
+    stale: false,
+  })
+
+  it('returns the hinted run directly when it still holds the artifact', () => {
+    const runs = { r1: run('r1', 's1', ['a1']) }
+    const resolved = resolveAgentArtifact(runs, {}, { artifactId: 'a1', runId: 'r1' })
+    expect(resolved.runId).toBe('r1')
+    expect(resolved.artifact?.artifactId).toBe('a1')
+  })
+
+  it('follows a stale hint to the same-session run now holding the artifact', () => {
+    // Run r2 updated the memo — the server moved the anchor off r1.
+    const runs = { r1: run('r1', 's1'), r2: run('r2', 's1', ['a1']) }
+    const resolved = resolveAgentArtifact(runs, {}, { artifactId: 'a1', runId: 'r1' })
+    expect(resolved.runId).toBe('r2')
+    expect(resolved.artifact?.artifactId).toBe('a1')
+  })
+
+  it('never crosses the session fence to a foreign run', () => {
+    // Same artifactId on ANOTHER session's run must not resolve.
+    const runs = { r1: run('r1', 's1'), rx: run('rx', 's2', ['a1']) }
+    const resolved = resolveAgentArtifact(runs, {}, { artifactId: 'a1', runId: 'r1' })
+    expect(resolved.runId).toBe('r1')
+    expect(resolved.artifact).toBeUndefined()
+  })
+
+  it('never serves a cached copy OLDER than the index anchor (F-P4-STALEREV)', () => {
+    // Live scenario: run r2 updated the document to revision 3 and the
+    // server re-anchored it; run r1 still holds its frozen revision-1
+    // copy from its own live events. Turn 1's chip resolves via r1 —
+    // the resolver must follow the index to the CURRENT copy on r2.
+    const r1 = run('r1', 's1', ['a1'])
+    r1.artifacts.a1 = { ...r1.artifacts.a1, revision: 1 }
+    const runs = { r1, r2: run('r2', 's1', ['a1']) }
+    const sessionArtifacts = { s1: index({ a1: { artifactId: 'a1', runId: 'r2' } }) }
+    const resolved = resolveAgentArtifact(runs, sessionArtifacts, {
+      artifactId: 'a1',
+      runId: 'r1',
+    })
+    expect(resolved.runId).toBe('r2')
+    expect(resolved.artifact?.revision).toBe(3)
+  })
+
+  it('falls back to the session index anchor when no loaded run has it', () => {
+    const runs = { r1: run('r1', 's1') }
+    const sessionArtifacts = { s1: index({ a1: { artifactId: 'a1', runId: 'r9' } }) }
+    const resolved = resolveAgentArtifact(runs, sessionArtifacts, {
+      artifactId: 'a1',
+      runId: 'r1',
+    })
+    expect(resolved.runId).toBe('r9')
+    expect(resolved.artifact).toBeUndefined()
+  })
+
+  it('keeps the hint as the honest last resort', () => {
+    const runs = { r1: run('r1', 's1') }
+    const resolved = resolveAgentArtifact(runs, { s1: index({}) }, {
+      artifactId: 'a1',
+      runId: 'r1',
+    })
+    expect(resolved).toEqual({ artifact: undefined, runId: 'r1' })
+  })
+})
+
+describe('sessionArtifactMetaFromWire', () => {
+  it('carries the CURRENT run anchor and the listing fields', () => {
+    expect(sessionArtifactMetaFromWire({
+      artifact_id: 'a1',
+      created_at: 1,
+      kind: 'deliverable',
+      refs_count: 2,
+      revision: 4,
+      run_id: 'r7',
+      session_id: 's1',
+      status: 'ready',
+      title: 'Bericht',
+      updated_at: 9,
+      updated_by: 'agent',
+    })).toEqual({
+      artifactId: 'a1',
+      kind: 'deliverable',
+      revision: 4,
+      runId: 'r7',
+      status: 'ready',
+      title: 'Bericht',
+      updatedAt: 9,
+    })
   })
 })

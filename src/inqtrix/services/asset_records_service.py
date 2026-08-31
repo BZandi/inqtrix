@@ -24,6 +24,7 @@ from inqtrix.project.asset_records_ports import (
     AssetUploadConflict,
     AssetStore,
     GroupNotFound,
+    InitialUploadStatus,
     SectionNotFound,
 )
 from inqtrix.project.scoped_upsert import ResourceScope
@@ -173,6 +174,7 @@ class AssetRecordsService:
         size_bytes, server_file_id, extracted_text, created_at,
         updated_at, caller_user_id: uuid.UUID | None, workspace_id, visible_to,
         parser_id=None,
+        initial_upload_status: "InitialUploadStatus" = "ready",
     ) -> AssetRecord:
         if origin not in _VALID_ORIGINS:
             raise AssetValidationError(f"unknown asset origin: {origin!r}")
@@ -213,6 +215,7 @@ class AssetRecordsService:
             parser_id=parser_id, extracted_text=extracted_text,
             created_at=created_at, updated_at=updated_at,
             created_by_user_id=owner_user_id, workspace_id=owner_ws,
+            initial_upload_status=initial_upload_status,
         )
 
     async def bind_uploaded_file(
@@ -380,7 +383,15 @@ class AssetRecordsService:
             caller_user_id=caller_user_id,
             workspace_id=workspace_id,
             visible_to=visible_to,
+            # The caller's intent, applied AT the insert: a reservation
+            # never exists as 'ready' without bytes, not even between two
+            # transactions. This is what closes the window a failing
+            # follow-up write used to leave open.
+            initial_upload_status="awaiting_upload",
         )
+        # Kept deliberately: on an EXISTING row the insert-only intent does
+        # nothing, and this write is what brings a row parked at 'failed'
+        # back to 'awaiting_upload' on a retried reservation.
         return await self._store.set_asset_upload_state(
             id,
             scope=ResourceScope.from_record(reserved),

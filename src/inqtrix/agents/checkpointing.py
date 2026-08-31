@@ -69,12 +69,22 @@ class CheckpointerHandle:
         durable: Whether checkpoints survive a process restart.
     """
 
-    def __init__(self, *, database_url: str | None) -> None:
+    def __init__(
+        self, *, database_url: str | None, max_connections: int = 4
+    ) -> None:
         self._database_url = database_url
         self._lock = threading.Lock()
         self._saver: Any = None
         self._pool: Any = None
         self.durable = database_url is not None
+        # Server connections this handle may hold
+        # (INQTRIX_AGENT_CHECKPOINTER_POOL_SIZE). Its own pool, on its
+        # own driver: no engine count and no engine disposal reaches it,
+        # so the number has to be readable from outside to appear in the
+        # process connection budget at all. No clamp here: the settings
+        # path is ge=1-validated loudly, and the volatile path passes 0
+        # deliberately -- an InMemorySaver holds no server connections.
+        self.max_connections = int(max_connections)
 
     def saver(self) -> Any:
         """The checkpointer instance (built on first use, then shared)."""
@@ -102,7 +112,7 @@ class CheckpointerHandle:
             self._pool = ConnectionPool(
                 conninfo,
                 min_size=0,
-                max_size=4,
+                max_size=self.max_connections,
                 open=True,
                 kwargs={"autocommit": True, "prepare_threshold": 0},
             )
@@ -170,7 +180,10 @@ def build_checkpointer_handle(settings: Any) -> CheckpointerHandle | None:
                 "features.workspace_agent bleibt false."
             )
             return None
-        return CheckpointerHandle(database_url=settings.storage.database_url)
+        return CheckpointerHandle(
+            database_url=settings.storage.database_url,
+            max_connections=settings.agent_platform.checkpointer_pool_size,
+        )
     if settings.agent_platform.allow_volatile:
         try:
             import langgraph.checkpoint.memory  # noqa: F401
@@ -180,7 +193,7 @@ def build_checkpointer_handle(settings: Any) -> CheckpointerHandle | None:
                 "nicht importierbar."
             )
             return None
-        return CheckpointerHandle(database_url=None)
+        return CheckpointerHandle(database_url=None, max_connections=0)
     log.warning(
         "Workspace-Agent deaktiviert: kein durabler Checkpointer — "
         "INQTRIX_STORAGE_BACKEND ist nicht 'postgres' (oder "

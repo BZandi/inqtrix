@@ -16,6 +16,7 @@ ask_user                free                                free
 web_instant             GATED — query verbatim in args      free
 search_project_...      gated only UN-scoped                free
 read_project_document   free                                free
+read_research_report    free (only ATTACHED reports)        free
 ======================  ==================================  ==========
 
 ``strict`` gates every capability tool (the enterprise mode: nothing
@@ -62,15 +63,63 @@ def _gate(when: Any = None, *, user_conditional: bool = False) -> dict[str, Any]
     return config
 
 
+def _ungranted(tool_name: str) -> Any:
+    """Gate predicate factory: fires unless a run-wide grant covers the tool.
+
+    The grant set is per-run state and must NOT enter the compile-time
+    ``interrupt_config_for`` signature (the graph cache is keyed on it) —
+    it travels through the deps ContextVar exactly like the summarization
+    trigger and ``_single_child_dispatch``'s state read. Fail-closed:
+    without a deps context nothing counts as granted.
+    """
+
+    def _when(request: Any) -> bool:
+        from inqtrix.agents.kernel.deps import kernel_deps
+
+        try:
+            deps = kernel_deps()
+        except RuntimeError:
+            # No segment context (``kernel_deps`` raises when unset) —
+            # nothing counts as granted, the gate fires.
+            return True
+        return tool_name not in deps.tool_grants
+
+    return _when
+
+
+def _all_of(*predicates: Any) -> Any:
+    """AND-compose gate predicates (the gate fires only if every one fires)."""
+
+    def _when(request: Any) -> bool:
+        return all(predicate(request) for predicate in predicates)
+
+    return _when
+
+
 def _unscoped_knowledge_search(request: Any) -> bool:
     """Gate predicate: only an UN-scoped project-wide search interrupts.
 
     A search the user already scoped to explicit collections is the
     plan-approved shape of internal retrieval; the broad sweep over
     everything visible is what Standard asks about first.
+
+    Scope comes from two places and BOTH count (P10-K2): the model's own
+    ``collection_ids`` argument, and the run-level scope the user pinned
+    at submission. Reading only the argument mis-read every chip-scoped
+    run as project-wide — the model never learns about the run pin, so
+    it cannot repeat it in its arguments. Fail-closed: without a segment
+    context the gate fires.
     """
     args = getattr(request, "tool_call", {}).get("args", {}) or {}
-    return not args.get("collection_ids")
+    if args.get("collection_ids"):
+        return False
+    from inqtrix.agents.kernel.deps import kernel_deps
+
+    try:
+        deps = kernel_deps()
+    except RuntimeError:
+        return True
+    return not getattr(deps, "knowledge_scope_explicit", False)
 
 
 def _single_child_dispatch(request: Any) -> bool:
@@ -119,15 +168,35 @@ def interrupt_config_for(autonomy: str) -> dict[str, Any] | None:
     if autonomy == "autonomous":
         gated: dict[str, Any] = {}
     elif autonomy == "balanced":
+        # Run-wide grants (P6B) apply ONLY here: strict stays per-call by
+        # design, autonomous has no grantable gates. Each predicate ANDs
+        # the existing condition with the ungranted check, so a grant can
+        # never widen a gate beyond suppressing it for its own tool.
         gated = {
-            "web_instant": _gate(),
+            "web_instant": _gate(when=_ungranted("web_instant")),
             "search_project_knowledge": _gate(
-                when=_unscoped_knowledge_search, user_conditional=True
+                when=_all_of(
+                    _unscoped_knowledge_search,
+                    _ungranted("search_project_knowledge"),
+                ),
+                user_conditional=True,
             ),
-            "run_web_research": _gate(when=_single_child_dispatch),
-            "run_deep_mission": _gate(when=_single_child_dispatch),
-            "delegate_batch": _gate(when=_single_child_dispatch),
-            "load_skill": _gate(),
+            "run_web_research": _gate(
+                when=_all_of(
+                    _single_child_dispatch, _ungranted("run_web_research")
+                )
+            ),
+            "run_deep_mission": _gate(
+                when=_all_of(
+                    _single_child_dispatch, _ungranted("run_deep_mission")
+                )
+            ),
+            "delegate_batch": _gate(
+                when=_all_of(
+                    _single_child_dispatch, _ungranted("delegate_batch")
+                )
+            ),
+            "load_skill": _gate(when=_ungranted("load_skill")),
         }
     elif autonomy == "strict":
         gated = {
@@ -135,7 +204,14 @@ def interrupt_config_for(autonomy: str) -> dict[str, Any] | None:
             "search_project_knowledge": _gate(),
             "read_project_document": _gate(),
             "read_canvas": _gate(),
+            # Reading an ATTACHED report is a read like read_canvas: free
+            # in the normal modes, reviewed in strict. The attachment
+            # itself is already the user's consent — the tool refuses
+            # every id the user did not attach.
+            "read_research_report": _gate(),
             "write_canvas": _gate(),
+            "read_editor_document": _gate(),
+            "search_editor_document": _gate(),
             "run_web_research": _gate(when=_single_child_dispatch),
             "run_deep_mission": _gate(when=_single_child_dispatch),
             "delegate_batch": _gate(when=_single_child_dispatch),

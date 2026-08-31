@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
   useMemo,
   useReducer,
@@ -7,7 +8,6 @@ import {
   useState,
 } from 'react'
 import { useReducedMotion } from 'motion/react'
-import { ViewEntry } from '@/motion/ViewEntry'
 import {
   uploadServerFile,
   reserveServerFileUpload,
@@ -146,6 +146,10 @@ import {
 } from '@/features/knowledge/profileOptions'
 import type { KnowledgeCollectionOption, KnowledgeDataSource } from '@/features/knowledge/types'
 import { reloadApplication, useAuthSession } from '@/features/auth/useAuthSession'
+import {
+  clearAllPlanDrafts,
+  identityChanged,
+} from '@/features/agent/plan/planDraftStorage'
 import { flushActiveCollaborationDocuments } from '@/features/editor/useCollaborationDocument'
 import {
   knowledgeCollectionOptions,
@@ -397,6 +401,24 @@ export function ResearchDesk({
   )
   const isDemoMode = state.connection.kind === 'demo'
 
+  /** The view the WORKSPACE renders, one step behind the view the CHROME
+   * renders.
+   *
+   * A desk switch tears the old workspace down and builds the new one up.
+   * That build blocks the main thread (measured: 14-184ms warm, 210ms for a
+   * cold Chat, and 3-4x that on ordinary office hardware), and because it
+   * used to sit in the same urgent update as `activeView` itself, nothing
+   * could paint until it finished: the click looked ignored, the old desk
+   * stayed frozen on screen, and only then did the entry animation start.
+   * That stall — not the animation — is what read as "it jumps".
+   *
+   * Rail and topbar keep reading `state.ui.activeView`, so the button
+   * highlights and the title change in the very next frame. Only the
+   * workspace reads this deferred copy: React builds it in a non-urgent lane
+   * and yields to the browser while it does, so the previous desk stays
+   * painted and interactive until the new one is ready to appear whole. */
+  const deferredActiveView = useDeferredValue(state.ui.activeView)
+
   // Demo-only "live" simulator: while the seed run is running in demo mode, feed
   // synthetic snapshot events through the real appendApiRunEvent pipeline so the
   // running card visibly progresses (phases advance, metrics count up and flash,
@@ -496,6 +518,9 @@ export function ResearchDesk({
       state.chatThreadGroups,
       state.chatThreadOrder,
       state.chatThreads,
+      // The selector sorts by the desk's sort mode — omitting it made a
+      // mode switch a silent no-op on the cached sections (review find).
+      state.ui.explorerSort.chat,
     ],
   )
   const chatRules = useMemo(
@@ -683,11 +708,20 @@ export function ResearchDesk({
   const handleApiEvent = useCallback((event: ResearchRunEvent) => {
     dispatch({ event, type: 'appendApiRunEvent' })
   }, [])
+  // Catch-up batches (SSE replay after a reload/reconnect, first polling
+  // page): one dispatch, one commit, no arrivedLive — history renders in
+  // place instead of replaying itself row by row.
+  const handleApiHistory = useCallback((events: ResearchRunEvent[]) => {
+    dispatch({ events, type: 'appendApiRunEvents' })
+  }, [])
   const handleApiResult = useCallback((result: ResearchRunResult) => {
     dispatch({ result, type: 'attachApiRunResult' })
   }, [])
   const handleApiRunError = useCallback((runId: string, message: string) => {
     dispatch({ message, runId, type: 'markApiRunError' })
+  }, [])
+  const handleApiRunUnavailable = useCallback((runId: string) => {
+    dispatch({ runId, type: 'markApiRunUnavailable' })
   }, [])
   // Server discovery (health/capabilities/stacks) is workspace-INDEPENDENT and
   // resolved first, because `health` gates cookie mode and `capabilities` gates
@@ -744,12 +778,21 @@ export function ResearchDesk({
     state.workspaceId,
     flushActiveCollaborationDocuments,
   )
+  const lastIdentityRef = useRef<string | null | undefined>(undefined)
   useEffect(() => {
-    setExpectedUserIdentity(
-      isCookieMode && authSession.status === 'authenticated'
+    const identity
+      = isCookieMode && authSession.status === 'authenticated'
         ? authSession.user?.id ?? null
-        : null,
-    )
+        : null
+    setExpectedUserIdentity(identity)
+    // Unsent plan drafts live in `localStorage`, which survives the hard
+    // reload the auth layer performs on an identity transition. Without
+    // this sweep one account's unsent rejection note could reappear in
+    // the next account's gate on a shared profile.
+    if (identityChanged(lastIdentityRef.current, identity)) {
+      clearAllPlanDrafts()
+    }
+    lastIdentityRef.current = identity
     return () => setExpectedUserIdentity(null)
   }, [authSession.status, authSession.user?.id, isCookieMode])
   const handleLogout = useCallback(async () => {
@@ -844,8 +887,10 @@ export function ResearchDesk({
     canList: discoveryReady && authUnlocked,
     enabled: !isDemoMode,
     onEvent: handleApiEvent,
+    onHistory: handleApiHistory,
     onResult: handleApiResult,
     onRunError: handleApiRunError,
+    onRunUnavailable: handleApiRunUnavailable,
     onReplace: handleApiSummaryReplacement,
     onSummary: handleApiSummary,
     refreshToken: resourceRefreshToken,
@@ -999,11 +1044,15 @@ export function ResearchDesk({
     editorRecoveryCaptureProviderRef.current = provider
   }, [])
   const {
+    deleteThread: deleteChatThreadOnServer,
     error: chatSyncError,
     hasMoreThreads: chatHistoryHasMore,
     isLoadingMore: chatHistoryLoadingMore,
     isSelectedThreadMessagesLoading: chatMessagesLoading,
     loadMoreThreads: loadMoreChatHistory,
+    prefetchThreadMessages,
+    retrySelectedThreadMessages,
+    selectedThreadMessagesError: chatMessagesLoadError,
   } = useChatHistoryApi({
     apiKey: apiKey.trim() || undefined,
     chatThreadGroupMemberships: state.chatThreadGroupMemberships,
@@ -1018,7 +1067,9 @@ export function ResearchDesk({
   const {
     error: editorSyncError,
     flushDocumentForShare,
+    prefetchDocumentBody,
     registerOpenedServerDocument,
+    selectedDocumentBodyHydration,
   } = useEditorHistoryApi({
     apiKey: apiKey.trim() || undefined,
     consumeCollaborationRecovery: consumeEditorRecoveryCapture,
@@ -1189,6 +1240,7 @@ export function ResearchDesk({
     deleteSession: deletePersistedKnowledgeSession,
     error: knowledgeSessionSyncError,
     isSelectedSessionItemsLoading: knowledgeItemsLoading,
+    prefetchSessionItems,
     retrySessionDeletion: retryKnowledgeSessionDeletion,
   } = useKnowledgeSessionsApi({
     apiKey: apiKey.trim() || undefined,
@@ -1512,6 +1564,7 @@ export function ResearchDesk({
       state.knowledgeSessionGroups,
       state.knowledgeSessionOrder,
       state.knowledgeSessions,
+      state.ui.explorerSort.knowledge,
     ],
   )
   const isKnowledgeAskRunning = displayedKnowledgeAllItems.some((item) => item.status === 'running')
@@ -3259,7 +3312,10 @@ export function ResearchDesk({
   function handleDeleteChatThread(threadId: string) {
     discardChatRequestRuntime(threadId)
     clearScrollMemory(`chat:${threadId}`)
-    dispatch({ threadId, type: 'deleteChatThread' })
+    // The removal itself belongs to the history API: it deletes on the
+    // server first and only then drops the row, so a failed deletion stays
+    // visible instead of reappearing at the next reload.
+    void deleteChatThreadOnServer(threadId)
     setChatErrorByThreadId((current) => {
       const next = { ...current }
       delete next[threadId]
@@ -3498,11 +3554,14 @@ export function ResearchDesk({
           }
         />
         <div className="min-h-0 min-w-0 flex-1">
-          {/* One entry vocabulary for every workspace: re-keying on the view
-              plays the same fade+rise the report panel made familiar. No
-              exit leg — switching stays instant. */}
-          <ViewEntry viewKey={state.ui.activeView}>
-          {state.ui.activeView === 'research' ? (
+          {/* The deferred key keeps workspace lifecycle boundaries explicit.
+              Cached desks swap without mount motion; only genuinely cold,
+              bounded regions may use StructuralLoadBoundary. */}
+          <div
+            className="flex h-full min-h-0 w-full min-w-0 flex-col"
+            key={deferredActiveView}
+          >
+          {deferredActiveView === 'research' ? (
             <ResearchWorkspace
               activeFilter={state.ui.activeFilter}
               allJobs={allJobs}
@@ -3515,6 +3574,10 @@ export function ResearchDesk({
               isReportVisible={state.ui.isReportVisible}
               isSubmitDisabled={isAuthResolving}
               jobs={visibleJobs}
+              // Silhouette instead of the empty hero while the SERVER listing
+              // is pending: mirrors useResearchRunApi's canList gate, so demo
+              // and local-first (which never list) keep the hero.
+              runsLoading={!isDemoMode && discoveryReady && authUnlocked && !runsHydrated}
               cancelErrorByRunId={cancelErrorByRunId}
               cancelSubmittingRunIds={cancelSubmittingRunIds}
               onActiveFilterChange={(filter) => dispatch({ filter, type: 'setActiveFilter' })}
@@ -3552,7 +3615,7 @@ export function ResearchDesk({
               selectedStack={displayedSelectedStack}
               shareCountByRunId={shareCountByRunId}
             />
-          ) : state.ui.activeView === 'chat' ? (
+          ) : deferredActiveView === 'chat' ? (
             <ChatWorkspace
               activeAssistantMessageId={activeChatRequest?.assistantMessageId ?? null}
               chatModelOptions={chatModelOptions}
@@ -3561,7 +3624,10 @@ export function ResearchDesk({
               chatHistoryHasMore={chatHistoryHasMore}
               chatHistoryLoadingMore={chatHistoryLoadingMore}
               onLoadMoreChatHistory={loadMoreChatHistory}
+              onPrefetchThread={(threadId) => void prefetchThreadMessages(threadId)}
               isMessagesLoading={chatMessagesLoading}
+              messagesLoadError={chatMessagesLoadError}
+              onRetryMessagesLoad={() => void retrySelectedThreadMessages()}
               defaultChatModel={defaultChatModel}
               historyPanelSize={state.ui.panelLayout.chatHistory}
               isDesktop={isDesktop}
@@ -3628,6 +3694,14 @@ export function ResearchDesk({
                 threadId,
                 type: 'moveChatThreadToGroup',
               })}
+              onAdoptVisibleOrder={(itemIds, folderIds) => dispatch({
+                desk: 'chat',
+                folderIds,
+                itemIds,
+                type: 'adoptExplorerOrder',
+              })}
+              onChangeSortMode={(mode) => dispatch({ desk: 'chat', mode, type: 'setExplorerSortMode' })}
+              sortMode={state.ui.explorerSort.chat}
               onRemoveContext={(ref) => {
                 if (isIncognitoChat) {
                   setIncognitoAttachmentRefs((current) =>
@@ -3690,7 +3764,7 @@ export function ResearchDesk({
               }}
               threads={chatThreads}
             />
-          ) : state.ui.activeView === 'editor' ? (
+          ) : deferredActiveView === 'editor' ? (
             <EditorWorkspace
               apiKey={apiKey.trim() || undefined}
               assetBodyLoadStates={assetBodyLoadStates}
@@ -3700,6 +3774,7 @@ export function ResearchDesk({
               chatModelCatalog={chatModelCatalog}
               defaultChatModel={defaultChatModel}
               dispatch={dispatch}
+              documentBodyHydration={selectedDocumentBodyHydration}
               ensureAssetBodiesLoaded={ensureAssetBodiesLoaded}
               ensureUploadTarget={projectPersistenceAvailable ? ensureUploadTarget : undefined}
               onCollaborationControllerChange={handleCollaborationControllerChange}
@@ -3707,6 +3782,7 @@ export function ResearchDesk({
               onRecoveryCaptureProviderChange={setEditorRecoveryCaptureProvider}
               onShareDocument={sharingEnabled ? handleShareEditorDocument : undefined}
               onServerDocumentObserved={registerOpenedServerDocument}
+              prefetchDocumentBody={prefetchDocumentBody}
               reportOptions={reportOptions}
               selectedModelTier={state.ui.selectedChatModelTier}
               serverFileUpload={serverFileUpload}
@@ -3722,7 +3798,7 @@ export function ResearchDesk({
               workspaceId={effectiveWorkspaceId}
               uploadRegistry={uploadRegistry}
             />
-          ) : state.ui.activeView === 'agent' ? (
+          ) : deferredActiveView === 'agent' ? (
             <AgentWorkspace
               apiKey={apiKey.trim() || undefined}
               cancelRun={cancelRun}
@@ -3732,6 +3808,7 @@ export function ResearchDesk({
               capabilities={capabilities}
               collections={agentCollectionOptions}
               dispatch={dispatch}
+              knowledgeDataSource={knowledgeDataSource}
               documents={agentDocumentOptions}
               draftQuestion={agentDraftQuestion}
               memoryEnabled={agentMemoryEnabled}
@@ -3761,7 +3838,7 @@ export function ResearchDesk({
               submitRun={(request) => submitRun(request)}
               workspaceId={effectiveWorkspaceId}
             />
-          ) : state.ui.activeView === 'knowledge' ? (
+          ) : deferredActiveView === 'knowledge' ? (
             <KnowledgeWorkspace
               collections={knowledgeCollections}
               composerNotice={displayedKnowledgeAskError}
@@ -3812,6 +3889,15 @@ export function ResearchDesk({
               onMoveSessionGroup={(groupId, targetIndex) => dispatch({ groupId, targetIndex, type: 'moveKnowledgeSessionGroup' })}
               onMoveSessionToGroup={(sessionId, groupId, targetIndex) =>
                 dispatch({ groupId, sessionId, targetIndex, type: 'moveKnowledgeSessionToGroup' })}
+              onAdoptVisibleOrder={(itemIds, folderIds) => dispatch({
+                desk: 'knowledge',
+                folderIds,
+                itemIds,
+                type: 'adoptExplorerOrder',
+              })}
+              onChangeSortMode={(mode) => dispatch({ desk: 'knowledge', mode, type: 'setExplorerSortMode' })}
+              sortMode={state.ui.explorerSort.knowledge}
+              onPrefetchSession={(sessionId) => void prefetchSessionItems(sessionId)}
               onProfileChange={setKnowledgeProfileId}
               onRenameSessionGroup={(groupId, title) => dispatch({ groupId, title, type: 'renameKnowledgeSessionGroup' })}
               onRenameSession={(sessionId, title) => dispatch({ sessionId, title, type: 'renameKnowledgeSession' })}
@@ -3835,7 +3921,7 @@ export function ResearchDesk({
               topK={knowledgeTopK}
               finalK={knowledgeFinalK}
             />
-          ) : state.ui.activeView === 'prompt-library' ? (
+          ) : deferredActiveView === 'prompt-library' ? (
             <PromptLibraryWorkspace
               dispatch={dispatch}
               onRequestedResourceHandled={() => setSharedOpenTarget(null)}
@@ -3876,7 +3962,7 @@ export function ResearchDesk({
                 workspaceId: effectiveWorkspaceId,
               }}
             />
-          ) : state.ui.activeView === 'database' ? (
+          ) : deferredActiveView === 'database' ? (
             <FileLibraryWorkspace
               assetDeletionApiOptions={projectSyncActive ? fileApiOptions : null}
               deletionRefreshToken={resourceRefreshToken}
@@ -3935,7 +4021,6 @@ export function ResearchDesk({
               onApiKeyChange={handleSettingsApiKeyChange}
               onDemoModeChange={(enabled) => dispatch({ enabled, type: 'setDemoMode' })}
               onStackChange={(stack) => dispatch({ stack, type: 'setSelectedStack' })}
-              reduceMotion={reduceMotion}
               selectedStack={displayedSelectedStack}
               requestedSection={settingsRequestedSection}
               sharing={sharingEnabled ? sharingInbox : null}
@@ -3945,7 +4030,7 @@ export function ResearchDesk({
               stackOptions={effectiveStackOptions}
             />
           )}
-          </ViewEntry>
+          </div>
         </div>
       </div>
       {sharingEnabled && shareTarget && (

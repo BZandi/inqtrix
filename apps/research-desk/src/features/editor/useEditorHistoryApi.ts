@@ -15,7 +15,7 @@
  * local-newer entity is pushed up rather than stranded.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch } from 'react'
 
 import {
@@ -78,6 +78,12 @@ export type EditorCommentReconciliationPlan = {
 export type EditorOpenHydrationPlan = {
   loadComments: boolean
   loadDocumentDetail: boolean
+}
+
+export type EditorDocumentBodyHydration = {
+  documentId: string | null
+  error: string | null
+  phase: 'empty' | 'error' | 'pending' | 'ready'
 }
 
 export type EditorServerDocumentProvenance = 'exact_detail' | 'metadata'
@@ -151,6 +157,52 @@ export function planEditorOpenHydration({
       ? !hasExactDocumentDetail
       : !hasLocalDocumentBody,
   }
+}
+
+/** Resolve only the document body's authoritative readiness. Comment loading
+ * and background metadata refreshes deliberately do not hide an otherwise
+ * usable editor body. Collaboration documents additionally require exact
+ * detail provenance for their current projection lifecycle. */
+export function resolveEditorDocumentBodyHydration({
+  documentId,
+  error,
+  hasExactDocumentDetail,
+  hasLoadedDocumentBody,
+  hasServerDocument,
+  requiresExactDocumentDetail,
+}: {
+  documentId: string | null
+  error: string | null
+  hasExactDocumentDetail: boolean
+  hasLoadedDocumentBody: boolean
+  hasServerDocument: boolean
+  requiresExactDocumentDetail: boolean
+}): EditorDocumentBodyHydration {
+  if (!documentId) return { documentId: null, error: null, phase: 'empty' }
+  if (!hasServerDocument) {
+    return { documentId, error: null, phase: 'ready' }
+  }
+  const ready = requiresExactDocumentDetail
+    ? hasExactDocumentDetail
+    : hasLoadedDocumentBody
+  if (ready) return { documentId, error: null, phase: 'ready' }
+  if (error) return { documentId, error, phase: 'error' }
+  return { documentId, error: null, phase: 'pending' }
+}
+
+/** A first project hydration may trust bodies restored from project markdown.
+ * Later metadata refreshes may trust only bodies this lifecycle actually
+ * loaded; by then metadata-only server rows are also present in project state. */
+export function editorLocallyAuthoritativeDocumentIds({
+  alreadyHydrated,
+  loadedDocumentIds,
+  projectDocumentIds,
+}: {
+  alreadyHydrated: boolean
+  loadedDocumentIds: Iterable<string>
+  projectDocumentIds: Iterable<string>
+}): Set<string> {
+  return new Set(alreadyHydrated ? loadedDocumentIds : projectDocumentIds)
 }
 
 /** Exact bodies are valid only for the collaboration projection lifecycle
@@ -284,6 +336,16 @@ type UseEditorHistoryApiOptions = {
 
 export type EditorHistoryApiHandle = {
   error: string | null
+  /** Authoritative readiness for the currently requested body. Metadata and
+   * comments are intentionally excluded: they may refresh behind visible
+   * content without replacing the editor with a structural loader. */
+  selectedDocumentBodyHydration: EditorDocumentBodyHydration
+  /** Warm a document body from pointer/focus intent. The selected-document
+   * loader awaits this exact same in-flight request. */
+  prefetchDocumentBody: (
+    documentId: string,
+    options?: { retry?: boolean },
+  ) => Promise<void>
   /** Push one document's current body to the server NOW (serialized against
    * the autosave loop) and return the fresh server revisions, or `null` when
    * the push could not produce an authoritative base (sync inactive, plan
@@ -291,8 +353,8 @@ export type EditorHistoryApiHandle = {
    * share/collaboration-enable flow uses this so converting a document never
    * depends on the global project dirty flag. */
   flushDocumentForShare: (
-    document: EditorDocumentRecord,
-  ) => Promise<{ metadataRevision: number; revision: number } | null>
+    documentId: string,
+  ) => Promise<EditorDocumentPushOutcome>
   registerOpenedServerDocument: (
     document: EditorDocumentRecord,
     provenance: EditorServerDocumentProvenance,
@@ -322,6 +384,8 @@ export function useEditorHistoryApi({
   foldersRef.current = editorFolders
   const commentsRef = useRef(editorComments)
   commentsRef.current = editorComments
+  const selectedDocumentIdRef = useRef(selectedDocumentId)
+  selectedDocumentIdRef.current = selectedDocumentId
   const commentOutboxRef = useRef(editorCommentOutbox ?? {})
   commentOutboxRef.current = editorCommentOutbox ?? {}
   const optionsRef = useRef({ apiKey, workspaceId })
@@ -336,6 +400,11 @@ export function useEditorHistoryApi({
   const serverDocumentsRef = useRef(new Map<string, EditorDocumentRecord>())
   const retiredServerDocumentIdsRef = useRef(new Set<string>())
   const loadedDocsRef = useRef(new Set<string>())
+  const documentBodyRequestsRef = useRef(
+    new Map<string, Promise<EditorDocumentRecord | null>>(),
+  )
+  const documentBodyErrorsRef = useRef(new Map<string, string>())
+  const documentBodyRequestGenerationRef = useRef(0)
   const exactDetailProvenanceRef = useRef(new Map<string, string>())
   const loadedCommentsRef = useRef(new Set<string>())
   const hydratedRef = useRef(false)
@@ -344,6 +413,7 @@ export function useEditorHistoryApi({
   const syncActiveRef = useRef(syncActive)
   syncActiveRef.current = syncActive
   const [serverObservationEpoch, setServerObservationEpoch] = useState(0)
+  const [documentBodyObservationEpoch, setDocumentBodyObservationEpoch] = useState(0)
 
   const registerOpenedServerDocument = useCallback((
     document: EditorDocumentRecord,
@@ -359,12 +429,111 @@ export function useEditorHistoryApi({
         observation.exactDetailProvenanceKey,
       )
       loadedDocsRef.current.add(document.id)
+      documentBodyErrorsRef.current.delete(document.id)
+      setDocumentBodyObservationEpoch((current) => current + 1)
     }
     if (observation.syncedFingerprint) {
       syncedDocsRef.current.set(document.id, observation.syncedFingerprint)
     }
     setServerObservationEpoch((current) => current + 1)
   }, [])
+
+  const loadDocumentBody = useCallback((
+    documentId: string,
+  ): Promise<EditorDocumentRecord | null> => {
+    const serverDocument = serverDocumentsRef.current.get(documentId)
+    if (!serverDocument) {
+      return Promise.resolve(documentsRef.current[documentId] ?? null)
+    }
+    const hasExactDocumentDetail = (
+      exactDetailProvenanceRef.current.get(documentId)
+      === editorDocumentDetailProvenanceKey(serverDocument)
+    )
+    const bodyReady = isCollaborationDocument(serverDocument)
+      ? hasExactDocumentDetail
+      : loadedDocsRef.current.has(documentId)
+    if (bodyReady) return Promise.resolve(serverDocument)
+
+    const inFlight = documentBodyRequestsRef.current.get(documentId)
+    if (inFlight) return inFlight
+
+    const requestGeneration = documentBodyRequestGenerationRef.current
+    documentBodyErrorsRef.current.delete(documentId)
+    setDocumentBodyObservationEpoch((current) => current + 1)
+    const request = (async (): Promise<EditorDocumentRecord | null> => {
+      try {
+        const detail = await getEditorDocument(documentId, optionsRef.current)
+        if (
+          requestGeneration !== documentBodyRequestGenerationRef.current
+          || retiredServerDocumentIdsRef.current.has(documentId)
+          || !serverDocumentsRef.current.has(documentId)
+        ) return null
+        const detailRecord = documentRecordFromServer(detail)
+        serverDocumentsRef.current.set(documentId, detailRecord)
+        const provenanceKey = editorDocumentDetailProvenanceKey(detailRecord)
+        if (provenanceKey) {
+          exactDetailProvenanceRef.current.set(documentId, provenanceKey)
+        }
+        loadedDocsRef.current.add(documentId)
+        documentBodyErrorsRef.current.delete(documentId)
+        metadataRevisionsRef.current.set(
+          documentId,
+          detailRecord.metadataRevision ?? 1,
+        )
+        if (isCollaborationDocument(detailRecord)) {
+          dispatch({ document: detailRecord, type: 'setServerEditorDocumentDetail' })
+        } else if (shouldLoadLegacyEditorBody(detailRecord)) {
+          dispatch({
+            contentMarkdown: detail.content_markdown ?? '',
+            documentId,
+            type: 'setServerEditorDocumentBody',
+          })
+        }
+        setDocumentBodyObservationEpoch((current) => current + 1)
+        return detailRecord
+      } catch (caught) {
+        if (requestGeneration !== documentBodyRequestGenerationRef.current) {
+          return null
+        }
+        const message = messageFromError(caught)
+        documentBodyErrorsRef.current.set(documentId, message)
+        setDocumentBodyObservationEpoch((current) => current + 1)
+        throw caught
+      }
+    })()
+    documentBodyRequestsRef.current.set(documentId, request)
+    const releaseRequest = () => {
+      if (documentBodyRequestsRef.current.get(documentId) === request) {
+        documentBodyRequestsRef.current.delete(documentId)
+      }
+    }
+    void request.then(releaseRequest, releaseRequest)
+    return request
+  }, [dispatch])
+
+  const prefetchDocumentBody = useCallback(async (
+    documentId: string,
+    options?: { retry?: boolean },
+  ) => {
+    const hadError = documentBodyErrorsRef.current.has(documentId)
+    if (hadError && options?.retry !== true) return
+    try {
+      const document = await loadDocumentBody(documentId)
+      if (
+        document
+        && selectedDocumentIdRef.current === documentId
+        && hadError
+      ) {
+        setError(null)
+        // Re-run the selected-document hydration effect so a successful retry
+        // also resumes independent comments loading.
+        setServerObservationEpoch((current) => current + 1)
+      }
+    } catch {
+      // Readiness carries the scoped failure. Intent prefetch must not create
+      // an unhandled rejection or replace an unrelated visible document.
+    }
+  }, [loadDocumentBody])
 
   // -- pushing one entity ----------------------------------------------- #
 
@@ -462,6 +631,8 @@ export function useEditorHistoryApi({
       // We hold this document's body now, so re-opening it must not trigger
       // a redundant body fetch.
       loadedDocsRef.current.add(record.id)
+      documentBodyErrorsRef.current.delete(record.id)
+      setDocumentBodyObservationEpoch((current) => current + 1)
       return {
         kind: 'saved',
         metadataRevision: adoptedMetadataRevision,
@@ -489,6 +660,8 @@ export function useEditorHistoryApi({
         type: 'rebaseServerEditorDocument',
       })
       loadedDocsRef.current.add(record.id)
+      documentBodyErrorsRef.current.delete(record.id)
+      setDocumentBodyObservationEpoch((current) => current + 1)
       return { kind: 'rebased' }
     }
   }, [dispatch])
@@ -533,6 +706,8 @@ export function useEditorHistoryApi({
             () => deleteEditorDocument(id, optionsRef.current),
           )
           loadedDocsRef.current.delete(id)
+          documentBodyErrorsRef.current.delete(id)
+          documentBodyRequestsRef.current.delete(id)
           exactDetailProvenanceRef.current.delete(id)
           loadedCommentsRef.current.delete(id)
           serverDocumentsRef.current.delete(id)
@@ -623,9 +798,9 @@ export function useEditorHistoryApi({
   }, [pushDocument, pushFolder, pushComment])
 
   const flushDocumentForShare = useCallback(async (
-    document: EditorDocumentRecord,
-  ): Promise<{ metadataRevision: number; revision: number } | null> => {
-    if (!syncActiveRef.current || !hydratedRef.current) return null
+    documentId: string,
+  ): Promise<EditorDocumentPushOutcome> => {
+    if (!syncActiveRef.current || !hydratedRef.current) return { kind: 'skipped' }
     // Serialize against the debounced autosave loop: wait for an in-flight
     // cycle, then hold the same lock while pushing this one document, so the
     // share flow can never race a concurrent PUT of the same record.
@@ -636,17 +811,21 @@ export function useEditorHistoryApi({
     }
     flushingRef.current = true
     try {
+      // Der Record wird ERST HIER gelesen, INNERHALB der Sperre. Ein vor dem
+      // Warten gelesener Stand ist beim Senden wieder alt: genau in diesem
+      // Fenster uebernimmt der laufende Autosave die naechste Revision, und
+      // der Flush schickt danach die vorige. Der Server verweigert das
+      // korrekt mit 409 -- und weil der Aufrufer denselben veralteten Stand
+      // erneut schickte, konnte die angebotene Wiederholung nie gelingen.
+      const document = documentsRef.current[documentId]
+      if (!document) return { kind: 'skipped' }
       const outcome = await pushDocument(document)
-      if (outcome.kind !== 'saved' || outcome.metadataRevision === undefined) {
-        return null
+      if (outcome.kind === 'saved') {
+        // Mark this fingerprint as synced so the next autosave cycle does not
+        // re-push the identical body.
+        syncedDocsRef.current.set(document.id, document.updatedAt)
       }
-      // Mark this fingerprint as synced so the next autosave cycle does not
-      // re-push the identical body.
-      syncedDocsRef.current.set(document.id, document.updatedAt)
-      return {
-        metadataRevision: outcome.metadataRevision,
-        revision: outcome.revision,
-      }
+      return outcome
     } finally {
       flushingRef.current = false
       if (flushPendingRef.current) {
@@ -659,6 +838,7 @@ export function useEditorHistoryApi({
   // -- reset + hydrate lifecycle (re-armed on project identity) ---------- #
 
   const reset = useCallback(() => {
+    documentBodyRequestGenerationRef.current += 1
     hydratedRef.current = false
     setHydrated(false)
     syncedDocsRef.current.clear()
@@ -668,11 +848,16 @@ export function useEditorHistoryApi({
     serverDocumentsRef.current.clear()
     retiredServerDocumentIdsRef.current.clear()
     loadedDocsRef.current.clear()
+    documentBodyRequestsRef.current.clear()
+    documentBodyErrorsRef.current.clear()
     exactDetailProvenanceRef.current.clear()
     loadedCommentsRef.current.clear()
+    setDocumentBodyObservationEpoch((current) => current + 1)
   }, [])
 
   const hydrate = useCallback((token: SyncLifecycleToken) => {
+    documentBodyRequestGenerationRef.current += 1
+    documentBodyRequestsRef.current.clear()
     void (async () => {
       try {
         const options = optionsRef.current
@@ -693,10 +878,15 @@ export function useEditorHistoryApi({
           cursor = page.next_cursor ?? undefined
         } while (cursor)
         if (token.cancelled) return
-        // Documents already in the local project carry an authoritative body
-        // (loaded from the markdown). Captured BEFORE the merge dispatch so a
-        // server-only document (added with body="") is distinguishable.
-        const locallyPresentIds = new Set(Object.keys(documentsRef.current))
+        // On the first hydration, documents already in the local project carry
+        // an authoritative body loaded from project markdown. On a background
+        // refresh, server-only metadata rows are already present locally too;
+        // only the explicit loaded set may preserve their body readiness.
+        const locallyPresentIds = editorLocallyAuthoritativeDocumentIds({
+          alreadyHydrated: hydratedRef.current,
+          loadedDocumentIds: loadedDocsRef.current,
+          projectDocumentIds: Object.keys(documentsRef.current),
+        })
         if (folderRecords.length > 0) {
           dispatch({ folders: folderRecords, type: 'upsertServerEditorFolders' })
         }
@@ -758,6 +948,8 @@ export function useEditorHistoryApi({
           syncedDocsRef.current.delete(documentId)
           metadataRevisionsRef.current.delete(documentId)
           loadedDocsRef.current.delete(documentId)
+          documentBodyErrorsRef.current.delete(documentId)
+          documentBodyRequestsRef.current.delete(documentId)
           exactDetailProvenanceRef.current.delete(documentId)
           loadedCommentsRef.current.delete(documentId)
           for (const [commentId, fingerprint] of syncedCommentsRef.current) {
@@ -791,6 +983,8 @@ export function useEditorHistoryApi({
         }
         hydratedRef.current = true
         setHydrated(true)
+        setServerObservationEpoch((current) => current + 1)
+        setDocumentBodyObservationEpoch((current) => current + 1)
         setError(null)
       } catch (caught) {
         if (!token.cancelled) setError(messageFromError(caught))
@@ -843,38 +1037,23 @@ export function useEditorHistoryApi({
       hasLocalDocumentBody: hadLocalDocumentBody,
     })
     if (!hydrationPlan.loadComments && !hydrationPlan.loadDocumentDetail) return
-    if (hydrationPlan.loadDocumentDetail) loadedDocsRef.current.add(documentId)
     if (hydrationPlan.loadComments) loadedCommentsRef.current.add(documentId)
     let cancelled = false
-    let applied = false
+    let commentsApplied = !hydrationPlan.loadComments
     void (async () => {
       try {
         let document = serverDocumentsRef.current.get(documentId)
           ?? documentsRef.current[documentId]
         if (hydrationPlan.loadDocumentDetail) {
-          const detail = await getEditorDocument(documentId, optionsRef.current)
+          const loadedDocument = await loadDocumentBody(documentId)
           if (cancelled) return
-          const detailRecord = documentRecordFromServer(detail)
-          serverDocumentsRef.current.set(documentId, detailRecord)
-          const provenanceKey = editorDocumentDetailProvenanceKey(detailRecord)
-          if (provenanceKey) {
-            exactDetailProvenanceRef.current.set(documentId, provenanceKey)
+          if (!loadedDocument) {
+            if (hydrationPlan.loadComments) {
+              loadedCommentsRef.current.delete(documentId)
+            }
+            return
           }
-          loadedDocsRef.current.add(documentId)
-          metadataRevisionsRef.current.set(
-            documentId,
-            detailRecord.metadataRevision ?? 1,
-          )
-          document = detailRecord
-          if (isCollaborationDocument(detailRecord)) {
-            dispatch({ document: detailRecord, type: 'setServerEditorDocumentDetail' })
-          } else if (shouldLoadLegacyEditorBody(document)) {
-            dispatch({
-              contentMarkdown: detail.content_markdown ?? '',
-              documentId,
-              type: 'setServerEditorDocumentBody',
-            })
-          }
+          document = loadedDocument
         }
         if (hydrationPlan.loadComments) {
           const comments: EditorCommentThreadRecord[] = []
@@ -920,14 +1099,11 @@ export function useEditorHistoryApi({
               })
             }
           }
+          commentsApplied = true
         }
-        applied = true
         setError(null)
       } catch (caught) {
         if (!cancelled) {
-          if (hydrationPlan.loadDocumentDetail && !hadLocalDocumentBody) {
-            loadedDocsRef.current.delete(documentId)
-          }
           if (hydrationPlan.loadComments) loadedCommentsRef.current.delete(documentId)
           setError(messageFromError(caught))
         }
@@ -935,17 +1111,21 @@ export function useEditorHistoryApi({
     })()
     return () => {
       cancelled = true
-      // If the load was interrupted before it applied (the user switched
-      // documents mid-fetch), release the id so re-opening this document
-      // re-fetches — otherwise its body would stay empty for the session.
-      if (!applied) {
-        if (hydrationPlan.loadDocumentDetail && !hadLocalDocumentBody) {
-          loadedDocsRef.current.delete(documentId)
-        }
-        if (hydrationPlan.loadComments) loadedCommentsRef.current.delete(documentId)
+      // Body requests intentionally survive a selection change and become a
+      // warm cache hit. Comments remain selection-owned and are re-armed when
+      // an interrupted document is opened again.
+      if (!commentsApplied && hydrationPlan.loadComments) {
+        loadedCommentsRef.current.delete(documentId)
       }
     }
-  }, [syncActive, hydrated, selectedDocumentId, serverObservationEpoch, dispatch])
+  }, [
+    dispatch,
+    hydrated,
+    loadDocumentBody,
+    selectedDocumentId,
+    serverObservationEpoch,
+    syncActive,
+  ])
 
   // -- debounced autosave trigger --------------------------------------- #
 
@@ -965,7 +1145,48 @@ export function useEditorHistoryApi({
     syncActive,
   ])
 
-  return { error, flushDocumentForShare, registerOpenedServerDocument }
+  const selectedDocumentBodyHydration = useMemo(() => {
+    const documentId = selectedDocumentId
+    const serverDocument = documentId
+      ? serverDocumentsRef.current.get(documentId)
+      : undefined
+    const document = serverDocument
+      ?? (documentId ? editorDocuments[documentId] : undefined)
+    return resolveEditorDocumentBodyHydration({
+      documentId,
+      error: documentId
+        ? documentBodyErrorsRef.current.get(documentId) ?? null
+        : null,
+      hasExactDocumentDetail: Boolean(
+        documentId
+        && serverDocument
+        && exactDetailProvenanceRef.current.get(documentId)
+          === editorDocumentDetailProvenanceKey(serverDocument),
+      ),
+      hasLoadedDocumentBody: Boolean(
+        documentId && loadedDocsRef.current.has(documentId),
+      ),
+      hasServerDocument: serverDocument !== undefined,
+      requiresExactDocumentDetail: Boolean(
+        document && isCollaborationDocument(document),
+      ),
+    })
+  }, [
+    documentBodyObservationEpoch,
+    editorDocuments,
+    hydrated,
+    selectedDocumentId,
+    serverObservationEpoch,
+    syncActive,
+  ])
+
+  return {
+    error,
+    flushDocumentForShare,
+    prefetchDocumentBody,
+    registerOpenedServerDocument,
+    selectedDocumentBodyHydration,
+  }
 }
 
 function requireEditorMetadataRevision(revision: number | undefined): number {

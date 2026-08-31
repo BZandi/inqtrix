@@ -17,7 +17,13 @@ log = logging.getLogger("inqtrix.web_gateway")
 _PROXY_BODY_HEADROOM_BYTES = 10 * 1024 * 1024
 _DEFAULT_MAX_FILE_BYTES = 100 * 1024 * 1024
 _DEFAULT_MAX_REQUEST_BYTES = _DEFAULT_MAX_FILE_BYTES + _PROXY_BODY_HEADROOM_BYTES
-_DEFAULT_MAX_UPSTREAM_CONNECTIONS = 200
+# Sized against the API's own admission caps, not guessed: chat and native
+# runs each admit up to 100 by default, and every open event stream holds one
+# upstream connection for the run's whole duration on top of that. At 200 the
+# shipped caps alone could fill the pool, and the next request -- a page load,
+# a quota poll -- gets a 503 rather than waiting. httpx opens connections on
+# demand, so a higher ceiling costs nothing until the load actually arrives.
+_DEFAULT_MAX_UPSTREAM_CONNECTIONS = 512
 
 _COLLABORATION_MIN_FRAME_BYTES = 65_536
 _COLLABORATION_MAX_FRAME_BYTES = 16 * 1_048_576

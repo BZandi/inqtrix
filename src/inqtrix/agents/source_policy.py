@@ -10,6 +10,7 @@ and child-run submission.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 
 from inqtrix.core.results import SourcePolicy
 from inqtrix.exceptions import AgentPolicyDenied
@@ -54,6 +55,12 @@ _KNOWLEDGE_ONLY_TOOLS = frozenset(
         # context-archive offload ("Volltext im Lauf-Archiv:
         # read_canvas(...)") must stay callable in this directive too.
         "read_canvas",
+        # Editor reads (P7-E1) are the user's own documents — internal
+        # content like the canvas, no web exposure. They are deliberately
+        # NOT in KNOWLEDGE_TOOL_NAMES either: source_policy.knowledge
+        # governs the knowledge BASE, not the user's editor.
+        "read_editor_document",
+        "search_editor_document",
     }
 )
 
@@ -177,6 +184,7 @@ def execution_payload(
     consent_reason: str,
     tool_use_counts: dict[str, int] | None = None,
     limits: dict[str, object] | None = None,
+    tool_grants: "Iterable[str] | None" = None,
 ) -> dict[str, object]:
     """Canonical run/snapshot execution projection for Agent Desk.
 
@@ -205,6 +213,9 @@ def execution_payload(
         # block; absent limits remain an explicit empty object for older or
         # non-agent callers instead of being guessed by the UI.
         "limits": dict(limits or {}),
+        # Run-wide tool grants (P6B) — explicit empty list for engines
+        # without grants, never inferred by the UI.
+        "tool_grants": sorted(tool_grants or ()),
     }
 
 

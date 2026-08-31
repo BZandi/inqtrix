@@ -145,6 +145,23 @@ class KernelDeps:
     reasoning_effort: str | None
     timeout: float
     session_id: str = ""
+    clarified_answers: list[str] = field(default_factory=list)
+    """Question/answer pairs the user already settled via ``ask_user``.
+
+    The answer reaches the MODEL through the tool result, but the
+    coverage judge only ever saw ``question`` — so after the user named
+    what was missing, the verdict still reported it as missing and the
+    run kept working against the original wording (F-P14-02). Rebuilt on
+    resume because the tool re-executes; deduped for that reason.
+    """
+    attached_report_ids: tuple[str, ...] = ()
+    """Research-Desk reports the USER attached to this run.
+
+    The attachment is the consent: ``read_research_report`` refuses every
+    id outside this tuple, so the model cannot read an arbitrary run it
+    merely has visibility for. Resolved server-side at submit time and
+    frozen for the run.
+    """
     event_sink: Any = None
     capability_registry: Any = None
     capability_context: Any = None
@@ -163,6 +180,14 @@ class KernelDeps:
     skill_answers: dict[str, dict[str, str]] = field(default_factory=dict)
     session_history: str = ""
     artifact_registry: tuple[dict[str, Any], ...] = ()
+    collection_catalog: tuple[Any, ...] | None = None
+    """Knowledge collections this run may reach (P10-K3), listed for the
+    model in the user message. ``None`` means the catalog could not be
+    read (block omitted — never a silent "no collections"); an empty
+    tuple is a real, stated state. Latched by
+    ``collection_catalog_loaded`` so a Deep run's second message build
+    does not list twice."""
+    collection_catalog_loaded: bool = False
     last_response_form: str = ""
     prior_evidence_count: int = 0
     effective_response_form: str = ""
@@ -177,6 +202,36 @@ class KernelDeps:
     )
     tool_call_limit: int = 0
     tool_call_ceiling: int = 0
+    knowledge_scope_explicit: bool = False
+    """Whether the run's knowledge scope is the USER's own pick (P10-K2).
+
+    Submission pins every knowledge-capable run to a concrete collection
+    set, so the pinned ids alone cannot distinguish a deliberate scope
+    from the "everything visible" default. This flag carries that intent
+    into the balanced gate predicate: a user-scoped search is already
+    approved by the act of scoping. Fail-closed — an unset flag (legacy
+    row, missing segment context) keeps the gate."""
+    tool_grants: frozenset[str] = frozenset()
+    """Run-wide tool grants (P6B): tools the user approved with
+    ``approval_scope='run'``, folded from decided approval rows at every
+    segment start (``effective_tool_grants``). Only the balanced-mode
+    gate predicates consult this — strict stays per-call and
+    ``ALWAYS_GATED_TOOLS`` are excluded by construction."""
+    target_document_id: str = ""
+    """Editor document the run explicitly targets (P7-E1), mirrored from
+    ``RunRequest.document_id`` — the mission engine's
+    ``target_document_id`` precedent. When set, the editor tools refuse
+    every other document; empty means the model may work on any document
+    it has read."""
+    editor_read_receipts: dict[str, int] = field(default_factory=dict)
+    """Durable read receipts (P7-E1): document_id -> revision the model
+    actually READ in this run via ``read_editor_document``/
+    ``search_editor_document``. ``propose_editor_patch`` refuses targets
+    without a receipt and pins the receipt revision as
+    ``expected_revision`` (server-side 409 on drift). Reconstructed at
+    segment start from checkpointed ToolMessages with a producing-tool
+    check — losing a receipt only forces a re-read (fail-closed), unlike
+    a lost skill RESTRICTION, which aborts the resume."""
     step_limit: int = 0
     step_ceiling: int = 0
     checkpointed_steps: int = 0

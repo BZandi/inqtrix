@@ -135,6 +135,15 @@ class PatchProposeInput(BaseModel):
     document_id: str = Field(..., min_length=1)
     edits: list[PatchEditInput] = Field(..., min_length=1)
     summary: str = ""
+    expected_revision: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Document revision the caller read before proposing (P7-E1); "
+            "a mismatch refuses the proposal with "
+            "editor.patch_revision_conflict. None skips the pin."
+        ),
+    )
 
 
 class PatchProposeOutput(BaseModel):
@@ -190,6 +199,7 @@ def build_editor_patch_capabilities(
                 created_by_user_id=_capability_user_id(context),
                 visible_to=context.visible_to,
                 principal=context.principal,
+                expected_revision=payload.expected_revision,
             )
         except DocumentNotFound as exc:
             raise CapabilityError(
@@ -202,6 +212,17 @@ def build_editor_patch_capabilities(
                 "editor.patch_invalid",
                 str(exc),
                 http_status=400,
+            ) from exc
+        except PatchRevisionConflict as exc:
+            # Same conflict vocabulary as apply: a proposal pinned to a
+            # stale read must fail loudly, never anchor against text the
+            # proposer has not seen.
+            raise CapabilityError(
+                "editor.patch_revision_conflict",
+                "Das Dokument wurde zwischenzeitlich geaendert "
+                f"(aktuelle Revision {exc.current_revision}). Lies das "
+                "Dokument erneut, bevor du Aenderungen vorschlaegst.",
+                http_status=409,
             ) from exc
         return PatchProposeOutput(
             patch_id=patch.patch_id,

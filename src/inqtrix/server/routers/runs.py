@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
+from functools import partial
 from queue import Empty
 from typing import TYPE_CHECKING, Mapping
 
@@ -29,7 +30,29 @@ from inqtrix.core.constants import (
     AGENT_SOURCE_IDS,
     AGENT_TOOL_DIRECTIVES,
 )
-from inqtrix.core.results import SourcePolicy
+from pydantic import ValidationError
+
+from inqtrix.agents.report_requirement import (
+    REPORT_GUIDANCE_MAX_CHARS,
+    REPORT_RULE_IDS_MAX,
+)
+from inqtrix.services.attached_report_resolver import (
+    AttachedReportError,
+    resolve_attached_reports,
+)
+from inqtrix.services.report_requirement_resolver import (
+    ReportRequirementError,
+    resolve_report_requirement,
+)
+
+from inqtrix.core.results import (
+    CANVAS_COMMENT_MAX_CHARS,
+    CANVAS_CONTEXT_MAX_COMMENTS,
+    CANVAS_QUOTE_CONTEXT_MAX_CHARS,
+    CANVAS_QUOTE_MAX_CHARS,
+    CanvasContext,
+    SourcePolicy,
+)
 from inqtrix.content.skills import SkillNotFound
 from inqtrix.knowledge.stores.ports import CollectionNotFound
 from inqtrix.project.agent_sessions_ports import AgentSessionNotFound
@@ -43,6 +66,9 @@ from inqtrix.server.routers import (
     stack_error_response,
 )
 from inqtrix.runs.shared import replay_after
+from inqtrix.server.stream_authorization import (
+    GenerationGatedFrameAuthorization,
+)
 from inqtrix.server.runs import (
     RunActive,
     RunNotFound,
@@ -135,6 +161,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     router = APIRouter()
     settings = container.settings
     resolver = container.resolver
+    lanes = container.execution_lanes
     run_service = container.run_service
     run_store = container.run_store
     quota_service = container.quota_service
@@ -217,6 +244,13 @@ def build_router(container: "AppContainer") -> APIRouter:
             isinstance(requested_collections, list)
             and bool(requested_collections)
         )
+        # P10-K2: persist WHOSE choice the pinned scope is. The pin below
+        # resolves both cases to a concrete id list, so afterwards the
+        # list alone can no longer tell "user picked these collections"
+        # from "we filled in everything visible" — and the balanced gate
+        # asks about exactly that difference. Written unconditionally so
+        # a missing key means "pre-P10 row" and fails closed to False.
+        resolved.knowledge_filters["explicit"] = explicit_scope
         if (
             knowledge_service is not None
             and visible_to is not None
@@ -310,6 +344,161 @@ def build_router(container: "AppContainer") -> APIRouter:
                 "source_policy gilt nur fuer Agent-Modi.",
                 "invalid_request_error",
             )
+        # Canvas attachment (P4): validated strictly, and only where it
+        # is actually consumed — the kernel user message. Any other mode
+        # (and the quick lane, which bypasses that message) REJECTS
+        # instead of silently dropping the attachment.
+        raw_canvas_context = body.get("canvas_context")
+        canvas_context = None
+        if raw_canvas_context is not None:
+            if resolved.mode != "agent_kernel":
+                return error_response(
+                    400,
+                    "canvas_context gilt nur fuer den Agent-Kernel-Modus.",
+                    "invalid_request_error",
+                )
+            if execution_directive:
+                return error_response(
+                    400,
+                    "canvas_context kann nicht mit execution_directive "
+                    "kombiniert werden.",
+                    "invalid_request_error",
+                )
+            try:
+                canvas_context = CanvasContext.model_validate(
+                    raw_canvas_context
+                )
+            except ValidationError as exc:
+                first = exc.errors()[0]
+                location = ".".join(str(part) for part in first["loc"])
+                return error_response(
+                    400,
+                    "canvas_context ungueltig"
+                    + (f" ({location}: {first['msg']})" if location else "")
+                    + " — Grenzen: max. "
+                    f"{CANVAS_CONTEXT_MAX_COMMENTS} Kommentare, Zitat "
+                    f"{CANVAS_QUOTE_MAX_CHARS}, Kontext "
+                    f"{CANVAS_QUOTE_CONTEXT_MAX_CHARS}, Kommentar "
+                    f"{CANVAS_COMMENT_MAX_CHARS} Zeichen. Inhalte werden "
+                    "nie gekuerzt uebertragen.",
+                    "invalid_request_error",
+                )
+        # Result requirement set BEFORE the run (S6). The plan gate is
+        # the other entry point, but three mission paths never reach one
+        # — autonomous, the speed tier and delegated children — and the
+        # kernel has no plan gate at all. Ids only: the server resolves
+        # label, revision and body from the CALLER's own catalog, so a
+        # client can never put unchecked text into the writing prompts.
+        raw_report_guidance = body.get("report_guidance")
+        raw_report_rule_ids = body.get("report_rule_ids")
+        report_requirement = ""
+        if raw_report_guidance is not None or raw_report_rule_ids is not None:
+            if not is_agent:
+                return error_response(
+                    400,
+                    "report_guidance/report_rule_ids gelten nur fuer "
+                    "Agent-Modi.",
+                    "invalid_request_error",
+                )
+            if execution_directive:
+                # The quick lane returns from _run_quick_web BEFORE the
+                # kernel user message is built, so the requirement would
+                # be accepted, composed, persisted — and never reach a
+                # single prompt. Same refusal as canvas_context above,
+                # for the same reason: a silent drop is the one failure
+                # this feature exists to prevent.
+                return error_response(
+                    400,
+                    "report_guidance/report_rule_ids koennen nicht mit "
+                    "execution_directive kombiniert werden.",
+                    "invalid_request_error",
+                )
+            if raw_report_guidance is not None and (
+                not isinstance(raw_report_guidance, str)
+                or len(raw_report_guidance) > REPORT_GUIDANCE_MAX_CHARS
+            ):
+                return error_response(
+                    400,
+                    "report_guidance muss ein String mit maximal "
+                    f"{REPORT_GUIDANCE_MAX_CHARS} Zeichen sein.",
+                    "invalid_request_error",
+                )
+            if raw_report_rule_ids is not None and (
+                not isinstance(raw_report_rule_ids, list)
+                or any(
+                    not isinstance(item, str) or not item.strip()
+                    for item in raw_report_rule_ids
+                )
+                or len(raw_report_rule_ids) > REPORT_RULE_IDS_MAX
+            ):
+                return error_response(
+                    400,
+                    "report_rule_ids muss eine Liste von hoechstens "
+                    f"{REPORT_RULE_IDS_MAX} Regel-Ids sein.",
+                    "invalid_request_error",
+                )
+            try:
+                # Only the composed text travels: the parts it was
+                # composed FROM would be a field nothing reads, and the
+                # composition carries `[Regel: <label>]` markers, so the
+                # attached rules stay recoverable from it.
+                report_requirement, _parts = await resolve_report_requirement(
+                    free_text=(raw_report_guidance or "").strip(),
+                    template_ids=raw_report_rule_ids or [],
+                    prompt_templates=container.prompt_template_service,
+                    visible_to=visible_to,
+                )
+            except ReportRequirementError as exc:
+                # Loud, never silent: a run that quietly starts without
+                # the requirements the user attached is the exact failure
+                # this feature exists to prevent.
+                return error_response(
+                    400,
+                    " ".join(exc.messages),
+                    "invalid_request_error",
+                )
+        # Attached research reports (P14): ids only. Existence, completion
+        # and the name are read server-side under the CALLER's visibility,
+        # like the prompt-library rules — a run whose attachments silently
+        # vanished is the failure this channel exists to prevent.
+        raw_report_ids = body.get("report_ids")
+        attached_reports: list[dict[str, object]] = []
+        if raw_report_ids is not None:
+            if resolved.mode != "agent_kernel":
+                return error_response(
+                    400,
+                    "report_ids gilt nur fuer den Agent-Kernel-Modus.",
+                    "invalid_request_error",
+                )
+            if execution_directive:
+                # The quick lane returns before the kernel user message is
+                # built, so the registry line would never be written and
+                # the tool would never be offered.
+                return error_response(
+                    400,
+                    "report_ids kann nicht mit execution_directive "
+                    "kombiniert werden.",
+                    "invalid_request_error",
+                )
+            if not isinstance(raw_report_ids, list) or any(
+                not isinstance(item, str) or not item.strip()
+                for item in raw_report_ids
+            ):
+                return error_response(
+                    400,
+                    "report_ids muss eine Liste von Lauf-Ids sein.",
+                    "invalid_request_error",
+                )
+            try:
+                attached_reports = resolve_attached_reports(
+                    raw_report_ids,
+                    run_store=run_store,
+                    visible_to=visible_to,
+                )
+            except AttachedReportError as exc:
+                return error_response(
+                    400, " ".join(exc.messages), "invalid_request_error"
+                )
         if execution_directive and document_id is not None:
             return error_response(
                 400,
@@ -493,6 +682,9 @@ def build_router(container: "AppContainer") -> APIRouter:
                 tool_directives=tool_directives,
                 source_policy=source_policy if is_agent else None,
                 execution_directive=execution_directive,
+                canvas_context=canvas_context,
+                report_requirement=report_requirement,
+                attached_reports=attached_reports,
             )
         except RunPerUserLimit:
             # THEIR cap, not the shared queue: the caller can free
@@ -826,6 +1018,11 @@ def build_router(container: "AppContainer") -> APIRouter:
                     "after muss eine Event-Sequenznummer (Ganzzahl) sein",
                     "invalid_request_error",
                 )
+        # Decided BEFORE the subscribe: the JSON polling fallback is a
+        # one-shot replay read — subscribing it as a live viewer would
+        # spawn a throwaway poller thread per poll and count every ~3s
+        # poll as a join in the 5b viewer histogram.
+        wants_json = req.query_params.get("format") == "json"
         try:
             workspace_id = workspace_id_from_request(req)
             subscription = await asyncio.to_thread(
@@ -833,13 +1030,14 @@ def build_router(container: "AppContainer") -> APIRouter:
                 run_id,
                 workspace_id=workspace_id,
                 visible_to=visible_to,
+                stream=not wants_json,
             )
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content=exc.detail)
         except RunNotFound:
             return error_response(404, "Run nicht gefunden", "not_found")
 
-        async def _authorized_frame() -> bool:
+        async def _full_frame_check() -> bool:
             try:
                 current = await resolve_live_principal(principal_dep, req)
                 if (
@@ -866,13 +1064,37 @@ def build_router(container: "AppContainer") -> APIRouter:
                 return False
             return True
 
+        # One shared gate with the indexing twin: the full chain above
+        # re-runs only when the user's commit-ordered authorization
+        # generation moved or the bounded ceiling elapsed. Principals
+        # without a generation keep the full chain per frame.
+        _frame_gate = GenerationGatedFrameAuthorization(
+            full_check=_full_frame_check,
+            read_generation=(
+                (
+                    lambda: container.permission_service
+                    .authorization_generation(
+                        tenant_id=principal.tenant_id,
+                        user_id=principal.user_id,
+                    )
+                )
+                if principal.user_id is not None
+                else None
+            ),
+        )
+
+        async def _authorized_frame() -> bool:
+            return await _frame_gate.allowed()
+
         # The polling fallback returns the SAME replay buffer through
         # ``?format=json`` as an immediate JSON page instead of a
         # stream — for clients behind SSE-buffering proxies. One event
         # pipeline, one auth path; ``terminal`` tells the poller to stop.
-        if req.query_params.get("format") == "json":
+        if wants_json:
             try:
-                if not await _authorized_frame():
+                # One-shot request: a fresh gate would run the full chain
+                # anyway, so the generation read would be pure added cost.
+                if not await _full_frame_check():
                     return error_response(
                         404, "Run nicht gefunden", "not_found"
                     )
@@ -900,16 +1122,29 @@ def build_router(container: "AppContainer") -> APIRouter:
                     subscription.replay[-1].get("type") in TERMINAL_EVENTS
                 ):
                     return
+                # Replay/live boundary marker. Everything before this frame
+                # was served from the buffer — HISTORY the client renders in
+                # place; everything after arrives live and may animate. Pure
+                # transport state: not persisted, carries no ``sequence`` (so
+                # resume cursors ignore it), and terminal streams that end
+                # right after the replay never emit it. Without the marker a
+                # reload into a running run replayed its whole event history
+                # one frame at a time and the UI animated every line as if it
+                # were new.
+                yield format_sse_event(
+                    {"type": "inqtrix.stream.live", "run_id": run_id}
+                )
                 loop = asyncio.get_running_loop()
                 next_heartbeat = loop.time() + 5.0
                 while True:
                     if await req.is_disconnected():
                         return
                     try:
-                        event = await asyncio.to_thread(
-                            subscription.queue.get,
-                            True,
-                            0.5,
+                        # Reader lane, not the shared default pool: a
+                        # busy AI call must never delay event delivery.
+                        event = await loop.run_in_executor(
+                            lanes.streams,
+                            partial(subscription.queue.get, True, 0.5),
                         )
                     except Empty:
                         if loop.time() >= next_heartbeat:

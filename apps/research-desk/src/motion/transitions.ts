@@ -15,14 +15,12 @@ export const appMotion = {
     duration: 0.26,
     ease: [0.22, 1, 0.36, 1],
   },
-  /** Workspace entry on a view switch. Deliberately faster than `panel`:
-   * a view switch is pure opacity+rise (no spatial resize to read), and the
-   * desktop guidance across systems (Material desktop 150–200ms, Fluent
-   * "normal" 200ms, Carbon productive 150–240ms) puts this transition type
-   * at 200ms. Panels keep 260ms — a size change reads better slightly
-   * slower than a fade. */
-  view: {
-    duration: 0.2,
+  /** The skeleton veil's release: a staged region reveals its settled
+   * content by fading the covering silhouette out — deliberately the fastest
+   * curve in the vocabulary, because at this moment the content is already
+   * final and every extra millisecond of veil reads as lag, not polish. */
+  reveal: {
+    duration: 0.15,
     ease: [0.22, 1, 0.36, 1],
   },
   /** Page-in-page push into a detail layer: the incoming layer moves from

@@ -749,7 +749,7 @@ class ServerSettings(BaseSettings):
     )
     """Optional base-URL override for the auto-created ``PerplexitySearch`` provider. Empty (default) uses the Perplexity SDK default (``https://api.perplexity.ai``); set only to target a Perplexity-compatible proxy."""
     max_concurrent: int = Field(
-        6,
+        100,
         alias="MAX_CONCURRENT",
         ge=1,
         description=(
@@ -758,27 +758,54 @@ class ServerSettings(BaseSettings):
             "``/v1/runs`` uses ``run_max_concurrent`` when set, or this "
             "same value otherwise. Each active run holds one thread for "
             "its full duration (the research graph is synchronous), so "
-            "this also bounds the in-process thread pool. Sized for "
-            "moderate per-run resource use (LLM tokens, search-API "
-            "quota); the ceiling in practice is the upstream provider's "
-            "rate limit and the host's CPU/RAM, not this number — raise "
-            "it when the provider supports higher parallelism, lower it "
-            "if you hit provider 429s."
+            "this also bounds the in-process thread pool. Sized so a "
+            "hundred people work at once without queueing: a thread "
+            "that is waiting on a provider costs a few kilobytes and "
+            "no interpreter lock, and the lane grows only as load "
+            "arrives — so the high default removes a queue rather than "
+            "reserving resources. The ceiling in practice is the "
+            "upstream provider's rate limit and the host's CPU/RAM, "
+            "not this number — raise it when the provider supports "
+            "higher parallelism, lower it if you hit provider 429s."
         ),
     )
-    """Maximum number of concurrently executing OpenAI-compatible chat-completion requests in the HTTP server. Native ``/v1/runs`` uses ``run_max_concurrent`` when set, or this same value otherwise. Each active run holds one thread for its full duration (the research graph is synchronous), so this also bounds the in-process thread pool. The real ceiling is the upstream provider's rate limit and the host's CPU/RAM; raise when the provider supports more parallelism, lower on provider 429s."""
+    """Maximum number of concurrently executing OpenAI-compatible chat-completion requests in the HTTP server. Native ``/v1/runs`` uses ``run_max_concurrent`` when set, or this same value otherwise. Each active call holds one thread for its full duration (the research graph is synchronous), and this value sizes the dedicated AI thread lane — with headroom, since a disconnected stream releases its admission slot while its thread runs on. The lane grows only as load arrives, so the high default removes a queue rather than reserving resources. The real ceiling is the upstream provider's rate limit and the host's CPU/RAM; raise when the provider supports more parallelism, lower on provider 429s."""
+    stream_reader_workers: int = Field(
+        128,
+        alias="INQTRIX_STREAM_READER_WORKERS",
+        ge=1,
+        description=(
+            "Threads reserved for event-stream readers in the HTTP "
+            "server. Three kinds of reader draw from it: every open run "
+            "event stream, every open indexing event stream, and every "
+            "streamed chat completion (which holds one for its whole "
+            "turn while it drains progress). The count is not bounded by "
+            "the number of runs — several viewers may watch the same "
+            "one. Beyond this many readers, they are served in rotation, "
+            "which delays events rather than dropping them. A waiting "
+            "thread costs a few kilobytes and does not hold the "
+            "interpreter lock, so this is sized generously on purpose; "
+            "lower it only on a memory-tight host that never has many "
+            "readers."
+        ),
+    )
+    """Threads reserved for event-stream readers in the HTTP server (default 128). Drawn on by open run streams, open indexing streams, and streamed chat completions alike; viewer count is not bounded by run count. Past this many readers they are served in rotation — events are delayed, never dropped. Kept separate from the AI lane so a busy chat cannot stall event delivery."""
     run_max_concurrent: int | None = Field(
-        None,
+        100,
         alias="RUN_MAX_CONCURRENT",
         ge=1,
         description=(
-            "Optional active-worker cap for native ``/v1/runs`` jobs. "
-            "When unset, native runs reuse ``max_concurrent``; when set, "
-            "chat completions and native runs have explicit per-surface "
-            "caps. This does not create a global cross-endpoint cap."
+            "Active-worker cap for native ``/v1/runs`` jobs, set by "
+            "default so runs and chat completions have explicit "
+            "per-surface caps. The ``None`` fallback to "
+            "``max_concurrent`` survives only for callers that build "
+            "settings programmatically — clearing the environment "
+            "variable yields this default, not ``None``. This does not "
+            "create a global cross-endpoint cap: chat and runs each "
+            "admit up to their own value, so the worst case is the sum."
         ),
     )
-    """Optional active-worker cap for native ``/v1/runs`` jobs. When unset, native runs reuse ``max_concurrent``; when set, chat completions and native runs have explicit per-surface caps. This does not create a global cross-endpoint cap."""
+    """Active-worker cap for native ``/v1/runs`` jobs, set by default so runs and chat completions have explicit per-surface caps. Clearing the environment variable yields this default, not ``None``; the fallback to ``max_concurrent`` survives only for programmatic callers. Chat and runs each admit up to their own value, so the worst case is the sum."""
     run_max_concurrent_per_user: int | None = Field(
         None,
         alias="RUN_MAX_CONCURRENT_PER_USER",
@@ -790,18 +817,21 @@ class ServerSettings(BaseSettings):
             "CHILDREN). Parked/waiting runs hold no slot and are "
             "excluded; agent PARENTS are excluded too (they park "
             "immediately and must not contend against their own "
-            "children). Size it at or above "
-            "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN so one agent wave fits "
-            "(startup warns otherwise). Approximate on Postgres under "
+            "children). ONE agent wave "
+            "(INQTRIX_AGENT_MAX_PARALLEL_CHILDREN) is the FLOOR, not the "
+            "target: a user may keep several Agent Desks running side by "
+            "side, and each of those trees needs its own wave — size it "
+            "at that many waves plus headroom (startup warns only when "
+            "it falls below a single wave). Approximate on Postgres under "
             "READ COMMITTED (may transiently exceed by a few); exact "
             "in-memory. Unset (default) keeps admission purely global — "
             "single-operator deployments stay byte-identical. Anonymous "
             "submissions (no subject) are never capped."
         ),
     )
-    """Optional per-principal fairness bound under the global run cap (default ``None`` = off). Counts a subject's slot-occupying native runs at admission — QUEUED+RUNNING standard runs and agent CHILDREN. Excluded: parked/waiting runs (slot-free) and agent PARENTS (they park immediately and must not contend against their own children). Size it at or above ``INQTRIX_AGENT_MAX_PARALLEL_CHILDREN`` so a single agent wave fits (the composition root warns at startup otherwise). APPROXIMATE on the Postgres backend: under READ COMMITTED, concurrent submits by one subject can transiently exceed the cap by a few — acceptable for a fairness bound (the in-memory backend is exact). It protects OTHER users from a noisy neighbour; the monthly quota bounds the neighbour's own spend."""
+    """Optional per-principal fairness bound under the global run cap (default ``None`` = off). Counts a subject's slot-occupying native runs at admission — QUEUED+RUNNING standard runs and agent CHILDREN. Excluded: parked/waiting runs (slot-free) and agent PARENTS (they park immediately and must not contend against their own children). ``INQTRIX_AGENT_MAX_PARALLEL_CHILDREN`` — one wave — is the FLOOR, not the target: a user may keep several Agent Desks running at once, and each tree needs its own wave, so size it at that many waves plus headroom. The composition root warns at startup only when the value falls below a SINGLE wave. APPROXIMATE on the Postgres backend: under READ COMMITTED, concurrent submits by one subject can transiently exceed the cap by a few — acceptable for a fairness bound (the in-memory backend is exact). It protects OTHER users from a noisy neighbour; the monthly quota bounds the neighbour's own spend."""
     run_queue_max_size: int = Field(
-        50,
+        100,
         alias="RUN_QUEUE_MAX_SIZE",
         ge=0,
         description=(
@@ -856,6 +886,24 @@ class ServerSettings(BaseSettings):
             "upper bound in Valkey mode."
         ),
     )
+    upload_max_concurrent: int = Field(
+        6,
+        alias="INQTRIX_UPLOAD_MAX_CONCURRENT",
+        ge=1,
+        description=(
+            "Maximum upload operations one WORKER process executes at "
+            "once. Unlike a research run, which spends its thread waiting "
+            "on a provider, an upload extracts text from the file itself "
+            "and spends real CPU — so a worker sized for provider "
+            "parallelism would otherwise run that many extractions at "
+            "once and saturate a CPU-limited pod. "
+            "INQTRIX_WORKER_CONCURRENCY remains an additional upper "
+            "bound. Without a worker process this value does nothing: "
+            "uploads are then reconciled one at a time in the API "
+            "process, which is a serial path and not configurable."
+        ),
+    )
+    """Maximum upload operations one WORKER process executes at once; ``INQTRIX_WORKER_CONCURRENCY`` remains an additional upper bound. Without a worker, uploads are reconciled serially in the API process and this value has no effect."""
     deletion_dispatch_timeout_seconds: int = Field(
         240,
         alias="INQTRIX_DELETION_DISPATCH_TIMEOUT_SECONDS",
@@ -1158,17 +1206,19 @@ class StorageSettings(BaseSettings):
         alias="INQTRIX_DATABASE_POOL_SIZE",
         ge=1,
         description=(
-            "Persistent connections per POOLED engine (the platform "
-            "bundle, run store, indexing store, and auth bundle each "
-            "own one; NullPool stores, including the API's run-thread "
-            "lane, are unaffected). The worst-case budget of one "
-            "process is pooled_engines x (pool_size + max_overflow) "
+            "Persistent connections per POOLED engine. The engines are "
+            "NOT enumerated here -- every process counts the ones it "
+            "actually builds and logs the total at startup, because a "
+            "list in prose goes stale the day a store is added. "
+            "NullPool stores are unaffected by this value. The "
+            "worst-case budget of one process is "
+            "pooled_engines x (pool_size + max_overflow) "
             "plus the in-flight NullPool connections — size the sum of "
             "all replicas below Postgres max_connections (or front it "
             "with a transaction pooler)."
         ),
     )
-    """Persistent connections per POOLED engine (default 5, the SQLAlchemy default — existing deployments see zero change). Four engines per API process are pooled (platform bundle, run store, indexing store, auth bundle) and the worker adds two more; NullPool stores open per-operation connections and ignore this. The API's run-thread lane (``build_run_thread_persistence``) adds a fifth engine on Postgres, but it is NullPool and therefore holds nothing idle: its transient use is bounded by the run-concurrency cap (``RUN_MAX_CONCURRENT``, falling back to ``MAX_CONCURRENT``), not by this setting. Budget arithmetic: pooled_engines x (pool_size + max_overflow) per process, summed over replicas, must stay below Postgres ``max_connections`` unless a transaction pooler fronts the database."""
+    """Persistent connections per POOLED engine (default 5, the SQLAlchemy default — existing deployments see zero change). The number of pooled engines is NOT enumerated here: every process counts the ones it actually builds and logs the worst case at startup, because a list written down in prose goes stale the moment a store is added. NullPool stores open per-operation connections and ignore this setting -- including the API's run-thread lane (``build_run_thread_persistence``), which therefore holds nothing idle; its transient use is bounded by the run-concurrency cap (``RUN_MAX_CONCURRENT`` in the API, ``INQTRIX_WORKER_CONCURRENCY`` in a worker), not by this value. That worst case IS part of the startup comparison against ``max_connections``, because a synchronised burst can ask for all of it at once. Budget arithmetic: pooled_engines x (pool_size + max_overflow) per process, summed over replicas, plus the run lane's transient peak, must stay below Postgres ``max_connections`` unless a transaction pooler fronts the database."""
     pool_max_overflow: int = Field(
         10,
         alias="INQTRIX_DATABASE_POOL_MAX_OVERFLOW",
@@ -2351,10 +2401,11 @@ class KnowledgeSettings(BaseSettings):
             "and compete with live query embedding; raise this when the "
             "provider has headroom, or lower it when background indexing "
             "starves interactive retrieval or reaches provider limits. In "
-            "worker mode (INQTRIX_QUEUE_BACKEND=valkey) the actual "
-            "execution parallelism is INQTRIX_WORKER_CONCURRENCY per "
-            "worker process; this value then governs admission only. "
-            "Additional jobs wait in the FIFO queue."
+            "worker mode (INQTRIX_QUEUE_BACKEND=valkey) the indexing "
+            "loop runs at the LOWER of this and "
+            "INQTRIX_WORKER_CONCURRENCY, so this value bounds "
+            "execution as well as admission. Additional jobs wait in "
+            "the FIFO queue."
         ),
     )
     """Admission limit for concurrently executing indexing operations; one collection generation may coexist with independently fenced document revisions."""
@@ -2473,17 +2524,23 @@ class QueueSettings(BaseSettings):
     )
     """Valkey connection URL (``redis://`` scheme, e.g. ``redis://127.0.0.1:6379/0``) for the job queue. Required when the queue backend is ``valkey``; ignored otherwise."""
     worker_concurrency: int = Field(
-        2,
+        100,
         alias="INQTRIX_WORKER_CONCURRENCY",
         ge=1,
         description=(
-            "Maximum number of runs one worker process executes "
-            "concurrently. Each run blocks one thread for its full "
-            "duration (the research graph is synchronous), so this "
-            "bounds provider load per worker replica."
+            "Process-wide execution ceiling for one worker replica. It "
+            "sizes the research loop directly and caps every other loop "
+            "in the process: indexing is additionally bounded by "
+            "INQTRIX_REINDEX_MAX_CONCURRENT, upload by "
+            "INQTRIX_UPLOAD_MAX_CONCURRENT, deletion by "
+            "INQTRIX_DELETION_MAX_CONCURRENT, and each loop runs at the "
+            "LOWER of the two. A research run blocks one thread while it "
+            "waits on providers, so raising this mostly buys provider "
+            "parallelism; the domain ceilings exist because the other "
+            "loops spend real CPU instead of waiting."
         ),
     )
-    """Maximum number of runs one worker process executes concurrently. Each run blocks one thread for its full duration, so this bounds provider load per worker replica."""
+    """Process-wide execution ceiling for one worker replica. It sizes the research loop directly and caps the indexing, upload and deletion loops, each of which runs at the lower of this and its own domain ceiling."""
     worker_metrics_port: int = Field(
         0,
         alias="INQTRIX_WORKER_METRICS_PORT",
@@ -3654,16 +3711,52 @@ class AgentPlatformSettings(BaseSettings):
     )
     """Character threshold for bulk tool-result offload (default 8000, 0 = off). The full text lands in the run's ``context_archive`` artifact (readable via ``read_canvas``); the transcript keeps a digest PLUS every reference line, so offloading can never break a citation."""
     max_parallel_children: int = Field(
-        6,
+        8,
         alias="INQTRIX_AGENT_MAX_PARALLEL_CHILDREN",
+        ge=1,
         description=(
             "Child research runs submitted per park round (and the "
-            "in-process tool-wave width). The parent parks slot-free "
-            "while children run, so undersized workers serialise a "
-            "wave but can no longer deadlock the pool."
+            "in-process tool-wave width). Defaults to the validated "
+            "plan ceiling (``MAX_PLAN_TASKS_DEFAULT``) so a plan the "
+            "validator accepts can also run in ONE wave; below it a "
+            "wave serialises. The parent parks slot-free while children "
+            "run, so an undersized worker slows a wave but can no "
+            "longer deadlock the pool."
         ),
     )
-    """Child research runs submitted per park round, and the width of the in-process tool wave (default 6). The parent holds NO execution slot while its children run (``waiting_for_children`` park) — sizing worker capacity below one wave serialises the wave's children (visible via the worker's startup sizing hint), it cannot starve or deadlock the pool."""
+    """Child research runs submitted per park round, and the width of the in-process tool wave (default 8 = the validated plan ceiling). The parent holds NO execution slot while its children run (``waiting_for_children`` park) — sizing worker capacity below one wave serialises the wave's children; it cannot starve or deadlock the pool."""
+    max_parallel_queries_per_task: int = Field(
+        3,
+        alias="INQTRIX_AGENT_MAX_PARALLEL_QUERIES_PER_TASK",
+        ge=1,
+        description=(
+            "Sub-queries of ONE retrieval task run concurrently, up to "
+            "this many. They are independent by construction — each "
+            "builds its prompt from the task and its own query, and "
+            "reads nothing the siblings produce; task DEPENDENCIES live "
+            "on ``depends_on`` and stay sequenced by the wave "
+            "scheduler. Sizing: the worst case is "
+            "INQTRIX_AGENT_MAX_PARALLEL_CHILDREN x this value "
+            "concurrent model calls from a single run, which must fit "
+            "MAX_CONCURRENT with room for other traffic (startup warns "
+            "otherwise). The gain curve is flat past 3: a measured task "
+            "went from 9:16 sequential to ~4:39, and a wider cap only "
+            "raises contention. 1 restores the sequential loop."
+        ),
+    )
+    """Concurrent sub-queries per retrieval task (default 3, 1 = sequential). A task's queries are independent by construction; task dependencies (``depends_on``) remain sequenced by the wave scheduler. Worst case is ``max_parallel_children x`` this value concurrent model calls per run — size ``MAX_CONCURRENT`` above that (the composition root warns otherwise)."""
+    checkpointer_pool_size: int = Field(
+        4,
+        alias="INQTRIX_AGENT_CHECKPOINTER_POOL_SIZE",
+        ge=1,
+        description=(
+            "Server connections the agent checkpointer's own psycopg "
+            "pool may hold, process-wide, shared by every concurrent "
+            "agent run. Counted in the startup connection budget and "
+            "published via the admin runtime endpoint."
+        ),
+    )
+    """Ceiling for the agent checkpointer's own psycopg pool (default 4), process-wide and shared by every concurrent agent run in that process. One source, three displays: the pool itself, the startup connection-budget line, and the admin runtime endpoint all read this value. Raise it only when a measurement shows pool-wait under agent target load — the checkpointer speaks its own driver, so this adds to (never replaces) the engine budget."""
     discovery_max_tool_calls: int = Field(
         15,
         alias="INQTRIX_AGENT_DISCOVERY_MAX_TOOL_CALLS",

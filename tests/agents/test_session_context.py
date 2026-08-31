@@ -212,6 +212,38 @@ def test_artifact_registry_lists_session_deliverables():
     assert entry["kind"] == "memo"
     assert entry["title"] == "Marktanalyse"
     assert entry["revision"] == 1
+    # P9 (K1/K4): the derived file name rides the registry entry.
+    assert entry["name"] == "marktanalyse.md"
+
+
+def test_artifact_registry_names_are_unique_in_created_order():
+    """Colliding titles get the -2 suffix by CREATED order (K1)."""
+    control = MemoryAgentControlStore()
+    for index, artifact_id in enumerate(["art_a", "art_b"], start=1):
+        asyncio.run(
+            control.upsert_artifact(
+                run_id=f"run_{index}",
+                kind="deliverable",
+                session_id="sess-1",
+                title="Bericht",
+                status="ready",
+                content_markdown="# Doc",
+                payload={},
+                refs=[],
+                updated_by="agent",
+                artifact_id=artifact_id,
+            )
+        )
+    pack = _pack(
+        [_summary("run_1", "Frage.")],
+        results={"run_1": {"answer": "A."}},
+        control=control,
+    )
+    names = {
+        entry["artifact_id"]: entry["name"]
+        for entry in pack.artifact_registry
+    }
+    assert names == {"art_a": "bericht.md", "art_b": "bericht-2.md"}
 
 
 def test_prior_evidence_count_deduplicates_canonical_sources():

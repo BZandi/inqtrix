@@ -563,3 +563,134 @@ async def test_group_receipt_fences_upload_and_commits_orphaning_atomically(
                         )
                     )
             await cleanup_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_insert_carries_the_callers_upload_intent(store) -> None:
+    """The intent lands in the INSERT itself, not in a follow-up write.
+
+    The column default is 'ready', and before this a reservation was born
+    ready and only a SECOND transaction corrected it -- an asyncpg
+    connection timeout in between left an asset that looked like a
+    complete file and had no bytes. Only the Postgres path exercises the
+    real column default and the `mutable` asymmetry, so this is the
+    backend the property must be proven on.
+    """
+    await _section(store, "fsec_intent", owner=USER_1_ID)
+    row = await store.upsert_asset(
+        id="fa_intent", section_id="fsec_intent", group_id=None, title="I",
+        label="I", file_name="i.pdf", mime_type="application/pdf",
+        origin="library", page_count=None, parse_status="parsed",
+        parse_warning=None, text_truncated=False, size_bytes=10,
+        server_file_id=None, extracted_text="", created_at=1.0,
+        updated_at=1.0, created_by_user_id=USER_1_ID, workspace_id=None,
+        initial_upload_status="awaiting_upload",
+    )
+    assert row.upload_status == "awaiting_upload"
+
+    # And the exact observed failure, replayed: no follow-up write happens
+    # at all (the connection died) -- the STORED row still tells the truth.
+    stored = await store.get_asset("fa_intent")
+    assert stored.upload_status == "awaiting_upload", (
+        "before the fix this row was 'ready' with no bytes"
+    )
+    assert stored.server_file_id is None
+
+
+@pytest.mark.asyncio
+async def test_default_intent_keeps_local_assets_ready(store) -> None:
+    """A plain local asset (server_file_id=None) is ready immediately."""
+    await _section(store, "fsec_local2", owner=USER_1_ID)
+    row = await _asset(
+        store, "fa_local2", owner=USER_1_ID, section_id="fsec_local2"
+    )
+    assert row.upload_status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_intent_is_insert_only_on_postgres(store) -> None:
+    """A repeated reservation upsert cannot reset an existing row.
+
+    upload_status is deliberately absent from the mutable column set;
+    this is the test that goes red if anyone adds it there.
+    """
+    await _section(store, "fsec_keep2", owner=USER_1_ID)
+    await _asset(
+        store, "fa_keep2", owner=USER_1_ID, section_id="fsec_keep2"
+    )  # born ready
+    row = await store.upsert_asset(
+        id="fa_keep2", section_id="fsec_keep2", group_id=None, title="K",
+        label="K", file_name="a.pdf", mime_type="application/pdf",
+        origin="library", page_count=2, parse_status="parsed",
+        parse_warning=None, text_truncated=True, size_bytes=10,
+        server_file_id=None, extracted_text="body", created_at=1.0,
+        updated_at=2.0, created_by_user_id=USER_1_ID, workspace_id=None,
+        initial_upload_status="awaiting_upload",
+    )
+    assert row.upload_status == "ready", (
+        "the stored status must survive; the intent acts only at INSERT"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reservation_survives_a_failing_follow_up_write_on_postgres(
+    store, monkeypatch
+) -> None:
+    """The observed failure, replayed against the REAL column default.
+
+    The memory twin pins the service pass-through; only this backend
+    exercises the actual Postgres default ('ready') that the INSERT must
+    override. The follow-up write dies mid-reservation -- the stored row
+    must already carry awaiting_upload, or the asset reappears as a
+    complete-looking file with no bytes.
+    """
+    from inqtrix.auth.principal import Principal, UserContext
+    from inqtrix.services.asset_records_service import AssetRecordsService
+
+    service = AssetRecordsService(store=store, durable=True)
+    visible = UserContext(
+        principal=Principal(
+            user_id=USER_1_ID,
+            kind="oidc_session",
+            tenant_id="default",
+            role="member",
+        )
+    )
+
+    async def _dies(*args, **kwargs):
+        raise ConnectionError("verbindung weg zwischen den beiden writes")
+
+    await _section(store, "fsec_fault", owner=USER_1_ID)
+    monkeypatch.setattr(store, "set_asset_upload_state", _dies)
+
+    with pytest.raises(ConnectionError):
+        await service.reserve_upload(
+            id="fa_fault", section_id="fsec_fault", group_id=None, title="F",
+            label="F", file_name="f.pdf", mime_type="application/pdf",
+            origin="library", page_count=None, parse_status="parsed",
+            parse_warning=None, text_truncated=False, size_bytes=10,
+            created_at=1.0, updated_at=1.0, caller_user_id=USER_1_ID,
+            workspace_id=None, visible_to=visible,
+        )
+
+    stored = await store.get_asset("fa_fault")
+    assert stored.upload_status == "awaiting_upload", (
+        "the INSERT itself must carry the intent on the real column default"
+    )
+    assert stored.server_file_id is None
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_insert_intent_is_rejected_on_postgres(store) -> None:
+    """The runtime guard must be wired in THIS backend, not only in memory."""
+    await _section(store, "fsec_guard_pg", owner=USER_1_ID)
+    with pytest.raises(ValueError, match="initial_upload_status"):
+        await store.upsert_asset(
+            id="fa_guard_pg", section_id="fsec_guard_pg", group_id=None,
+            title="G", label="G", file_name="g.pdf",
+            mime_type="application/pdf", origin="library", page_count=None,
+            parse_status="parsed", parse_warning=None, text_truncated=False,
+            size_bytes=10, server_file_id=None, extracted_text="",
+            created_at=1.0, updated_at=1.0, created_by_user_id=USER_1_ID,
+            workspace_id=None, initial_upload_status="awaiting-upload",
+        )

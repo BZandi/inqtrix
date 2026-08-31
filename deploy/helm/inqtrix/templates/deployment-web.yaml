@@ -100,6 +100,32 @@ spec:
             - name: INQTRIX_COLLABORATION_MAX_QUEUED_FRAMES
               value: {{ toString $queuedFrames | quote }}
             {{- end }}
+            {{- /* kindIs "invalid" is Helm's null test: only an UNSET value
+                   skips the block. An explicit 0 must fail loudly below --
+                   silently treating it as "unset" would be a silent
+                   fallback. */}}
+            {{- if not (kindIs "invalid" .Values.web.maxUpstreamConnections) }}
+            {{- /* Guard BEFORE the int coercion: Helm's int turns true into 1
+                   and truncates 512.9 to 512, so a type check after the
+                   coercion can never see the garbage. The digit round-trip
+                   rejects bools and non-integral floats in both the --set
+                   and the values-file form. No leading zeros: sprig's int
+                   parses base 0, so "0512" would silently mean octal 330. */}}
+            {{- if not (regexMatch "^(0|[1-9][0-9]*)$" (toString .Values.web.maxUpstreamConnections)) }}
+            {{- fail (printf "web.maxUpstreamConnections must be a positive integer, got %v (kind %s)" .Values.web.maxUpstreamConnections (kindOf .Values.web.maxUpstreamConnections)) }}
+            {{- end }}
+            {{- $maxUpstream := int .Values.web.maxUpstreamConnections }}
+            {{- if lt $maxUpstream 1 }}
+            {{- fail (printf "web.maxUpstreamConnections must be a positive integer, got %v" .Values.web.maxUpstreamConnections) }}
+            {{- end }}
+            # Per-worker ceiling for pooled backend connections. A typed value
+            # because config:/extraConfig: cannot reach this pod -- it has no
+            # envFrom -- and the only alternative was a hand-written
+            # web.extraEnv entry nobody would find. Unset, the gateway's own
+            # built-in default applies (one source of truth, no duplicate).
+            - name: INQTRIX_MAX_UPSTREAM_CONNECTIONS
+              value: {{ $maxUpstream | toString | quote }}
+            {{- end }}
             {{- with .Values.web.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

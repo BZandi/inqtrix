@@ -155,7 +155,25 @@ def build_knowledge_capabilities(
             if not collection_ids:
                 collection_ids = sorted(pinned_ids)
             if not collection_ids:
-                return KnowledgeSearchOutput(query=payload.query, hits=[])
+                # P10-K4: an EMPTY boundary is not "nothing matched" — it
+                # is "there is nothing to search". Returning bare empty
+                # hits made the two indistinguishable for the model and
+                # for the user; the reason travels as a warning so no
+                # downstream layer has to guess it.
+                return KnowledgeSearchOutput(
+                    query=payload.query,
+                    hits=[],
+                    warnings=[
+                        KnowledgeSearchWarning(
+                            code="knowledge.no_collections",
+                            message=(
+                                "Keine Wissenssammlung im Zugriff dieses "
+                                "Laufs: es gibt nichts zu durchsuchen."
+                            ),
+                            stage="scope",
+                        )
+                    ],
+                )
 
         # Strict: an explicit collection set the agent cannot fully see is
         # a denial, not a quiet narrowing of the search (E5).

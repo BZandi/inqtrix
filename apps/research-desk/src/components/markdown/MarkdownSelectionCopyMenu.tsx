@@ -7,7 +7,7 @@ import {
   type CSSProperties,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, Code2, Copy } from '@/components/icons'
+import { Check, Code2, Copy, MessageSquarePlus } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { AI_PRODUCER } from '@/lib/aiDisclosure'
@@ -31,9 +31,25 @@ type MarkdownSelectionCopyMenuProps = ComponentPropsWithoutRef<'div'> & {
    * than hard-coded here, because this component also wraps bodies that are
    * not model output. */
   aiGenerated?: boolean
+  /** Optional extra selection action (e.g. the canvas comment queue).
+   * Receives the selection in both forms — the mapped markdown source
+   * is null when the visible selection has no clean source mapping —
+   * plus the menu's viewport position so the caller can anchor a
+   * follow-up popover at the same spot (P9c). */
+  action?: {
+    label: string
+    onSelect: (
+      selection: {
+        markdownText: string | null
+        plainText: string
+      },
+      context: { position: CSSProperties },
+    ) => void
+  }
 }
 
 export function MarkdownSelectionCopyMenu({
+  action,
   aiGenerated,
   children,
   className,
@@ -164,6 +180,28 @@ export function MarkdownSelectionCopyMenu({
             {copiedMode === 'markdown' ? <Check className="size-3.5" /> : <Code2 className="size-3.5" />}
             {copiedMode === 'markdown' ? t.chat.copiedSelection : t.chat.copySelectionMarkdown}
           </Button>
+          {action && (
+            <Button
+              aria-label={action.label}
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={() => {
+                action.onSelect(
+                  {
+                    markdownText: menu.markdownText,
+                    plainText: menu.plainText,
+                  },
+                  { position: menu.position },
+                )
+                setMenu(null)
+              }}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              <MessageSquarePlus className="size-3.5" />
+              {action.label}
+            </Button>
+          )}
         </div>,
         document.body,
       )}

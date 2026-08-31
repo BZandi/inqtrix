@@ -6,6 +6,7 @@ export type AgentOperation =
   | 'knowledge_search'
   | 'web_instant'
   | 'discovery_summary'
+  | 'model_turn'
 
 export type AgentActivityIconKind = 'generic' | 'knowledge' | 'web'
 
@@ -38,6 +39,8 @@ export function normalizeAgentOperation(value: unknown): AgentOperation | undefi
       return 'web_instant'
     case 'discovery_summary':
       return 'discovery_summary'
+    case 'agent.model.turn':
+      return 'model_turn'
     default:
       return undefined
   }
@@ -56,7 +59,7 @@ export function activityDisplayText(
   const humanDetail = cleanLegacyDetail(activity.detail || activity.purpose || '')
   const title = operation
     ? operationLabel(operation, t)
-    : activity.label
+    : (activity.label && kernelToolLabel(activity.label, t))
       || humanDetail
       || activity.operationCode
       || fallbackKindLabel(activity.kind, t)
@@ -123,6 +126,44 @@ export function discoveryProbeDisplay(
   }
 }
 
+/** Human label of a kernel wire tool id for gate cards. Unknown ids stay
+ * visible verbatim — an unmapped tool must never hide behind a guess. */
+export function kernelToolLabel(
+  tool: string,
+  t: TranslationDictionary,
+): string {
+  switch (tool) {
+    case 'web_instant':
+      return t.agent.tools.webInstant
+    case 'search_project_knowledge':
+      return t.agent.tools.knowledgeSearch
+    case 'run_web_research':
+      return t.agent.tools.webResearch
+    case 'run_deep_mission':
+      return t.agent.tools.deepMission
+    case 'delegate_batch':
+      return t.agent.tools.delegateBatch
+    case 'load_skill':
+      return t.agent.tools.loadSkill
+    case 'propose_editor_patch':
+      return t.agent.tools.proposeEditorPatch
+    case 'read_project_document':
+      return t.agent.tools.readProjectDocument
+    case 'read_editor_document':
+      return t.agent.tools.readEditorDocument
+    case 'search_editor_document':
+      return t.agent.tools.searchEditorDocument
+    case 'read_canvas':
+      return t.agent.tools.readCanvas
+    case 'write_canvas':
+      return t.agent.tools.writeCanvas
+    case 'ask_user':
+      return t.agent.tools.askUser
+    default:
+      return tool
+  }
+}
+
 function operationLabel(
   operation: AgentOperation,
   t: TranslationDictionary,
@@ -136,6 +177,8 @@ function operationLabel(
       return t.agent.activityOperations.webInstant
     case 'discovery_summary':
       return t.agent.activityOperations.discoverySummary
+    case 'model_turn':
+      return t.agent.activityOperations.modelTurn
   }
 }
 

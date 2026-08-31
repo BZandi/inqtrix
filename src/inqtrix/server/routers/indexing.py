@@ -11,6 +11,7 @@ them, independent of which authorized user originally submitted the job.
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from queue import Empty
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +35,9 @@ from inqtrix.server.indexing import (
     format_sse_event,
 )
 from inqtrix.server.routers import quota_admission
+from inqtrix.server.stream_authorization import (
+    GenerationGatedFrameAuthorization,
+)
 from inqtrix.services.indexing_service import ReindexUnsupported
 from inqtrix.services.request_parsing import (
     error_response,
@@ -53,6 +57,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             fallback (mirrors the knowledge router).
     """
     indexing_service = container.indexing_service
+    lanes = container.execution_lanes
     knowledge_service = container.knowledge_service
     if indexing_service is None or knowledge_service is None:
         raise RuntimeError(
@@ -380,7 +385,7 @@ def build_router(container: "AppContainer") -> APIRouter:
             return error_response(404, "Indizierung nicht gefunden", "not_found")
 
         async def _event_generator():
-            async def _authorized_frame() -> bool:
+            async def _full_frame_check() -> bool:
                 try:
                     current = await resolve_live_principal(principal_dep, req)
                     if (
@@ -405,6 +410,26 @@ def build_router(container: "AppContainer") -> APIRouter:
                     return False
                 return True
 
+            # One shared gate with the run-stream twin (the two copies had
+            # already drifted: this stream lacked the keepalive below).
+            _frame_gate = GenerationGatedFrameAuthorization(
+                full_check=_full_frame_check,
+                read_generation=(
+                    (
+                        lambda: container.permission_service
+                        .authorization_generation(
+                            tenant_id=principal.tenant_id,
+                            user_id=principal.user_id,
+                        )
+                    )
+                    if principal.user_id is not None
+                    else None
+                ),
+            )
+
+            async def _authorized_frame() -> bool:
+                return await _frame_gate.allowed()
+
             try:
                 if terminal_already_seen:
                     return
@@ -416,18 +441,33 @@ def build_router(container: "AppContainer") -> APIRouter:
                     terminal_replayed = event.get("type") in TERMINAL_INDEXING_EVENTS
                 if terminal_replayed:
                     return
+                loop = asyncio.get_running_loop()
+                next_heartbeat = loop.time() + 5.0
                 while True:
                     if await req.is_disconnected():
                         return
                     try:
-                        event = await asyncio.to_thread(
-                            subscription.queue.get, True, 0.5
+                        # Reader lane, not the shared default pool: a
+                        # busy AI call must never delay event delivery.
+                        event = await loop.run_in_executor(
+                            lanes.streams,
+                            partial(subscription.queue.get, True, 0.5),
                         )
                     except Empty:
+                        # Same keepalive contract as the run stream: a
+                        # quiet indexing stream previously never rechecked
+                        # authorization and never fed proxy read timeouts
+                        # -- revocation latency was unbounded while idle.
+                        if loop.time() >= next_heartbeat:
+                            if not await _authorized_frame():
+                                return
+                            yield ": keepalive\n\n"
+                            next_heartbeat = loop.time() + 5.0
                         continue
                     if not await _authorized_frame():
                         return
                     yield format_sse_event(event)
+                    next_heartbeat = loop.time() + 5.0
                     if event.get("type") in TERMINAL_INDEXING_EVENTS:
                         return
             finally:

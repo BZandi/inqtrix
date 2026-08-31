@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils'
 import type { KnowledgeDocumentText } from '@/features/researchRuns/types'
 import type { KnowledgeReferenceRecord, KnowledgeThreadItemRecord } from '@/features/project/types'
 import { OriginalFileTab } from '@/features/files/OriginalFileTab'
+import { useActiveMatchScroll } from '@/features/scroll/useActiveMatchScroll'
 import {
   findFirstMatchingTarget,
   splitByRanges,
@@ -189,8 +190,13 @@ export function KnowledgeSourcePanel({
  * verify-the-source view. "Dokument" opens the full extracted text with the span
  * highlighted + match navigation, loaded on demand. The PDF original is not here
  * (it lives in the file-library preview); the panel shell owns the close chrome.
+ *
+ * Shared with the AGENT evidence canvas (P10-K5): a K citation there
+ * opens the same reader, so "verify the source" looks and behaves
+ * identically in both desks. It is chrome-free on purpose — the caller
+ * supplies the container and any close affordance.
  */
-function DocumentReader({
+export function DocumentReader({
   collectionLabel,
   dataSource,
   target,
@@ -269,10 +275,12 @@ function DocumentReader({
   useEffect(() => {
     setActiveMatch(0)
   }, [matches.length])
-  useEffect(() => {
-    if (tab !== 'document') return
-    activeMatchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }, [activeMatch, documentState.kind, tab])
+  useActiveMatchScroll({
+    activeIndex: activeMatch,
+    contentKey: `${target.documentId}:${target.chunkIndex ?? 'none'}`,
+    enabled: tab === 'document' && documentState.kind === 'ready',
+    targetRef: activeMatchRef,
+  })
 
   const title = documentState.kind === 'ready' ? documentState.document.title : target.title ?? ''
   const sectionLabel = typeof target.chunkIndex === 'number'

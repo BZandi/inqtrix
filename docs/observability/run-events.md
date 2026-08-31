@@ -88,9 +88,10 @@ resolved model and reasoning effort.
 
 ## Queue and lifecycle
 
-`RUN_MAX_CONCURRENT` caps active native provider work when set; otherwise
-native runs reuse `MAX_CONCURRENT`. Additional `/v1/runs` jobs enter a bounded
-FIFO queue controlled by `RUN_QUEUE_MAX_SIZE` (default 50). With the in-memory
+`RUN_MAX_CONCURRENT` (default 100) caps active native provider work; clearing
+the environment variable yields that default rather than the historical
+fallback to `MAX_CONCURRENT`. Additional `/v1/runs` jobs enter a bounded
+FIFO queue controlled by `RUN_QUEUE_MAX_SIZE` (default 100). With the in-memory
 store, terminal runs remain fetchable for `RUN_COMPLETED_TTL_SECONDS` (default
 300). With the PostgreSQL run store, terminal rows, their event history, and
 result payloads survive process restarts and are retained for
@@ -264,7 +265,7 @@ Event payloads are sanitized through the same recursive drop-list used by runtim
 | `inqtrix.node.started` | LangGraph enters a node. | `node`, `snapshot` |
 | `inqtrix.node.finished` | Node returns normally. | `node`, `snapshot` |
 | `inqtrix.node.failed` | Node raises. | `node`, `snapshot` |
-| `inqtrix.answer.started` | One final-answer publication begins after the empty durable answer artifact is committed as `writing`. | `artifact_id`, `publication_id`, `status=writing` |
+| `inqtrix.answer.started` | One final-answer publication begins after the empty durable answer artifact is committed as `writing`. | `artifact_id`, `publication_id`, `status=writing`, and additively since v0.2.0.8 `reference_labels` — the evidence labels this answer WILL cite, announced before the first delta so a client can render `[W1]` as its final linked form from the outset instead of rewriting the block when the references land (absent = no labels announced; a client must still accept labels it was not told about) |
 | `inqtrix.output_text.delta` | Final Markdown is emitted in word-aligned chunks. | `artifact_id`, `publication_id`, UTF-8 byte `offset`, `delta` |
 | `inqtrix.answer.ready` | The publication completed without a gap. | `artifact_id`, `publication_id`, `bytes`, `status=ready` |
 | `inqtrix.answer.interrupted` | Publication stopped before completion. | `artifact_id`, `publication_id`, `offset`, `status=interrupted`, `stage` (`staging` / `streaming` / `finalizing` / `publishing_ready`) |
@@ -319,16 +320,22 @@ clients reconcile via the GET endpoints above):
 | `inqtrix.agent.clarification.answered` | A user answered a clarification. | `clarification_id` |
 | `inqtrix.agent.limit.reached` | A deterministic tool/step/token ceiling was reached. Recoverable ceilings park the run instead of silently returning a partial answer. | `kind`, `used`, `limit`, `ceiling`, `state`, supported `actions` |
 | `inqtrix.agent.limit.decided` | The user explicitly chose a terminal partial answer or cancellation after a recoverable limit. | `clarification_id`, `kind`, `decision` |
-| `inqtrix.agent.artifact.created` | An agent artifact was committed for the first time. For an answer this precedes `answer.started` and exposes only an empty `writing` body. | `artifact_id`, `kind`, `revision`, `status` |
-| `inqtrix.agent.artifact.updated` | An artifact revision advanced through a user PUT (multi-tab signal); agent-side writes emit it with the agent runtime. | `artifact_id`, `revision`, `updated_by` |
+| `inqtrix.agent.artifact.created` | An agent artifact was committed for the first time. For an answer this precedes `answer.started` and exposes only an empty `writing` body. All agent-side emitters share one payload builder. | `artifact_id`, `kind`, `revision`, `title`, `status`, `updated_by`, `from_revision`, and additively since v0.2.0.8 the write's line delta `lines_added`/`lines_removed` (absent = honestly not counted, e.g. events from before the change or the size guard) |
+| `inqtrix.agent.artifact.updated` | An artifact revision advanced: agent-side writes (kernel `write_canvas`, mission memo flush, the deep-revision batch — previously silent) emit the shared agent payload; a user content PUT emits a deliberately kind-less signal (`artifact_id`, `revision`, `updated_by` only — it must never render as a file chip); a user rename adds `title` and `renamed: true` at an UNCHANGED revision. | agent writes: same columns as `created`; user PUT: `artifact_id`, `revision`, `updated_by`; rename: + `title`, `renamed` |
 | `inqtrix.agent.citation.validation` | A final kernel chat answer contained unknown citation labels and completed its single bounded repair decision. | `status` (`repaired` / `degraded`), `unknown_labels`, `resolution` |
 | `inqtrix.agent.artifact.edit_conflict` | A follow-up turn found the session memo edited by the user since it read it (E13); the agent preserved that text and appended its update instead of overwriting. The client refetches the reconciled memo. | `artifact_id`, `kind` |
 | `inqtrix.agent.patch.proposed` | The agent proposed an editor patch (M7); the always-gated patch approval follows. | `patch_id`, `document_id`, `artifact_id`, `edit_count` |
+| `inqtrix.agent.canvas_context.attached` | Emitted exactly once per kernel run that carried a canvas attachment (P9d) — the durable transcript record of which comments rode the submission (run summaries deliberately never carry the canvas context). Comment text travels in full; the quote is a visibly shortened 120-char preview whose full text stays reachable via the document. | `artifact_id`, `revision`, `comments[]` (`comment`, `quote_preview`) |
 
 The cognitive kernel (`mode=agent_kernel`) additionally
 emits `inqtrix.agent.tool.started` (`tool`, `tool_call_id`, redacted
 `args_preview`), `inqtrix.agent.tool.finished` (`tool`, `tool_call_id`,
-`status`, `result_preview`), `inqtrix.agent.todo.updated` (the
+`status`, `result_preview`, and additively since v0.2.0.8 a `snapshot`
+carrying the complete canonical triple `{current_node, phase,
+execution}` described under "Run summary" — built at the tool boundary,
+so limit readouts advance per finished tool instead of only per phase
+change; both the graph lane and the quick-web lane attach it),
+`inqtrix.agent.todo.updated` (the
 `write_todos` task list as `{content, status}` items), and
 `inqtrix.agent.narration` with content-hash ids (`kernel_<sha1[:8]>`,
 kind `intent` — the model's one-sentence intent line before tool
@@ -369,7 +376,12 @@ The primary UI translates and aggregates stable operation codes such as
 `knowledge.collections.list`, `knowledge.search`, and `web.search.instant`;
 the technical detail keeps every individual event and unknown code visible.
 Events bracket the real operation rather than announcing an entire batch
-before work starts.
+before work starts. Additively since v0.2.0.8 the kernel brackets every
+model turn as `operation="agent.model.turn"` with the constant
+`activity_id="model-turn"` (`kind="working"`, `scope="run"`), so clients
+upsert ONE live row per run that flips `started` -> `completed` instead of
+stacking a row per turn; the previously silent model boundary — the
+kernel's longest event-free stretch — becomes visible.
 
 Independent tasks emit their terminal task/activity projection as each future
 finishes, even when a slower sibling remains active in the same wave. The

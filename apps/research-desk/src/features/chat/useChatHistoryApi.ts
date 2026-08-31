@@ -57,6 +57,12 @@ import {
   threadRecordFromServer,
   type ThreadFingerprint,
 } from '@/features/chat/chatHistorySync'
+import {
+  selectedChatMessageLoadState,
+  shareChatMessageLoad,
+  type SharedChatMessageLoad,
+  updateChatMessageLoadError,
+} from '@/features/chat/chatMessageLoad'
 import type {
   ChatThreadGroupRecord,
   ChatThreadRecord,
@@ -70,6 +76,8 @@ import {
   type SyncLifecycleToken,
 } from '@/features/project/useProjectSyncLifecycle'
 import type { ResearchDeskAction } from '@/features/researchDesk/state'
+import { deletionSyncExclusions } from './deletionSyncExclusions'
+import { createMutationLane } from './mutationLane'
 
 const AUTOSAVE_DEBOUNCE_MS = 1_500
 // Threads load on-demand (page one fast, then cursor-based load-more in the
@@ -115,8 +123,22 @@ export type ChatHistoryApiHandle = {
    * empty-state hero during the gap. False for local/demo threads and once the
    * fetch settles. */
   isSelectedThreadMessagesLoading: boolean
+  /** Terminal lazy-hydration failure for the selected thread. This is distinct
+   * from a successfully loaded empty conversation. */
+  selectedThreadMessagesError: string | null
   /** Load the next page of older threads (cursor-based; appends to the list). */
   loadMoreThreads: () => Promise<void>
+  /** Warm one thread from navigation intent. Uses the same in-flight/cache
+   * guard as selection, so hover followed by click never duplicates work. */
+  prefetchThreadMessages: (threadId: string) => Promise<void>
+  /** Clear the selected failure and start a fresh, visibly surfaced load. */
+  retrySelectedThreadMessages: () => Promise<void>
+  /** Delete one thread and only then remove it locally. The row stays
+   * visible in a `deleting` state until the server confirms; a failure
+   * leaves it visible as `delete_failed` and waits for {@link deleteThread}
+   * to be called again from the row's retry action — nothing retries on its
+   * own, so a server that keeps refusing can never be hammered. */
+  deleteThread: (threadId: string) => Promise<void>
 }
 
 export function useChatHistoryApi({
@@ -136,10 +158,13 @@ export function useChatHistoryApi({
   // not), while hydratedRef keeps the value readable from the debounced
   // flush callback outside React's render cycle.
   const [hydrated, setHydrated] = useState(false)
-  // Threads whose load-on-open has completed (fetched, or confirmed-empty, or
-  // errored). Drives the "still fetching?" signal so the message view can show a
-  // skeleton instead of the empty-state hero while a thread's history loads.
+  // Threads whose load-on-open has completed with an authoritative payload
+  // (fetched or confirmed-empty). Failures stay separate so they can never be
+  // mistaken for an empty conversation.
   const [messageLoadResolved, setMessageLoadResolved] = useState<ReadonlySet<string>>(() => new Set())
+  const [messageLoadErrors, setMessageLoadErrors] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  )
 
   // Latest state read by the async flush without stale closures.
   const threadsRef = useRef(chatThreads)
@@ -164,6 +189,7 @@ export function useChatHistoryApi({
   // id. Seeded on load-on-open, advanced on every push, cleared on reset.
   const syncedMessagesRef = useRef(new Map<string, Set<string>>())
   const loadedThreadsRef = useRef(new Set<string>())
+  const messageLoadsRef = useRef(new Map<string, SharedChatMessageLoad>())
   // The next-page cursor for on-demand thread loading; undefined = no more.
   const threadCursorRef = useRef<string | undefined>(undefined)
   const loadingMoreRef = useRef(false)
@@ -174,6 +200,33 @@ export function useChatHistoryApi({
   const flushPendingRef = useRef(false)
   const syncActiveRef = useRef(syncActive)
   syncActiveRef.current = syncActive
+  /** Threads whose server deletion is in flight — a second click (or a
+   * retry while the first attempt still runs) must not issue a second
+   * request. */
+  const deletingThreadsRef = useRef(new Set<string>())
+  /** Ids the server has already deleted while hydration was still in
+   * flight. Hydration lists the threads BEFORE that delete lands, so its
+   * payload would re-insert the row. This holds only until the running
+   * hydration has been filtered; it is not a general tombstone. */
+  const deletedDuringHydrationRef = useRef(new Set<string>())
+  /** Ids whose server DELETE succeeded but whose local removal may not have
+   * committed yet. A flush queued behind the deletion runs before that
+   * commit and would otherwise re-push the stale record (pruned baseline =
+   * "new"), resurrecting the deleted thread. Purged per flush pass once the
+   * id has left the collection — see deletionSyncExclusions. */
+  const recentlyDeletedThreadsRef = useRef(new Set<string>())
+
+  // -- one server-mutation lane ------------------------------------------ #
+
+  /** Serializes every server mutation this hook performs: the debounced
+   * autosave writes a thread with an UPSERT, so an autosave overlapping a
+   * deletion could land after the DELETE and bring the thread — and its
+   * messages — back. */
+  const mutationLaneRef = useRef(createMutationLane())
+  const runExclusive = useCallback(
+    <Result,>(task: () => Promise<Result>): Promise<Result> => mutationLaneRef.current.run(task),
+    [],
+  )
 
   // -- pushing one entity (syncCollection advances the synced fingerprint) #
 
@@ -265,30 +318,41 @@ export function useChatHistoryApi({
     }
     flushingRef.current = true
     try {
-      const memberships = membershipsRef.current
-      await syncCollection<ChatThreadRecord, ThreadFingerprint>({
-        current: threadsRef.current,
-        synced: syncedThreadsRef.current,
-        fingerprintOf: (thread) =>
-          fingerprintThread(thread, memberships[thread.id] ?? null),
-        changed: threadNeedsSync,
-        pushOne: pushThread,
-        deleteOne: async (id) => {
-          await deleteTolerant404(
-            () => deleteChatThread(id, optionsRef.current),
-          )
-          loadedThreadsRef.current.delete(id)
-        },
-      })
-      await syncCollection<ChatThreadGroupRecord, string>({
-        current: groupsRef.current,
-        synced: syncedGroupsRef.current,
-        fingerprintOf: (group) => group.updatedAt,
-        changed: (previous, current) => previous !== current,
-        pushOne: pushGroup,
-        deleteOne: (id) => deleteTolerant404(
-          () => deleteChatThreadGroup(id, optionsRef.current),
-        ),
+      await runExclusive(async () => {
+        const memberships = membershipsRef.current
+        // Threads owned by a confirmed deletion are off-limits for this diff
+        // in both directions; tombstones whose removal has committed have
+        // done their job and are dropped.
+        const { exclude, settled } = deletionSyncExclusions(
+          threadsRef.current,
+          recentlyDeletedThreadsRef.current,
+        )
+        for (const id of settled) recentlyDeletedThreadsRef.current.delete(id)
+        await syncCollection<ChatThreadRecord, ThreadFingerprint>({
+          current: threadsRef.current,
+          exclude,
+          synced: syncedThreadsRef.current,
+          fingerprintOf: (thread) =>
+            fingerprintThread(thread, memberships[thread.id] ?? null),
+          changed: threadNeedsSync,
+          pushOne: pushThread,
+          deleteOne: async (id) => {
+            await deleteTolerant404(
+              () => deleteChatThread(id, optionsRef.current),
+            )
+            loadedThreadsRef.current.delete(id)
+          },
+        })
+        await syncCollection<ChatThreadGroupRecord, string>({
+          current: groupsRef.current,
+          synced: syncedGroupsRef.current,
+          fingerprintOf: (group) => group.updatedAt,
+          changed: (previous, current) => previous !== current,
+          pushOne: pushGroup,
+          deleteOne: (id) => deleteTolerant404(
+            () => deleteChatThreadGroup(id, optionsRef.current),
+          ),
+        })
       })
       setError(null)
     } catch (caught) {
@@ -300,7 +364,64 @@ export function useChatHistoryApi({
         void flush()
       }
     }
-  }, [pushThread, pushGroup])
+  }, [pushThread, pushGroup, runExclusive])
+
+  // -- confirmed thread deletion ----------------------------------------- #
+
+  const deleteThread = useCallback(async (threadId: string) => {
+    if (deletingThreadsRef.current.has(threadId)) return
+    // No server transport at all (local-only project, demo, no durable
+    // capability): the local removal IS the deletion. Hydration state is
+    // deliberately NOT part of this test — a synced project whose hydration
+    // has not landed yet still owns a server row, and removing it locally
+    // would look done while the row survives the next reload.
+    if (!syncActiveRef.current) {
+      dispatch({ threadId, type: 'deleteChatThread' })
+      return
+    }
+    const wasHydrated = hydratedRef.current
+    // Bound at click time, not at lane-execution time: if the user switches
+    // projects while this deletion waits in the lane, the live options ref
+    // would aim the DELETE at the NEW workspace, where the id 404s and the
+    // tolerant delete would silently report success for a row that still
+    // exists in the workspace the user actually deleted it from.
+    const options = optionsRef.current
+    deletingThreadsRef.current.add(threadId)
+    dispatch({
+      deletion: { error: null, status: 'deleting' },
+      threadId,
+      type: 'setChatThreadDeletion',
+    })
+    try {
+      await runExclusive(async () => {
+        await deleteTolerant404(
+          () => deleteChatThread(threadId, options),
+        )
+        // The server no longer holds the thread: drop every baseline that
+        // could make a later flush re-push or re-delete it. The tombstone
+        // covers the gap until the local removal commits — a flush queued
+        // behind this task still sees the thread in its state snapshot.
+        recentlyDeletedThreadsRef.current.add(threadId)
+        syncedThreadsRef.current.delete(threadId)
+        syncedMessagesRef.current.delete(threadId)
+        loadedThreadsRef.current.delete(threadId)
+        messageLoadsRef.current.delete(threadId)
+        if (!wasHydrated || !hydratedRef.current) {
+          deletedDuringHydrationRef.current.add(threadId)
+        }
+      })
+      dispatch({ threadId, type: 'deleteChatThread' })
+    } catch (caught) {
+      // Stays visible and inert; only the row's retry action calls again.
+      dispatch({
+        deletion: { error: messageFromError(caught), status: 'delete_failed' },
+        threadId,
+        type: 'setChatThreadDeletion',
+      })
+    } finally {
+      deletingThreadsRef.current.delete(threadId)
+    }
+  }, [dispatch, runExclusive])
 
   // -- reset + hydrate lifecycle (re-armed on project identity) ---------- #
 
@@ -314,11 +435,15 @@ export function useChatHistoryApi({
     syncedGroupsRef.current.clear()
     syncedMessagesRef.current.clear()
     loadedThreadsRef.current.clear()
+    messageLoadsRef.current.clear()
     setMessageLoadResolved(new Set())
+    setMessageLoadErrors(new Map())
     threadCursorRef.current = undefined
     loadingMoreRef.current = false
     setIsLoadingMore(false)
     setHasMoreThreads(false)
+    deletedDuringHydrationRef.current.clear()
+    recentlyDeletedThreadsRef.current.clear()
   }, [])
 
   const hydrate = useCallback((token: SyncLifecycleToken) => {
@@ -336,9 +461,13 @@ export function useChatHistoryApi({
         const page = await listChatThreads({ ...options, limit: THREAD_PAGE_LIMIT })
         for (const serverThread of page.data) {
           const { groupId, record } = threadRecordFromServer(serverThread)
+          // This listing was taken before a deletion that has since been
+          // confirmed; re-inserting the row would resurrect it on screen.
+          if (deletedDuringHydrationRef.current.has(record.id)) continue
           threadRecords.push(record)
           memberships[record.id] = groupId
         }
+        deletedDuringHydrationRef.current.clear()
         if (token.cancelled) return
         if (groupRecords.length > 0) {
           dispatch({ groups: groupRecords, type: 'upsertServerChatThreadGroups' })
@@ -385,14 +514,12 @@ export function useChatHistoryApi({
 
   // -- load a thread's messages on open ---------------------------------- #
 
-  // Fetch (and cache) one thread's messages if not already loaded. Shared by the
-  // load-on-open effect and the startup prefetch so the fetch + baseline-seed
-  // logic lives in exactly one place. Applying is idempotent, so no cancellation
-  // is needed — an in-flight load simply caches for the next open. `surfaceErrors`
-  // is false for background prefetch so it never clobbers the visible thread's
-  // error state.
+  // Fetch (and cache) one thread's messages if not already loaded. Selection and
+  // prefetch share one flight; selection promotes a running silent prefetch to
+  // visible error handling instead of treating its unfinished request as a warm
+  // cache hit. `loadedThreadsRef` records successful payloads only.
   const loadThreadMessages = useCallback(
-    async (threadId: string, { surfaceErrors }: { surfaceErrors: boolean }) => {
+    (threadId: string, { surfaceErrors }: { surfaceErrors: boolean }) => {
       const thread = threadsRef.current[threadId]
       const markResolved = () =>
         setMessageLoadResolved((prev) => (prev.has(threadId) ? prev : new Set(prev).add(threadId)))
@@ -404,48 +531,68 @@ export function useChatHistoryApi({
       )) {
         if (thread && !serverThreadKnown && thread.messages.length === 0) {
           markResolved()
+          setMessageLoadErrors((current) =>
+            updateChatMessageLoadError(current, threadId, null))
         }
-        return
+        return Promise.resolve()
       }
-      loadedThreadsRef.current.add(threadId)
-      try {
-        const messages: ReturnType<typeof messageRecordFromServer>[] = []
-        let cursor: string | undefined
-        do {
-          const page = await listChatMessages(threadId, {
-            ...optionsRef.current,
-            cursor,
-            limit: MESSAGE_PAGE_LIMIT,
-          })
-          for (const serverMessage of page.data) {
-            messages.push(messageRecordFromServer(serverMessage))
+      if (surfaceErrors) {
+        setMessageLoadErrors((current) =>
+          updateChatMessageLoadError(current, threadId, null))
+      }
+      return shareChatMessageLoad(
+        messageLoadsRef.current,
+        threadId,
+        surfaceErrors,
+        async (load) => {
+          try {
+            const messages: ReturnType<typeof messageRecordFromServer>[] = []
+            let cursor: string | undefined
+            do {
+              const page = await listChatMessages(threadId, {
+                ...optionsRef.current,
+                cursor,
+                limit: MESSAGE_PAGE_LIMIT,
+              })
+              for (const serverMessage of page.data) {
+                messages.push(messageRecordFromServer(serverMessage))
+              }
+              cursor = page.next_cursor ?? undefined
+            } while (cursor)
+            if (messages.length > 0) {
+              dispatch({ messages, threadId, type: 'upsertServerChatMessages' })
+            }
+            // Seed the per-thread message baseline with the server set just fetched,
+            // UNIONED with any baseline a concurrent push already advanced (e.g. a
+            // message sent during this very first open). Both subsets are
+            // server-confirmed, so the union can never invent a phantom id (no
+            // spurious delete), whereas a plain replace would clobber the pushed id
+            // and let a later delete of it be lost, resurrecting it on reload. An
+            // empty union still marks the thread as baseline-known.
+            const seededIds = syncedMessagesRef.current.get(threadId)
+            syncedMessagesRef.current.set(
+              threadId,
+              new Set([...(seededIds ?? []), ...messages.map((message) => message.id)]),
+            )
+            loadedThreadsRef.current.add(threadId)
+            markResolved()
+            setMessageLoadErrors((current) =>
+              updateChatMessageLoadError(current, threadId, null))
+            if (load.surfaceErrors) setError(null)
+          } catch (caught) {
+            // A failed request is neither a warm cache entry nor authoritative
+            // empty content. Leave it unresolved and retryable; a selected load
+            // (including a promoted prefetch) exposes the failure.
+            loadedThreadsRef.current.delete(threadId)
+            if (load.surfaceErrors) {
+              const message = messageFromError(caught)
+              setMessageLoadErrors((current) =>
+                updateChatMessageLoadError(current, threadId, message))
+              setError(message)
+            }
           }
-          cursor = page.next_cursor ?? undefined
-        } while (cursor)
-        if (messages.length > 0) {
-          dispatch({ messages, threadId, type: 'upsertServerChatMessages' })
-        }
-        // Seed the per-thread message baseline with the server set just fetched,
-        // UNIONED with any baseline a concurrent push already advanced (e.g. a
-        // message sent during this very first open). Both subsets are
-        // server-confirmed, so the union can never invent a phantom id (no
-        // spurious delete), whereas a plain replace would clobber the pushed id
-        // and let a later delete of it be lost, resurrecting it on reload. An
-        // empty union still marks the thread as baseline-known.
-        const seededIds = syncedMessagesRef.current.get(threadId)
-        syncedMessagesRef.current.set(
-          threadId,
-          new Set([...(seededIds ?? []), ...messages.map((message) => message.id)]),
-        )
-        markResolved()
-        if (surfaceErrors) setError(null)
-      } catch (caught) {
-        loadedThreadsRef.current.delete(threadId)
-        // Stop the loading skeleton even on failure — the error surfaces through
-        // `error` for the open thread; a stuck skeleton would be worse.
-        markResolved()
-        if (surfaceErrors) setError(messageFromError(caught))
-      }
+        },
+      )
     },
     [dispatch],
   )
@@ -544,15 +691,41 @@ export function useChatHistoryApi({
   }, [dispatch])
 
   const selectedThreadRecord = selectedThreadId ? chatThreads[selectedThreadId] : undefined
-  const isSelectedThreadMessagesLoading = Boolean(
-    syncActive
-    && hydrated
-    && selectedThreadId
-    && selectedThreadRecord
-    && selectedThreadRecord.source === 'api'
-    && selectedThreadRecord.messages.length === 0
-    && !messageLoadResolved.has(selectedThreadId),
-  )
+  const selectedMessageLoadState = selectedChatMessageLoadState({
+    errorByThreadId: messageLoadErrors,
+    expectsServerMessages: Boolean(
+      syncActive
+      && hydrated
+      && selectedThreadId
+      && selectedThreadRecord
+      && selectedThreadRecord.source === 'api'
+      && selectedThreadRecord.messages.length === 0,
+    ),
+    resolvedThreadIds: messageLoadResolved,
+    selectedThreadId,
+  })
 
-  return { error, hasMoreThreads, isLoadingMore, isSelectedThreadMessagesLoading, loadMoreThreads }
+  const prefetchThreadMessages = useCallback(async (threadId: string) => {
+    await loadThreadMessages(threadId, { surfaceErrors: false })
+  }, [loadThreadMessages])
+
+  const retrySelectedThreadMessages = useCallback(async () => {
+    if (!selectedThreadId) return
+    setMessageLoadErrors((current) =>
+      updateChatMessageLoadError(current, selectedThreadId, null),
+    )
+    await loadThreadMessages(selectedThreadId, { surfaceErrors: true })
+  }, [loadThreadMessages, selectedThreadId])
+
+  return {
+    deleteThread,
+    error,
+    hasMoreThreads,
+    isLoadingMore,
+    isSelectedThreadMessagesLoading: selectedMessageLoadState.loading,
+    loadMoreThreads,
+    prefetchThreadMessages,
+    retrySelectedThreadMessages,
+    selectedThreadMessagesError: selectedMessageLoadState.error,
+  }
 }

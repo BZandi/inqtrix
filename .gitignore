@@ -283,3 +283,17 @@ tests/eval/golden_bsi/corpus/
 tests/eval/golden_dora/corpus/
 tests/eval/golden_gquad/corpus/
 tests/eval/golden_gquad/queries.json
+
+# Captured provider responses replayed by the load-measurement mock. Derived
+# from an operator's own run traces and therefore real questions, answers, and
+# source material. The paired timing profile under profiles/ holds only counts
+# and durations and stays tracked.
+tests/load/mock-providers/corpus/
+
+# Private local operator workspace: cluster values, Chart.yaml, CI files,
+# ConfigMap contents and destructive runbooks for the OpenShift test cluster.
+# Permanent version-control boundary: never add, stage, commit, or mirror its
+# contents into the versioned product source. The directory form prunes the
+# tree walk, so no later negation -- including the unanchored `!.env.example`
+# above -- can re-include anything beneath it.
+/untracked/

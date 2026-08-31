@@ -8,12 +8,9 @@ global setter.
 
 from __future__ import annotations
 
-import io
 import json
-import logging
 from types import SimpleNamespace
 
-import pytest
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
@@ -21,10 +18,8 @@ from opentelemetry.sdk.trace.export import (
     SimpleSpanProcessor,
 )
 
-from inqtrix.logging_config import _RedactSecretsFilter
 from inqtrix.observability import otel as otel_module
 from inqtrix.observability.context import bind_log_context, reset_log_context
-from inqtrix.observability.json_formatter import InqtrixJsonFormatter
 from inqtrix.observability.otel import (
     build_tracer_provider,
     run_execute_span,

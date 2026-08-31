@@ -1,3 +1,4 @@
+import type { ExplorerSortMode } from '@/features/project/explorerSort'
 import {
   AlertTriangle,
   BookOpen,
@@ -46,10 +47,16 @@ import {
   type RefObject,
 } from 'react'
 import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
+import {
+  StructuralLoadBoundary,
+  type StructuralLoadPhase,
+  type StructuralVisibilityChange,
+} from '@/motion/StructuralLoadBoundary'
 import { MarkdownSelectionCopyMenu } from '@/components/markdown/MarkdownSelectionCopyMenu'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ConversationSkeleton } from '@/components/ui/conversation-skeleton'
+import { Skeleton } from '@/components/ui/skeleton'
 import { WelcomeState } from '@/components/ui/welcome-state'
 import {
   ResizablePanel,
@@ -158,6 +165,23 @@ export function shouldClearAcceptedChatDraft(
     && currentRefKeys.every((key, index) => key === submittedRefKeys[index])
 }
 
+export function chatStructuralPhaseForState({
+  hasThreadMessages,
+  isMessagesLoading,
+  messagesLoadError,
+  selectedThread,
+}: {
+  hasThreadMessages: boolean
+  isMessagesLoading: boolean
+  messagesLoadError: string | null
+  selectedThread: boolean
+}): StructuralLoadPhase {
+  if (messagesLoadError) return 'error'
+  if (isMessagesLoading) return hasThreadMessages ? 'refreshing' : 'pending'
+  if (!selectedThread || !hasThreadMessages) return 'empty'
+  return 'ready'
+}
+
 type ChatWorkspaceProps = {
   activeAssistantMessageId: string | null
   chatModelOptions: ChatModelOption[]
@@ -169,6 +193,7 @@ type ChatWorkspaceProps = {
   chatHistoryLoadingMore?: boolean
   /** Load the next page of older threads. */
   onLoadMoreChatHistory?: () => void
+  onPrefetchThread?: (threadId: string) => void
   defaultChatModel: NodeModelResolution | null
   fileGroupOptions: FileGroupMentionOption[]
   fileOptions: FileMentionOption[]
@@ -179,6 +204,8 @@ type ChatWorkspaceProps = {
   /** True while the selected server thread's messages are still lazy-loading;
    * shows a message skeleton instead of the empty-state hero during the gap. */
   isMessagesLoading: boolean
+  /** Terminal lazy-hydration failure for the selected thread. */
+  messagesLoadError: string | null
   isSending: boolean
   onAttachContext: (ref: ChatContextReferenceRecord) => void
   onAttachFiles: (files: File[]) => void
@@ -202,6 +229,7 @@ type ChatWorkspaceProps = {
     mode: ChatRetryMode,
     options?: ChatRetryOptions,
   ) => void
+  onRetryMessagesLoad: () => void
   chainingEnabled: boolean
   onChainingEnabledChange: (enabled: boolean) => void
   onIncognitoChange: (enabled: boolean) => void
@@ -210,6 +238,9 @@ type ChatWorkspaceProps = {
   onOpenPromptLibrary: () => void
   onMoveThreadGroup: (groupId: string, targetIndex: number) => void
   onMoveThreadToGroup: (threadId: string, groupId: string | null, targetIndex: number) => void
+  onAdoptVisibleOrder: (itemIds: string[], folderIds: string[]) => void
+  onChangeSortMode: (mode: ExplorerSortMode) => void
+  sortMode: ExplorerSortMode
   onRenameThread: (threadId: string, title: string) => void
   onRenameThreadGroup: (groupId: string, title: string) => void
   onRemoveContext: (ref: ChatContextReferenceRecord) => void
@@ -283,12 +314,14 @@ export default function ChatWorkspace({
   chatHistoryHasMore,
   chatHistoryLoadingMore,
   onLoadMoreChatHistory,
+  onPrefetchThread,
   defaultChatModel,
   historyPanelSize,
   isDesktop,
   isHistoryVisible,
   isIncognito,
   isMessagesLoading,
+  messagesLoadError,
   isSending,
   onAttachContext,
   onAnswerLastUserMessage,
@@ -301,6 +334,7 @@ export default function ChatWorkspace({
   onDeleteThread,
   onEditMessage,
   onRetryAssistantMessage,
+  onRetryMessagesLoad,
   chainingEnabled,
   onChainingEnabledChange,
   onIncognitoChange,
@@ -309,6 +343,9 @@ export default function ChatWorkspace({
   onOpenPromptLibrary,
   onMoveThreadGroup,
   onMoveThreadToGroup,
+  onAdoptVisibleOrder,
+  onChangeSortMode,
+  sortMode,
   onRenameThread,
   onRenameThreadGroup,
   onRemoveContext,
@@ -405,6 +442,15 @@ export default function ChatWorkspace({
   const messageAppendSnapshotRef = useRef<ConversationContentSnapshot | null>(null)
   const messagesContentRef = useRef<HTMLDivElement | null>(null)
   const messagesScrollAreaRef = useRef<HTMLDivElement | null>(null)
+  // Structural staging briefly keeps the retained and target transcripts in
+  // the DOM together. Guarded callback refs prevent the retained layer's
+  // later detach from clearing the already-mounted target node.
+  const setMessagesContentNode = useCallback((node: HTMLDivElement | null) => {
+    if (node || !messagesContentRef.current?.isConnected) messagesContentRef.current = node
+  }, [])
+  const setMessagesScrollAreaNode = useCallback((node: HTMLDivElement | null) => {
+    if (node || !messagesScrollAreaRef.current?.isConnected) messagesScrollAreaRef.current = node
+  }, [])
   const titleInputRef = useRef<HTMLInputElement | null>(null)
   const chatFileInputRef = useRef<HTMLInputElement | null>(null)
   const selectedThread = useMemo(() => {
@@ -414,7 +460,29 @@ export default function ChatWorkspace({
   const chatScrollKey = selectedThread
     ? (isIncognito ? 'chat:incognito' : `chat:${selectedThread.id}`)
     : null
-  const chatContentReady = !isMessagesLoading
+  // Scroll restoration starts only for the thread identity whose data,
+  // staged render and layout-affecting descendants have all settled beneath
+  // the region veil. Empty threads have no scroll target and are ready by
+  // definition.
+  const hasThreadMessages = Boolean(selectedThread && selectedThread.messages.length > 0)
+  const [messagesReadyKey, setMessagesReadyKey] = useState<string | null>(null)
+  const messagesGateReady = chatScrollKey !== null && messagesReadyKey === chatScrollKey
+  const handleMessagesVisibilityChange = useCallback(({ identity, visible }: StructuralVisibilityChange) => {
+    if (!visible) setIsEditingTitle(false)
+    setMessagesReadyKey((current) => {
+      if (visible) return identity
+      return current === identity ? null : current
+    })
+  }, [])
+  const chatStructuralPhase = chatStructuralPhaseForState({
+    hasThreadMessages,
+    isMessagesLoading,
+    messagesLoadError,
+    selectedThread: selectedThread !== null,
+  })
+  const chatContentReady = !messagesLoadError
+    && !isMessagesLoading
+    && (!hasThreadMessages || messagesGateReady)
   const lastMessage = selectedThread?.messages[selectedThread.messages.length - 1]
   const chatContentVersion = selectedThread
     ? [
@@ -442,12 +510,18 @@ export default function ChatWorkspace({
     && !isSending,
   )
   const hasUnreadyAttachment = pendingChips.some((chip) => chip.readiness !== 'ready')
+  // A thread waiting for (or having failed) its server deletion accepts no
+  // new work: sending would write into a conversation that is on its way out.
+  const threadAwaitsDeletion = Boolean(selectedThread?.deletion)
   const canSend = draft.trim().length > 0
     && !isSending
     && !isSubmitPending
     && !hasUnreadyAttachment
+    && !threadAwaitsDeletion
   const selectedMessageCount = selectedMessageIds.size
-  const canManageMessages = Boolean(selectedThread && selectedThread.messages.length > 0 && !isSending)
+  const canManageMessages = Boolean(
+    selectedThread && selectedThread.messages.length > 0 && !isSending && !threadAwaitsDeletion,
+  )
   const mentionCategoryLabels = useMemo(() => ({
     files: t.chat.mentionFilesCategory,
     filegroups: t.chat.mentionFilegroupsCategory,
@@ -774,12 +848,16 @@ export default function ChatWorkspace({
       isLoadingMoreThreads={chatHistoryLoadingMore}
       locale={locale}
       onLoadMoreThreads={onLoadMoreChatHistory}
+      onPrefetchThread={onPrefetchThread}
       onCreateThread={onCreateThread}
       onCreateThreadGroup={onCreateThreadGroup}
       onDeleteThread={onDeleteThread}
       onDeleteThreadGroup={onDeleteThreadGroup}
       onMoveThreadGroup={onMoveThreadGroup}
       onMoveThreadToGroup={onMoveThreadToGroup}
+      onAdoptVisibleOrder={onAdoptVisibleOrder}
+      onChangeSortMode={onChangeSortMode}
+      sortMode={sortMode}
       onRenameThread={onRenameThread}
       onRenameThreadGroup={onRenameThreadGroup}
       onSelectThread={handleHistorySelectThread}
@@ -793,7 +871,15 @@ export default function ChatWorkspace({
   )
 
   const conversationPanel = (
-        <section className="inqtrix-contained-panel flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background">
+    <section className="inqtrix-contained-panel flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background">
+      <StructuralLoadBoundary
+        className="min-h-0 flex-1"
+        fallback={<ChatConversationSkeleton />}
+        identity={chatScrollKey ?? 'chat:empty'}
+        onVisibilityChange={handleMessagesVisibilityChange}
+        phase={chatStructuralPhase}
+      >
+        <div className="flex min-h-0 flex-1 flex-col">
             <div
             className={cn(
               'z-10 flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border bg-background px-3 transition-colors',
@@ -1003,18 +1089,26 @@ export default function ChatWorkspace({
               'min-h-0 flex-1',
               // When the hero is shown, let the Radix viewport wrapper fill its
               // height so the inner `min-h-full` resolves and the hero centers
-              // vertically. Not while loading (the skeleton fills top-down) nor
-              // with messages, so message scrolling stays unaffected.
-              !(selectedThread && selectedThread.messages.length > 0) && !isMessagesLoading &&
+              // vertically. Not with messages, so message scrolling stays
+              // unaffected.
+              !hasThreadMessages && !isMessagesLoading &&
                 '[&_[data-scroll-area-viewport]>div]:h-full',
             )}
-            ref={messagesScrollAreaRef}
+            ref={setMessagesScrollAreaNode}
             >
               <div
                 className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-5 px-4 py-6 [overflow-anchor:none] md:px-8"
-                ref={messagesContentRef}
+                ref={setMessagesContentNode}
               >
-              {selectedThread && selectedThread.messages.length > 0 ? (
+              {messagesLoadError ? (
+                <ChatMessagesLoadError
+                  error={messagesLoadError}
+                  failedLabel={t.chat.historyLoadFailed}
+                  loadingLabel={t.chat.historyLoading}
+                  onRetry={onRetryMessagesLoad}
+                  retryLabel={t.chat.retryMessage}
+                />
+              ) : selectedThread && selectedThread.messages.length > 0 ? (
                 selectedThread.messages.map((message, index) => {
                   const previousMessage = selectedThread.messages[index - 1]
                   const canRetryAssistantMessage = !isSending
@@ -1054,7 +1148,8 @@ export default function ChatWorkspace({
                   )
                 })
               ) : isMessagesLoading ? (
-                <ConversationSkeleton reduceMotion={reduceMotion} />
+                // The region veil covers this window; nothing to render here.
+                null
               ) : selectedThread ? (
                 <EmptyChatState
                   subtitle={pendingChips.length > 0 ? t.chat.emptyWithContext : t.chat.emptyHint}
@@ -1065,6 +1160,8 @@ export default function ChatWorkspace({
               )}
               </div>
             </ScrollArea>
+        </div>
+      </StructuralLoadBoundary>
 
           <div className="z-10 shrink-0 px-3 pb-2 pt-2 md:px-6">
             <form
@@ -1479,7 +1576,7 @@ export default function ChatWorkspace({
               <ComposerDisclosureHint />
             </form>
           </div>
-        </section>
+    </section>
   )
 
   return (
@@ -1548,6 +1645,82 @@ export default function ChatWorkspace({
           {historyPanel}
         </ResponsiveSidePanel>
       )}
+    </div>
+  )
+}
+
+/** Full conversation-region silhouette for a genuinely cold thread. The
+ * message shapes occupy the complete viewport instead of collecting at its
+ * lower edge on tall screens. */
+function ChatConversationSkeleton() {
+  return (
+    <div aria-hidden className="flex h-full min-h-0 flex-col bg-background">
+      <div className="flex inqtrix-panel-header shrink-0 items-center gap-3 border-b border-border px-3">
+        <Skeleton className="size-7 rounded-md" />
+        <Skeleton className="h-4 w-52 max-w-[45%]" />
+        <Skeleton className="ml-auto h-7 w-24 rounded-md" />
+      </div>
+      <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col px-4 py-6 md:px-8">
+        <ConversationSkeleton anchor="top" fill />
+      </div>
+    </div>
+  )
+}
+
+export function ChatMessagesLoadError({
+  error,
+  failedLabel,
+  loadingLabel,
+  onRetry,
+  retryLabel,
+}: {
+  error: string
+  failedLabel: string
+  loadingLabel: string
+  onRetry: () => void
+  retryLabel: string
+}) {
+  const [retrying, setRetrying] = useState(false)
+
+  // StructuralLoadBoundary retains the terminal surface during the quiet
+  // retry interval. Clear its visible error immediately; the shared delayed
+  // fallback will appear only if the fresh request remains pending.
+  if (retrying) {
+    return (
+      <div
+        aria-busy="true"
+        className="flex min-h-0 flex-1"
+        data-chat-messages-retry-pending=""
+        role="status"
+      >
+        <span className="sr-only">{loadingLabel}</span>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className="flex min-h-[18rem] flex-1 items-center justify-center px-8 py-10"
+      data-chat-messages-load-error=""
+      role="alert"
+    >
+      <div className="flex max-w-md flex-col items-center gap-3 text-center">
+        <AlertTriangle aria-hidden="true" className="size-5 text-warning" />
+        <p className="t-body font-medium text-foreground">{failedLabel}</p>
+        <p className="t-meta text-muted-foreground">{error}</p>
+        <Button
+          onClick={() => {
+            setRetrying(true)
+            onRetry()
+          }}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          <RefreshCw aria-hidden="true" className="icon-sm" />
+          {retryLabel}
+        </Button>
+      </div>
     </div>
   )
 }

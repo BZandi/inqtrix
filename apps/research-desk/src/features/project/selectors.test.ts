@@ -20,6 +20,7 @@ import {
   projectKnowledgeSessionSections,
   projectKnowledgeSessions,
   referenceDocsFromRefs,
+  researchRunToJob,
 } from './selectors'
 import type {
   ChatMessageAttachmentRecord,
@@ -458,7 +459,7 @@ describe('projectChatRules', () => {
       category: 'instruction',
       includeInAutocomplete: true,
       linkedContextRefs: [],
-      visibility: { chat: true, editor: true },
+      visibility: { agent: false, chat: true, editor: true },
     })
   })
 })
@@ -521,6 +522,35 @@ describe('knowledge selectors', () => {
     expect(sections[1]).toMatchObject({ groupId: null, kind: 'ungrouped' })
     expect(sections[1].sessions.map((session) => session.id)).toEqual([defaultSessionId, 'ks-3'])
   })
+
+  it('sorts folders alphabetically and rows by activity in recent mode, untouched in manual', () => {
+    const base = createEmptyProjectState()
+    const state: ProjectState = {
+      ...base,
+      knowledgeSessionGroupMemberships: {},
+      knowledgeSessionGroupOrder: ['kg-z', 'kg-a'],
+      knowledgeSessionGroups: {
+        'kg-a': makeKnowledgeSessionGroup('kg-a', 'Alpha'),
+        'kg-z': makeKnowledgeSessionGroup('kg-z', 'Zeta'),
+      },
+      knowledgeSessionOrder: ['ks-old', 'ks-new'],
+      knowledgeSessions: {
+        'ks-new': makeKnowledgeSession('ks-new', 'Newer', { updatedAt: '2026-08-29T10:00:00.000Z' }),
+        'ks-old': makeKnowledgeSession('ks-old', 'Older', { updatedAt: '2026-08-01T10:00:00.000Z' }),
+      },
+    }
+
+    const recent = projectKnowledgeSessionSections(state)
+    expect(recent.map((section) => section.groupId)).toEqual(['kg-a', 'kg-z', null])
+    expect(recent[2].sessions.map((session) => session.id)).toEqual(['ks-new', 'ks-old'])
+
+    const manual = projectKnowledgeSessionSections({
+      ...state,
+      ui: { ...state.ui, explorerSort: { ...state.ui.explorerSort, knowledge: 'manual' } },
+    })
+    expect(manual.map((section) => section.groupId)).toEqual(['kg-z', 'kg-a', null])
+    expect(manual[2].sessions.map((session) => session.id)).toEqual(['ks-old', 'ks-new'])
+  })
 })
 
 describe('chatRuleOptions', () => {
@@ -528,16 +558,16 @@ describe('chatRuleOptions', () => {
     const state = stateWithRules([
       makeRule('r1', 'chat-only', {
         category: 'instruction',
-        visibility: { chat: true, editor: false },
+        visibility: { agent: false, chat: true, editor: false },
       }),
       makeRule('r2', 'editor-only', {
         category: 'function',
-        visibility: { chat: false, editor: true },
+        visibility: { agent: false, chat: false, editor: true },
       }),
       makeRule('r3', 'hidden-autocomplete', {
         category: 'context',
         includeInAutocomplete: false,
-        visibility: { chat: true, editor: true },
+        visibility: { agent: false, chat: true, editor: true },
       }),
     ])
 
@@ -716,5 +746,34 @@ describe('mentionableReportOptions', () => {
     // ...but the shared selector still resolves it, so a chat that already
     // attached r2 keeps rendering its chip (gate the source, not the resolver).
     expect(completedReportOptions(state).map((option) => option.runId)).toEqual(['r1', 'r2'])
+  })
+})
+
+describe('researchRunToJob live-status events', () => {
+  it('carries the record id through so the live rows key on a stable identity', () => {
+    // The rows used to key on `${formattedTime}-${index}`, and the formatter
+    // has MINUTE resolution. Two consequences, both visible: within one minute
+    // the keys stayed identical as the 4-row window slid, so React reused a row
+    // for a different event; across a minute boundary every key changed at once
+    // and the whole block remounted and re-animated. The stable identity was
+    // already in the record — it just was not reaching the view.
+    const run = {
+      events: [
+        { createdAt: '2026-08-22T11:48:04.000Z', id: 'run-1-41', severity: 'info', title: 'Plane Suchanfragen' },
+        { createdAt: '2026-08-22T11:48:57.000Z', id: 'run-1-42', severity: 'info', title: 'Durchsuche 6 Suchanfragen' },
+      ],
+      metrics: { claims: 0, queries: 0, rounds: '1/4', sources: 0 },
+      phaseState: { activePhase: 'search', completedPhases: [] },
+      runId: 'run-1',
+      status: 'running',
+      submittedAt: '2026-08-22T11:47:00.000Z',
+      summary: { title: 'Frage' },
+    } as unknown as Parameters<typeof researchRunToJob>[0]
+
+    const job = researchRunToJob(run)
+
+    expect(job.events.map((event) => event.id)).toEqual(['run-1-41', 'run-1-42'])
+    // Same minute, so `time` alone could not have told the two rows apart.
+    expect(new Set(job.events.map((event) => event.time)).size).toBe(1)
   })
 })

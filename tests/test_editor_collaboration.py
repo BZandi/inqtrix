@@ -2477,6 +2477,57 @@ def test_internal_update_validates_and_preserves_binary_metadata() -> None:
     assert update.expected_sequence == 11
 
 
+def test_internal_update_accepts_angle_brackets_in_change_summary() -> None:
+    """Getippte Winkelklammern duerfen einen Schreibvorgang nicht scheitern lassen.
+
+    ``before``/``after`` sind woertlicher Nutzertext. Eine Zeichenregel auf
+    diesem Anzeigefeld lehnte darum keine Auszeichnung ab, sondern eine
+    Tastatureingabe -- und weil die Ablehnung ein HTTP 400 auf dem Schreibpfad
+    ist, verlor der Nutzer nicht die Zusammenfassung, sondern die Aenderung.
+    Der Sidecar benannte die 400 als ``internal_consistency`` und schloss die
+    Verbindung; der Browser verband endlos neu, und das Dokument war fuer ALLE
+    Beteiligten gesperrt.
+    """
+    service = _InternalService()
+    client = _internal_client(service)
+    payload = _update_payload()
+    payload["change_summary"]["edits"][0]["after"] = "if (a < b) return x > y"
+
+    with client:
+        response = client.post(
+            f"/internal/collaboration/documents/{DOCUMENT_ID}/updates",
+            headers=INTERNAL_HEADERS,
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    persisted = service.persisted_updates[0]
+    # Woertlich, nicht escapt: die einzige Senke ist ein React-Textkind.
+    assert persisted.change_summary["edits"][0]["after"] == "if (a < b) return x > y"
+
+
+def test_internal_update_still_rejects_a_malformed_change_summary() -> None:
+    """Gegenprobe: Form und Groesse bleiben hart.
+
+    Der Wegfall der Zeichenregel darf die Pruefung nicht insgesamt aufweichen.
+    """
+    service = _InternalService()
+    client = _internal_client(service)
+    payload = _update_payload()
+    payload["change_summary"]["edits"][0]["after"] = "x" * 161
+
+    with client:
+        response = client.post(
+            f"/internal/collaboration/documents/{DOCUMENT_ID}/updates",
+            headers=INTERNAL_HEADERS,
+            json=payload,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["reason"] == "invalid_change_summary"
+    assert service.persisted_updates == []
+
+
 def test_internal_duplicate_update_preserves_current_document_watermark() -> None:
     """A replay returns its original coordinate and the locked room watermark."""
     service = _InternalService()

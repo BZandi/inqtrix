@@ -83,6 +83,10 @@ describe('withUserPlanTask', () => {
   const draft = (): AgentPlanDraft => ({
     assumptions: [],
     reportGuidance: '',
+    reportRuleIds: [],
+    rejectPending: false,
+    reportRequirementTouched: false,
+    rejectNote: '',
     successCriteria: [],
     summaryMarkdown: '',
     tasks: [

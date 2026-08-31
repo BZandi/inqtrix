@@ -46,6 +46,21 @@ spec:
         - name: postgres
           image: {{ .Values.postgres.image }}
           imagePullPolicy: {{ .Values.postgres.imagePullPolicy }}
+          {{- /* Same guard order as web.maxUpstreamConnections: the digit
+                 round-trip must run BEFORE the int coercion, which would
+                 silently turn true into 1, truncate floats, and parse a
+                 leading zero as OCTAL (0512 -> 330). */}}
+          {{- if not (regexMatch "^(0|[1-9][0-9]*)$" (toString .Values.postgres.maxConnections)) }}
+          {{- fail (printf "postgres.maxConnections must be a positive integer, got %v (kind %s)" .Values.postgres.maxConnections (kindOf .Values.postgres.maxConnections)) }}
+          {{- end }}
+          {{- $maxConn := .Values.postgres.maxConnections | int }}
+          {{- if lt $maxConn 1 }}
+          {{- fail (printf "postgres.maxConnections must be a positive integer, got %v" .Values.postgres.maxConnections) }}
+          {{- end }}
+          # "postgres" is spelled out rather than left to the entrypoint's
+          # leading-dash fixup, so this reads the same as the Compose stack
+          # and does not hinge on an image implementation detail.
+          args: ["postgres", "-c", "max_connections={{ $maxConn }}"]
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true

@@ -40,7 +40,7 @@ const DEMO_EXCERPT_ANNEX_III = `${DEMO_QUOTE_ANNEX_III} Damit fallen Recruiting-
 const DEMO_QUOTE_ARTICLE_43 = 'Vor dem Inverkehrbringen eines Hochrisiko-KI-Systems ist eine Konformitaetsbewertung nach Artikel 43 durchzufuehren.'
 const DEMO_EXCERPT_ARTICLE_43 = `Artikel 43 — Konformitaetsbewertung. ${DEMO_QUOTE_ARTICLE_43} Sie umfasst das Qualitaetsmanagement und die technische Dokumentation.`
 
-const DEMO_DOCUMENTS: DemoDocument[] = [
+export const DEMO_DOCUMENTS: DemoDocument[] = [
   {
     collectionId: 'vector-index-eu-recht',
     id: 'kdoc-ai-act-volltext',
@@ -416,7 +416,7 @@ function searchDemoCorpus(query: string, collectionIds: string[]): KnowledgeSear
     }))
 }
 
-function demoDocumentText(documentId: string): KnowledgeDocumentText {
+export function demoDocumentText(documentId: string): KnowledgeDocumentText {
   const document = DEMO_DOCUMENTS.find((entry) => entry.id === documentId)
   if (!document) {
     throw new Error('Dokument nicht gefunden.')

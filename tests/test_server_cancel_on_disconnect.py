@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import inqtrix.research.web_research as web_research_module
@@ -20,8 +19,17 @@ from inqtrix.research.web_research import WebResearchAlgorithm
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.server.app import create_app
 from inqtrix.server.streaming import stream_response
-from inqtrix.settings import AgentSettings, ModelSettings, ServerSettings, Settings
+from inqtrix.settings import AgentSettings, Settings
 from inqtrix.state import check_cancel_event, initial_state
+from inqtrix.server.execution import ExecutionLanes
+
+# Shared per module: these tests' fake agents return promptly, so a narrow
+# lane never becomes the bottleneck under test. Released at module teardown.
+_LANES = ExecutionLanes(ai_workers=8, stream_workers=8)
+
+
+def teardown_module(module) -> None:  # noqa: ARG001 - pytest hook signature
+    _LANES.close()
 
 
 # ------------------------------------------------------------------ #
@@ -132,6 +140,7 @@ async def test_stream_response_passes_cancel_event_to_run_web_graph(monkeypatch)
             runtime=None,
             run_request=RunRequest(mode="research", question="Frage", history=""),
             providers=None, strategies=None, settings=AgentSettings(),
+            lanes=_LANES,
             cancel_event=event,
         )
     ]
@@ -197,6 +206,7 @@ async def test_stream_response_sets_cancel_event_on_disconnect(monkeypatch):
         runtime=None,
         run_request=RunRequest(mode="research", question="Frage", history=""),
         providers=None, strategies=None, settings=AgentSettings(),
+        lanes=_LANES,
         request=request,
         cancel_event=event,
     ):
@@ -284,6 +294,7 @@ async def test_stream_response_cleans_up_watcher_on_normal_completion(monkeypatc
         runtime=None,
         run_request=RunRequest(mode="research", question="Frage", history=""),
         providers=None, strategies=None, settings=AgentSettings(),
+        lanes=_LANES,
         request=request,
     ):
         chunks.append(chunk)
@@ -429,6 +440,7 @@ async def test_non_streaming_complete_maps_cancel_to_499():
         messages=[],
         resolved=_resolved_stub(),
         chat_agent_settings=AgentSettings(),
+        lanes=_LANES,
         semaphore=asyncio.Semaphore(1),
         cancel_event=cancel_event,
     )
@@ -455,6 +467,7 @@ async def test_non_streaming_cancel_without_disconnect_is_a_server_error():
         messages=[],
         resolved=_resolved_stub(),
         chat_agent_settings=AgentSettings(),
+        lanes=_LANES,
         semaphore=asyncio.Semaphore(1),
         cancel_event=threading.Event(),
     )
@@ -485,6 +498,7 @@ async def test_non_streaming_token_budget_stop_is_typed_with_usage():
         messages=[],
         resolved=_resolved_stub(),
         chat_agent_settings=AgentSettings(),
+        lanes=_LANES,
         semaphore=asyncio.Semaphore(1),
         cancel_event=threading.Event(),
     )
@@ -522,6 +536,7 @@ async def test_non_streaming_cancelled_graph_result_maps_to_499_with_usage():
         messages=[],
         resolved=_resolved_stub(),
         chat_agent_settings=AgentSettings(),
+        lanes=_LANES,
         semaphore=asyncio.Semaphore(1),
         cancel_event=threading.Event(),
     )

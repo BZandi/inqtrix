@@ -6,11 +6,23 @@ import {
   useRef,
   useState,
 } from 'react'
+import type { KnowledgeDataSource } from '@/features/knowledge/types'
 import type { Dispatch } from 'react'
 import { useReducedMotion } from 'motion/react'
 
 import type { ClientOptions } from '@/api/inqtrixClient'
 import { createProjectEntityId } from '@/features/project/entityId'
+import {
+  chatRuleOptions,
+  mentionableReportOptions,
+} from '@/features/project/selectors'
+import {
+  reportGuidanceMaxChars,
+  reportRuleIdsMax,
+} from '@/features/agent/reportRequirement'
+import { decideConversationAppend } from '@/features/scroll/conversationAppend'
+import { clearScrollMemory } from '@/features/scroll/scrollMemory'
+import { useScrollRestoration } from '@/features/scroll/useScrollRestoration'
 import {
   BookOpen,
   FileText,
@@ -62,8 +74,10 @@ import type { ResearchDeskAction } from '@/features/researchDesk/state'
 import { useMediaQuery } from '@/features/researchDesk/hooks/useMediaQuery'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
+import { StructuralLoadBoundary } from '@/motion/StructuralLoadBoundary'
 import {
   AgentComposer,
+  type AgentCanvasDocumentOption,
   type AgentCollectionOption,
   type AgentComposerSubmit,
   type AgentDocumentOption,
@@ -72,16 +86,25 @@ import {
 import { AgentSessionRail } from './AgentSessionRail'
 import { ComposerGateTray, pendingGate } from './ComposerGateTray'
 import { AGENT_CANVAS_REGISTRY } from './canvas/views'
+import { createCanvasSaveRegistry } from './canvas/saveRegistry'
+import {
+  AGENT_CANVAS_COMMENT_LIMIT,
+  canvasContextFromSelection,
+  settleCanvasQueueAfterSubmit,
+  type AgentCanvasCommentDraft,
+} from './canvas/commentQueue'
 import {
   AgentCanvasReactContext,
   type AgentCanvasContextValue,
 } from './canvas/context'
 import { routeAgentRunToView } from './followTarget'
 import { agentOverridesFromSelection } from '@/features/researchRuns/modelSelection'
+import { assignArtifactFileNames } from './artifactNames'
 import {
   agentCenterScreen,
   canEditAgentRun,
   isActiveAgentRun,
+  resolveAgentArtifact,
   restoredAgentSessionId,
   type AgentRunRecord,
   type AgentSessionRecord,
@@ -90,6 +113,8 @@ import {
   vectorBackendDisplay,
   type PlanSourceInfo,
 } from './plan/sourceLabel'
+import type { ReportRuleOption } from './plan/PlanReviewBody'
+import { agentScrollKey, agentTranscriptVersion } from './agentScroll'
 import {
   DEMO_AGENT_OVERVIEW_SOURCE,
   DEMO_AGENT_TIERS,
@@ -101,6 +126,7 @@ import {
   defaultEngineMode,
   type AgentEngineMode,
 } from './agentStatusOverview'
+import { retainHydratedAgentRunIds } from './runPresentation'
 import {
   DEFAULT_AGENT_SOURCE_POLICY,
   normalizeAgentExecutionSnapshot,
@@ -128,6 +154,7 @@ export function AgentWorkspace({
   canvasPanelSize,
   capabilities,
   collections,
+  knowledgeDataSource,
   dispatch,
   pollingRunIds,
   runsHydrated = true,
@@ -170,6 +197,11 @@ export function AgentWorkspace({
   canvasPanelSize: number
   capabilities: InqtrixCapabilities | null
   collections: AgentCollectionOption[]
+  /** Knowledge reader access for the K-evidence canvas (P10-K5). Built
+   * ONCE in the shell so the files/persistence gating and the demo
+   * corpus stay in one place; required so a forgetful call site fails
+   * loudly instead of silently hiding the document view. */
+  knowledgeDataSource: KnowledgeDataSource
   dispatch: Dispatch<ResearchDeskAction>
   /** Patchable editor documents (server-synced or demo). */
   documents?: AgentDocumentOption[]
@@ -219,6 +251,41 @@ export function AgentWorkspace({
   // Output-form override: workspace-local, defaults to Auto —
   // the agent's intake decides unless the user forces a form.
   const [responseForm, setResponseForm] = useState<AgentResponseForm>('auto')
+  // Canvas comment queue (P4): selection comments collected in the
+  // document views, shown as chips above the composer, bundled into the
+  // next submission's canvas_context — and emptied ONLY when the server
+  // accepted that submission (settleCanvasQueueAfterSubmit).
+  const [canvasCommentQueue, setCanvasCommentQueue] = useState<
+    AgentCanvasCommentDraft[]
+  >([])
+  // Mention-pinned canvas document (P9, K5): rides as comment-less
+  // canvas_context; queued comments take the single-document channel
+  // over (canvasContextFromSelection), so pinning clears on queue-add.
+  const [pinnedCanvasArtifactId, setPinnedCanvasArtifactId] = useState<
+    string | null
+  >(null)
+  // P9c edit round-trip: the composer's pencil parks the draft here,
+  // the matching document view scrolls to the anchor, opens the
+  // popover prefilled, and clears the request.
+  const [canvasCommentEdit, setCanvasCommentEdit] = useState<
+    AgentCanvasCommentDraft | null
+  >(null)
+  const queueCanvasComment = useCallback(
+    (draft: AgentCanvasCommentDraft) => {
+      if (canvasCommentQueue.length >= AGENT_CANVAS_COMMENT_LIMIT) {
+        return false
+      }
+      setCanvasCommentQueue((current) =>
+        current.length >= AGENT_CANVAS_COMMENT_LIMIT
+          ? current
+          : [...current, draft])
+      // Comments bind the channel to THEIR document — a mention pin
+      // visibly leaves the chip strip instead of silently not traveling.
+      setPinnedCanvasArtifactId(null)
+      return true
+    },
+    [canvasCommentQueue.length],
+  )
   // Engine selection: user-selectable only when the
   // server registered the kernel; initialized from the published default
   // once capabilities arrive. The demo simulates a current server.
@@ -226,13 +293,33 @@ export function AgentWorkspace({
   // Attached skills and a direct one-message route are workspace-local.
   // The route clears only after the server admits the run.
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([])
+  // Result requirement for the NEXT submission (S6). Workspace-local
+  // like the skill chips and the comment queue, and cleared only on an
+  // ACCEPTED submission — a rejected run must not silently swallow the
+  // requirement the user wrote for it.
+  const [reportGuidance, setReportGuidance] = useState('')
+  const [reportRuleIds, setReportRuleIds] = useState<string[]>([])
+  // Research reports attached as INPUT (P14). Workspace-local like the
+  // skill chips, and cleared only on an ACCEPTED submission.
+  const [reportIds, setReportIds] = useState<string[]>([])
+  const clearReportRequirement = useCallback(() => {
+    setReportGuidance('')
+    setReportRuleIds([])
+    setReportIds([])
+  }, [])
   const [executionDirective, setExecutionDirective] =
     useState<AgentExecutionDirective | null>(null)
   const [draftSourcePolicy, setDraftSourcePolicy] =
     useState<AgentSourcePolicy>({ ...DEFAULT_AGENT_SOURCE_POLICY })
-  const pendingSaveRef = useRef<(() => Promise<void>) | null>(null)
+  const saveRegistry = useRef(createCanvasSaveRegistry()).current
   const canvas = state.agentCanvas
   const agentBlock = capabilities?.agent ?? null
+  // Published == enforced: the composer and the plan gate render the
+  // SERVER's limits, so a text a surface accepts is never one the
+  // submission is then refused for.
+  const reportGuidanceLimit = reportGuidanceMaxChars(agentBlock)
+  const reportRuleLimit = reportRuleIdsMax(agentBlock)
+  const reportLimit = agentBlock?.attached_reports?.max_reports ?? 3
   const allAutonomyModes = agentBlock?.autonomy_modes ?? [
     'strict',
     'balanced',
@@ -375,6 +462,7 @@ export function AgentWorkspace({
     dispatch,
     enabled: serverEnabled,
     runs: state.agentRuns,
+    sessionArtifacts: state.agentSessionArtifacts,
     workspaceId,
   })
 
@@ -451,14 +539,127 @@ export function AgentWorkspace({
       .filter((run): run is AgentRunRecord => Boolean(run))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   }, [selectedSession, state.agentRuns])
-  // Runs the store already carried when this workspace mounted are HISTORY:
-  // they render in place instead of replaying their entry animation over the
-  // view-level entry (a remount is navigation, not new content). Only runs
-  // that appear later — a real new answer — animate in.
-  const mountRunIdsRef = useRef<ReadonlySet<string> | null>(null)
-  mountRunIdsRef.current ??= new Set(Object.keys(state.agentRuns))
+  const centerScreen = agentCenterScreen({
+    hasRuns: sessionRuns.length > 0,
+    hasSelectedSession: Boolean(selectedSession),
+    runsHydrated,
+    serverEnabled,
+    sessionsKnown: sessionsSettled,
+  })
+  const centerLoading = centerScreen === 'skeleton'
+  const agentRevealKey = `agent:${hydrationIdentity}:${selectedSession?.id ?? 'empty'}`
+
+  // The list hydrator commits its complete server snapshot before flipping
+  // `runsHydrated`. Everything seen before that boundary is history, including
+  // rows arriving after this component mounted. Later run ids are real turns.
+  const runHistoryRef = useRef<{
+    hydrationIdentity: string
+    runIds: ReadonlySet<string>
+  }>({
+    hydrationIdentity,
+    runIds: new Set(Object.keys(state.agentRuns)),
+  })
+  if (runHistoryRef.current.hydrationIdentity !== hydrationIdentity) {
+    runHistoryRef.current = {
+      hydrationIdentity,
+      runIds: new Set(Object.keys(state.agentRuns)),
+    }
+  } else {
+    runHistoryRef.current.runIds = retainHydratedAgentRunIds(
+      runHistoryRef.current.runIds,
+      Object.keys(state.agentRuns),
+      runsHydrated,
+    )
+  }
+
+  // Header and transcript publish as one identity. While the requested
+  // session stages, the rail may select it but the bounded surface keeps the
+  // previous title and body together (and the boundary makes the body inert).
+  const requestedSessionByIdentityRef = useRef(new Map<
+    string,
+    { id: string | null; title: string }
+  >())
+  requestedSessionByIdentityRef.current.set(agentRevealKey, {
+    id: selectedSession?.id ?? null,
+    title: selectedSession?.title || t.navigation.agent,
+  })
+  const transcriptHydrationOutstanding = sessionRuns.some(
+    (run) => !control.isTranscriptHydrated(run.runId),
+  )
+  const [committedSession, setCommittedSession] = useState(() => ({
+    id: selectedSession?.id ?? null,
+    identity:
+      centerLoading || transcriptHydrationOutstanding
+        ? null
+        : agentRevealKey,
+    title: selectedSession?.title || t.navigation.agent,
+  }))
+  const committedSessionTitle = committedSession.id === selectedSession?.id
+    ? selectedSession?.title || t.navigation.agent
+    : state.agentSessions[committedSession.id ?? '']?.title
+      ?? committedSession.title
+  const historicalTranscriptPending =
+    committedSession.identity !== agentRevealKey
+    && sessionRuns.some(
+      (run) =>
+        runHistoryRef.current.runIds.has(run.runId)
+        && !control.isTranscriptHydrated(run.runId),
+    )
+  const surfaceTransitioning = committedSession.identity !== agentRevealKey
+  // The transcript joins the SHARED scroll contract (chat/knowledge):
+  // follow while a run appends, never against a user who scrolled away,
+  // and remember the position per session. Before this the surface had
+  // no scroll logic at all — new steps grew below the fold and a
+  // session switch landed at the very top of a long transcript.
+  const transcriptScrollAreaRef = useRef<HTMLDivElement | null>(null)
+  const agentScrollMemoryKey = agentScrollKey(selectedSession?.id)
+  const transcriptAppendSnapshotRef = useRef<
+    ReturnType<typeof decideConversationAppend>['next'] | null
+  >(null)
+  const agentLoadPhase = centerLoading || historicalTranscriptPending
+    ? 'pending'
+    : transcriptHydrationOutstanding
+      ? 'refreshing'
+      : sessionRuns.length > 0
+        ? 'ready'
+        : 'empty'
   const latestRun = sessionRuns.at(-1)
   const runningRun = sessionRuns.find((run) => isActiveAgentRun(run.status))
+  const transcriptReady = !centerLoading && !surfaceTransitioning
+  const transcriptVersion = useMemo(
+    () => agentTranscriptVersion(sessionRuns),
+    [sessionRuns],
+  )
+  const transcriptScroll = useScrollRestoration({
+    contentReady: transcriptReady,
+    getViewport: () =>
+      transcriptScrollAreaRef.current?.querySelector<HTMLElement>(
+        '[data-scroll-area-viewport]',
+      ) ?? null,
+    // A live run streams answer tokens and appends step lines; the
+    // shared rule then follows instantly instead of smoothing every
+    // token.
+    isStreaming: Boolean(runningRun),
+    memoryKey: agentScrollMemoryKey,
+    reduceMotion,
+  })
+  useEffect(() => {
+    const decision = decideConversationAppend(
+      transcriptAppendSnapshotRef.current,
+      {
+        contentReady: transcriptReady,
+        contentVersion: transcriptVersion,
+        key: agentScrollMemoryKey,
+      },
+    )
+    transcriptAppendSnapshotRef.current = decision.next
+    if (decision.shouldAppend) transcriptScroll.onContentAppended()
+  }, [
+    agentScrollMemoryKey,
+    transcriptReady,
+    transcriptScroll,
+    transcriptVersion,
+  ])
   const statusExecution = useMemo(
     () => normalizeAgentExecutionSnapshot(latestRun?.snapshot),
     [latestRun?.snapshot],
@@ -474,9 +675,26 @@ export function AgentWorkspace({
 
   const openCanvasView = useCallback(
     (descriptor: CanvasViewDescriptor) => {
-      dispatch({ descriptor, source: 'user', type: 'openAgentCanvasView' })
+      // Diff tabs key on runId (unlike document tabs): normalize a
+      // possibly stale timeline anchor to the resolved one so the ±
+      // badge and the revision select share ONE tab per diff (P9).
+      const normalized = descriptor.view === 'diff'
+        ? {
+          ...descriptor,
+          runId: resolveAgentArtifact(
+            state.agentRuns,
+            state.agentSessionArtifacts,
+            { artifactId: descriptor.artifactId, runId: descriptor.runId },
+          ).runId,
+        }
+        : descriptor
+      dispatch({
+        descriptor: normalized,
+        source: 'user',
+        type: 'openAgentCanvasView',
+      })
     },
-    [dispatch],
+    [dispatch, state.agentRuns, state.agentSessionArtifacts],
   )
 
   const setPlanDraft = useCallback(
@@ -494,6 +712,55 @@ export function AgentWorkspace({
     [dispatch],
   )
 
+  // P9 (K1): ONE derived file name per session document, computed from
+  // the anchor-independent index in created order; empty while the
+  // index has not loaded (surfaces then fall back to plain titles).
+  const sessionFileNames = useMemo<Record<string, string>>(() => {
+    const index = selectedSession
+      ? state.agentSessionArtifacts[selectedSession.id]
+      : undefined
+    if (!index) return {}
+    return assignArtifactFileNames(
+      index.order
+        .map((artifactId) => index.byId[artifactId])
+        .filter((meta) => meta.kind === 'memo' || meta.kind === 'deliverable')
+        .map((meta) => ({ artifactId: meta.artifactId, title: meta.title })),
+    )
+  }, [selectedSession, state.agentSessionArtifacts])
+
+  // P9 (K5): the mention group's candidates — session documents with
+  // their derived names and CURRENT revisions (canvas_context needs
+  // revision >= 1, so only the loaded index feeds this, never a
+  // revision-less fallback).
+  const canvasDocumentOptions = useMemo<AgentCanvasDocumentOption[]>(() => {
+    const index = selectedSession
+      ? state.agentSessionArtifacts[selectedSession.id]
+      : undefined
+    if (!index) return []
+    return index.order
+      .map((artifactId) => index.byId[artifactId])
+      .filter((meta) => meta.kind === 'memo' || meta.kind === 'deliverable')
+      .map((meta) => ({
+        artifactId: meta.artifactId,
+        name: sessionFileNames[meta.artifactId] ?? meta.title,
+        revision: meta.revision,
+        title: meta.title,
+      }))
+  }, [selectedSession, sessionFileNames, state.agentSessionArtifacts])
+
+  // Resolution guard (P9, the selectedDocument precedent): a pin whose
+  // document vanished — or that belongs to another session after a
+  // switch — resets visibly instead of submitting a stale id.
+  useEffect(() => {
+    if (!pinnedCanvasArtifactId) return
+    const index = selectedSession
+      ? state.agentSessionArtifacts[selectedSession.id]
+      : undefined
+    if (!index?.byId[pinnedCanvasArtifactId]) {
+      setPinnedCanvasArtifactId(null)
+    }
+  }, [pinnedCanvasArtifactId, selectedSession, state.agentSessionArtifacts])
+
   // Display context for plan tasks (id -> title + backend label): the
   // "wo" of the approval transparency, shared by the timeline card and
   // the canvas plan view.
@@ -507,11 +774,30 @@ export function AgentWorkspace({
     [capabilities, collections],
   )
 
+  // Library rules the user opted into for the agent surface. Opt-in by
+  // design: a rule written for chat must not start shaping reports.
+  // Finished Research-Desk reports, attachable as agent input.
+  const attachableReports = useMemo(
+    () => mentionableReportOptions(state),
+    [state],
+  )
+
+  const reportRuleOptions = useMemo<ReportRuleOption[]>(
+    () =>
+      chatRuleOptions(state, 'agent').map((option) => ({
+        label: option.label,
+        ruleId: option.ruleId,
+        title: option.title,
+      })),
+    [state],
+  )
+
   const canvasContext = useMemo<AgentCanvasContextValue>(
     () => ({
       applyPatch: demo ? demo.applyPatch : control.applyPatch,
       cancelTask: control.cancelTask,
       clientOptions,
+      knowledgeDataSource,
       decideApproval: demo ? demo.decideApproval : control.decideApproval,
       rejectPatch: demo ? demo.rejectPatch : control.rejectPatch,
       exportArtifact: control.exportArtifact,
@@ -519,28 +805,49 @@ export function AgentWorkspace({
       loadArtifact: control.loadArtifact,
       loadTaskResult: control.loadTaskResult,
       openCanvasView,
-      pendingSaveRef,
+      saveRegistry,
       planDrafts: state.agentPlanDrafts,
       planSource,
+      reportRuleOptions,
+      reportGuidanceMaxChars: reportGuidanceLimit,
+      reportRuleIdsMax: reportRuleLimit,
       pollingRunIds: pollingRunIds ?? [],
       prefetchTaskResult: control.prefetchTaskResult,
       requestPlanRefresh,
+      queueCanvasComment,
+      canvasComments: canvasCommentQueue,
+      canvasCommentEdit,
+      clearCanvasCommentEdit: () => setCanvasCommentEdit(null),
+      updateCanvasComment: (id: string, comment: string) =>
+        setCanvasCommentQueue((current) =>
+          current.map((draft) =>
+            draft.id === id ? { ...draft, comment } : draft,
+          )),
+      renameArtifact: control.renameArtifact,
       runs: state.agentRuns,
       saveArtifact: control.saveArtifact,
+      sessionArtifacts: state.agentSessionArtifacts,
+      sessionFileNames,
       setPlanDraft,
       workspaceId,
     }),
     [
+      canvasCommentEdit,
+      canvasCommentQueue,
       clientOptions,
       control,
       demo,
+      knowledgeDataSource,
       openCanvasView,
       planSource,
       pollingRunIds,
+      queueCanvasComment,
       requestPlanRefresh,
+      sessionFileNames,
       setPlanDraft,
       state.agentPlanDrafts,
       state.agentRuns,
+      state.agentSessionArtifacts,
       state.fileAssets,
       workspaceId,
     ],
@@ -580,8 +887,12 @@ export function AgentWorkspace({
       answerClarification: demo
         ? demo.answerClarification
         : control.answerClarification,
+      // Demo runs never delegate, so the child-gate twins have no demo
+      // variant — the control path is the only producer of childGates.
+      answerChildClarification: control.answerChildClarification,
       applyPatch: demo ? demo.applyPatch : control.applyPatch,
       decideApproval: demo ? demo.decideApproval : control.decideApproval,
+      decideChildApproval: control.decideChildApproval,
       rejectPatch: demo ? demo.rejectPatch : control.rejectPatch,
       onCancelRun: demo
         ? (runId) => demo.cancel(runId)
@@ -589,6 +900,18 @@ export function AgentWorkspace({
           if (canEditAgentRun(state.agentRuns[runId])) void cancelRun(runId)
         },
       onOpenCanvas: openCanvasView,
+      // Inline chip diff (P9b): resolve the CURRENT anchor before the
+      // revision fetch — the timeline's runId can be stale (F-NEU-1).
+      loadArtifactRevision: (runId, artifactId, revision) =>
+        control.loadArtifact(
+          resolveAgentArtifact(
+            state.agentRuns,
+            state.agentSessionArtifacts,
+            { artifactId, runId },
+          ).runId,
+          artifactId,
+          revision,
+        ),
       planDrafts: state.agentPlanDrafts,
       planSource,
       setPlanDraft,
@@ -602,6 +925,7 @@ export function AgentWorkspace({
       setPlanDraft,
       state.agentPlanDrafts,
       state.agentRuns,
+      state.agentSessionArtifacts,
     ],
   )
 
@@ -620,6 +944,11 @@ export function AgentWorkspace({
       sourcePolicy: submitSourcePolicy,
     }: AgentComposerSubmit) => {
       if (runningRun && !canEditAgentRun(runningRun)) return false
+      // Pending canvas edits flush BEFORE anything else — also when this
+      // send answers a gate: the answer may reference exactly that edit,
+      // and the agent reads the LATEST revision (§5.4). flushSave handles
+      // its own errors (restore + notice), so the submit never dies here.
+      await saveRegistry.flushAll()
       // A pending clarification absorbs the send (ONE input locus, plan
       // B3): free text answers the gate instead of racing a new run.
       const gate = runningRun ? pendingGate(runningRun) : null
@@ -631,10 +960,16 @@ export function AgentWorkspace({
         )
         return true
       }
-      // A follow-up turn must not race a pending canvas edit: the agent
-      // reads the LATEST revision, so unsaved text would be lost (§5.4).
-      if (pendingSaveRef.current) {
-        await pendingSaveRef.current()
+      // A child's clarification absorbs the send the same way — the
+      // answer routes to the child run, the echo to the parent record.
+      if (gate?.kind === 'child_clarification') {
+        await timelineActions.answerChildClarification(
+          runningRun!.runId,
+          gate.childRunId,
+          gate.clarification.clarificationId,
+          { answer: question },
+        )
+        return true
       }
       let sessionId = state.selectedAgentSessionId
       const selectedSession = sessionId
@@ -663,6 +998,23 @@ export function AgentWorkspace({
           return false
         }
       }
+      // Single-document channel (P9): comments bind it; a mention pin
+      // travels only with an empty queue. The pin's revision is the
+      // index's CURRENT one at submission (snapshot semantics).
+      const pinnedMeta = pinnedCanvasArtifactId
+        ? state.agentSessionArtifacts[sessionId]?.byId[
+          pinnedCanvasArtifactId
+        ] ?? null
+        : null
+      const canvasSubmitContext = canvasContextFromSelection(
+        canvasCommentQueue,
+        pinnedMeta
+          ? {
+            artifactId: pinnedMeta.artifactId,
+            revision: pinnedMeta.revision,
+          }
+          : null,
+      )
       if (demo) {
         demo.submit({
           agentTier: tier ?? '',
@@ -687,6 +1039,10 @@ export function AgentWorkspace({
         })
         setSelectedSkillIds([])
         setExecutionDirective(null)
+        setCanvasCommentQueue((current) =>
+          settleCanvasQueueAfterSubmit(current, true))
+        setPinnedCanvasArtifactId(null)
+        clearReportRequirement()
         return true
       }
       const overrides = agentOverridesFromSelection(
@@ -699,6 +1055,7 @@ export function AgentWorkspace({
       const summary = await submitRun({
         agentOverrides: overrides,
         autonomy,
+        canvasContext: canvasSubmitContext,
         documentId,
         knowledgeFilters:
           collectionIds.length > 0 ? { collectionIds } : undefined,
@@ -709,18 +1066,41 @@ export function AgentWorkspace({
         skillIds: skillIds.length > 0 ? skillIds : undefined,
         sourcePolicy: submitSourcePolicy,
         executionDirective: submitDirective,
+        // S6: the requirement rides the request itself, so it also
+        // reaches the runs that never see a plan gate.
+        reportGuidance: reportGuidance.trim() || undefined,
+        reportRuleIds: reportRuleIds.length > 0 ? reportRuleIds : undefined,
+        reportIds: reportIds.length > 0 ? reportIds : undefined,
       })
+      // ONE consumption policy (tested): the queue empties only on an
+      // ACCEPTED submission — a rejected one keeps every comment.
+      setCanvasCommentQueue((current) =>
+        settleCanvasQueueAfterSubmit(current, summary !== null))
       if (!summary) return false
       setSelectedSkillIds([])
       setExecutionDirective(null)
+      setPinnedCanvasArtifactId(null)
+      clearReportRequirement()
+      // Sending is an explicit user action: it always lands at the
+      // bottom, exactly like the chat composer. Without it the own
+      // question appears below the fold and the run looks like it
+      // never started.
+      transcriptScroll.scrollToBottom()
       return true
     },
     [
+      // canvasCommentQueue was MISSING here before P9 — the submit could
+      // close over a pre-add queue snapshot (latent F-P9-DEPS): the
+      // attachment reads must be in the deps like every other input.
+      canvasCommentQueue,
       demo,
       dispatch,
       persistAgentSession,
+      pinnedCanvasArtifactId,
       runningRun,
+      transcriptScroll,
       slashSkills,
+      state.agentSessionArtifacts,
       state.agentSessions,
       state.selectedAgentSessionId,
       state.ui.selectedAgentEffort,
@@ -764,10 +1144,26 @@ export function AgentWorkspace({
   const canvasLabelFor = useCallback(
     (descriptor: CanvasViewDescriptor): string => {
       if (descriptor.view === 'document') {
-        const run = state.agentRuns[descriptor.runId]
+        // Anchor-independent resolution (P9): the raw descriptor run is
+        // a possibly stale anchor — resolving it fixed the generic
+        // "Memo" tab a chip-opened re-anchored document used to show.
+        const { artifact } = resolveAgentArtifact(
+          state.agentRuns,
+          state.agentSessionArtifacts,
+          descriptor,
+        )
         return (
-          run?.artifacts[descriptor.artifactId]?.title
+          sessionFileNames[descriptor.artifactId]
+          || artifact?.title
           || t.agent.canvas.views.document
+        )
+      }
+      if (descriptor.view === 'diff') {
+        const base = sessionFileNames[descriptor.artifactId]
+          || t.agent.canvas.views.diff
+        return (
+          `${base} · r${descriptor.fromRevision}`
+          + `→r${descriptor.toRevision}`
         )
       }
       if (descriptor.view === 'evidence') {
@@ -775,7 +1171,7 @@ export function AgentWorkspace({
       }
       return t.agent.canvas.views[descriptor.view]
     },
-    [state.agentRuns, t],
+    [sessionFileNames, state.agentRuns, state.agentSessionArtifacts, t],
   )
 
   const rail = (
@@ -786,6 +1182,12 @@ export function AgentWorkspace({
       onDeleteSession={(sessionId) => {
         const session = state.agentSessions[sessionId]
         if (session?.persistable === false) return
+        // The remembered position dies with the session — otherwise a
+        // later session reusing the id would inherit a stranger's
+        // scroll offset (same reason ResearchDesk clears chat and
+        // knowledge keys on deletion).
+        const memoryKey = agentScrollKey(sessionId)
+        if (memoryKey) clearScrollMemory(memoryKey)
         void deletePersistedAgentSession(sessionId)
       }}
       onRenameSession={(sessionId, title) => {
@@ -801,6 +1203,23 @@ export function AgentWorkspace({
       }}
       onTogglePinnedSession={(sessionId) =>
         dispatch({ sessionId, type: 'togglePinnedAgentSession' })}
+      onAdoptVisibleOrder={(itemIds, folderIds) => dispatch({
+        desk: 'agent',
+        folderIds,
+        itemIds,
+        type: 'adoptExplorerOrder',
+      })}
+      onChangeSortMode={(mode) => dispatch({ desk: 'agent', mode, type: 'setExplorerSortMode' })}
+      onDeleteSessionGroup={(groupId) => dispatch({ groupId, type: 'deleteAgentSessionGroup' })}
+      onMoveSessionGroup={(groupId, targetIndex) =>
+        dispatch({ groupId, targetIndex, type: 'moveAgentSessionGroup' })}
+      onMoveSessionToGroup={(sessionId, groupId, targetIndex) => {
+        if (state.agentSessions[sessionId]?.persistable === false) return
+        dispatch({ groupId, sessionId, targetIndex, type: 'moveAgentSessionToGroup' })
+      }}
+      onRenameSessionGroup={(groupId, title) =>
+        dispatch({ groupId, title, type: 'renameAgentSessionGroup' })}
+      sortMode={state.ui.explorerSort.agent}
       pinnedSessionIds={state.ui.pinnedExplorer.agentSessionIds}
       syncError={sessionSyncError}
       runs={state.agentRuns}
@@ -817,11 +1236,29 @@ export function AgentWorkspace({
   // `memo` OR a kernel `deliverable` (a kernel run writes the latter, so
   // a memo-only check would leave a finished kernel document unreachable
   // from the composer).
+  // The session index is the anchor-independent SSOT (P4): a document's
+  // run_id moves to the newest updating run, so latestRun-only lookups
+  // lose documents that older turns produced. latestRun stays the live
+  // fallback while the index has not loaded yet.
+  const sessionArtifactIndex = selectedSession
+    ? state.agentSessionArtifacts[selectedSession.id]
+    : undefined
+  const sessionDocuments = (sessionArtifactIndex?.order ?? [])
+    .map((artifactId) => sessionArtifactIndex!.byId[artifactId])
+    .filter((meta) => meta.kind === 'memo' || meta.kind === 'deliverable')
+  const sessionMemoMeta = sessionDocuments.find((meta) => meta.kind === 'memo')
+  const sessionMemo = sessionMemoMeta
+    ? { artifactId: sessionMemoMeta.artifactId, runId: sessionMemoMeta.runId }
+    : null
   const reportArtifactId =
-    latestRun?.artifactOrder.find((artifactId) => {
+    sessionDocuments[0]?.artifactId
+    ?? latestRun?.artifactOrder.find((artifactId) => {
       const kind = latestRun.artifacts[artifactId]?.kind
       return kind === 'memo' || kind === 'deliverable'
-    }) ?? null
+    })
+    ?? null
+  const reportRunId =
+    sessionDocuments[0]?.runId ?? latestRun?.runId ?? null
   const earlyPhase =
     runningRun
     && ['intake', 'discovery', 'planning'].includes(runningRun.phase)
@@ -848,13 +1285,13 @@ export function AgentWorkspace({
             : t.agent.pills.followExecution}
         </button>
       )}
-      {reportArtifactId && latestRun && (
+      {reportArtifactId && reportRunId && (
         <button
           className="inline-flex h-6 items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 t-hint font-semibold text-muted-foreground transition-colors hover:text-foreground"
           onClick={() => {
             openCanvasView({
               artifactId: reportArtifactId,
-              runId: latestRun.runId,
+              runId: reportRunId,
               view: 'document',
             })
           }}
@@ -875,12 +1312,31 @@ export function AgentWorkspace({
       {pills}
       <ComposerGateTray actions={timelineActions} run={runningRun} />
       <AgentComposer
-        answerMode={activeGate?.kind === 'clarification'}
+        answerMode={
+          activeGate?.kind === 'clarification'
+          || activeGate?.kind === 'child_clarification'
+        }
         autonomy={selectedAutonomy}
         autonomyModes={autonomyModes}
+        canvasComments={canvasCommentQueue}
+        canvasDocuments={canvasDocumentOptions}
+        pinnedCanvasDocumentId={pinnedCanvasArtifactId}
+        onPinnedCanvasDocumentChange={setPinnedCanvasArtifactId}
         collections={collections}
+        reportOptions={attachableReports}
+        reportIds={reportIds}
+        reportIdsMax={reportLimit}
+        onReportIdsChange={setReportIds}
+        reportGuidance={reportGuidance}
+        reportGuidanceMaxChars={reportGuidanceLimit}
+        reportRuleIds={reportRuleIds}
+        reportRuleIdsMax={reportRuleLimit}
+        reportRuleOptions={reportRuleOptions}
+        onReportGuidanceChange={setReportGuidance}
+        onReportRuleIdsChange={setReportRuleIds}
         disabled={
           !agentAvailable
+          || surfaceTransitioning
           || Boolean(runningRun && !canEditAgentRun(runningRun))
         }
         documents={documents}
@@ -905,6 +1361,24 @@ export function AgentWorkspace({
         onDepthModeChange={onDepthChange}
         onDraftQuestionChange={onDraftQuestionChange}
         onEngineModeChange={setEngineMode}
+        onEditCanvasComment={(id) => {
+          const draft = canvasCommentQueue.find((item) => item.id === id)
+          if (!draft) return
+          // Focus the document, then hand the draft to its view (P9c).
+          const anchorRunId = selectedSession
+            ? state.agentSessionArtifacts[selectedSession.id]
+              ?.byId[draft.artifactId]?.runId
+            : undefined
+          openCanvasView({
+            artifactId: draft.artifactId,
+            runId: anchorRunId ?? latestRun?.runId ?? '',
+            view: 'document',
+          })
+          setCanvasCommentEdit(draft)
+        }}
+        onRemoveCanvasComment={(id) =>
+          setCanvasCommentQueue((current) =>
+            current.filter((item) => item.id !== id))}
         onSelectedCollectionIdsChange={onSelectedCollectionIdsChange}
         onSelectedDocumentIdChange={onSelectedDocumentIdChange}
         onStop={() => {
@@ -937,7 +1411,11 @@ export function AgentWorkspace({
 
   const timeline = (
     <div className="inqtrix-contained-panel flex h-full min-h-0 min-w-0 flex-1 flex-col">
-      <header className="z-10 flex inqtrix-panel-header shrink-0 items-center justify-between gap-2 border-b border-border bg-background px-3">
+      <header
+        aria-busy={surfaceTransitioning || undefined}
+        className="z-10 flex inqtrix-panel-header shrink-0 items-center justify-between gap-2 border-b border-border bg-background px-3"
+        data-agent-surface-transitioning={surfaceTransitioning || undefined}
+      >
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <PanelToggle
             collapseLabel={t.agent.sessions.title}
@@ -954,48 +1432,66 @@ export function AgentWorkspace({
             side="left"
           />
           <h1 className="truncate t-section text-foreground">
-            {selectedSession?.title || t.navigation.agent}
+            {committedSessionTitle}
           </h1>
         </div>
-        <PanelToggle
-          collapseLabel={t.agent.canvas.title}
-          controlsId={CANVAS_PANEL_ID}
-          expandLabel={t.agent.canvas.title}
-          expanded={canvas.open}
-          onToggle={(next) => {
-            if (next) {
-              dispatch({
-                descriptor:
-                  activeCanvasView(canvas)
-                  ?? fallbackCanvasDescriptor(latestRun),
-                source: 'user',
-                type: 'openAgentCanvasView',
-              })
-            } else {
-              dispatch({ type: 'closeAgentCanvas' })
-            }
-          }}
-          side="right"
-        />
+        <span inert={surfaceTransitioning || undefined}>
+          <PanelToggle
+            collapseLabel={t.agent.canvas.title}
+            controlsId={CANVAS_PANEL_ID}
+            expandLabel={t.agent.canvas.title}
+            expanded={canvas.open}
+            onToggle={(next) => {
+              if (next) {
+                dispatch({
+                  descriptor:
+                    activeCanvasView(canvas)
+                    ?? fallbackCanvasDescriptor(latestRun),
+                  source: 'user',
+                  type: 'openAgentCanvasView',
+                })
+              } else {
+                dispatch({ type: 'closeAgentCanvas' })
+              }
+            }}
+            side="right"
+          />
+        </span>
       </header>
-      <ScrollArea className="min-h-0 flex-1">
+      <StructuralLoadBoundary
+        className="min-h-0 flex-1"
+        fallback={(
+          <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col px-4 py-4 md:px-8">
+            <ConversationSkeleton anchor="top" fill />
+          </div>
+        )}
+        identity={agentRevealKey}
+        onVisibilityChange={({ identity, visible }) => {
+          if (!visible) return
+          const next = requestedSessionByIdentityRef.current.get(identity)
+          if (!next) return
+          setCommittedSession((current) =>
+            current.identity === identity
+              && current.id === next.id
+              && current.title === next.title
+              ? current
+              : { ...next, identity })
+        }}
+        phase={agentLoadPhase}
+      >
+        {/* overflow-anchor:none like the chat transcript: the browser's
+            own scroll anchoring would fight the follow rule when async
+            markdown grows above the viewport. */}
+        <ScrollArea
+          className="min-h-0 flex-1 [overflow-anchor:none]"
+          ref={transcriptScrollAreaRef}
+        >
         {/* Same content width as the chat mode's transcript (max-w-5xl)
             so questions and answers read at the SAME measure across
             desks — and flush with the composer below. */}
         <div className="mx-auto w-full max-w-5xl px-4 py-4 md:px-8">
-          {agentCenterScreen({
-            hasRuns: sessionRuns.length > 0,
-            hasSelectedSession: Boolean(selectedSession),
-            runsHydrated,
-            serverEnabled,
-            sessionsKnown: sessionsSettled,
-          }) === 'skeleton' ? (
-            // Hydration window: sessions/runs are still paging in — a
-            // skeleton, never a false "empty" welcome (same primitive as
-            // Chat/Knowledge). `sessionsSettled` survives view switches
-            // (identity cache in useAgentSessionsApi), so this branch is
-            // for genuine unknowns only, never a remount over known data.
-            <ConversationSkeleton reduceMotion={reduceMotion} />
+          {centerLoading ? (
+            null
           ) : sessionRuns.length === 0 ? (
             <div className="flex min-h-[40vh] items-center justify-center">
               <WelcomeState
@@ -1026,30 +1522,52 @@ export function AgentWorkspace({
               {sessionRuns.map((run) => (
                 <AgentRunTurn
                   actions={timelineActions}
-                  animateEntry={!mountRunIdsRef.current?.has(run.runId)}
+                  artifactNames={sessionFileNames}
+                  historical={runHistoryRef.current.runIds.has(run.runId)}
                   key={run.runId}
                   run={run}
+                  sessionMemo={sessionMemo}
                   transportDegraded={pollingRunIds?.includes(run.runId)}
                 />
               ))}
             </div>
           )}
         </div>
-      </ScrollArea>
-      <div className="z-10 shrink-0 px-3 pb-2 pt-2 md:px-6">{composer}</div>
+        </ScrollArea>
+      </StructuralLoadBoundary>
+      <div
+        aria-busy={surfaceTransitioning || undefined}
+        className="z-10 shrink-0 px-3 pb-2 pt-2 md:px-6"
+        inert={surfaceTransitioning || undefined}
+      >
+        {composer}
+      </div>
     </div>
   )
 
-  const memoArtifactId = latestRun?.artifactOrder.find(
-    (artifactId) => latestRun.artifacts[artifactId]?.kind === 'memo',
-  )
-  // Kernel `write_canvas` deliverables open as document tabs too (a session may
-  // hold several); the answer stays inline (AgentAnswerBlock), never a tab.
-  const deliverableArtifactIds = latestRun
-    ? latestRun.artifactOrder.filter(
-        (artifactId) => latestRun.artifacts[artifactId]?.kind === 'deliverable',
-      )
-    : []
+  // The '+' menu aggregates SESSION-wide (P4): the index carries every
+  // document with its CURRENT anchor; before it loads, the latest run's
+  // own artifacts are the honest fallback. The answer stays inline
+  // (AgentAnswerBlock), never a tab.
+  const menuDocuments: { artifactId: string; runId: string; title: string }[] =
+    sessionDocuments.length > 0
+      ? sessionDocuments.map((meta) => ({
+        artifactId: meta.artifactId,
+        runId: meta.runId,
+        title: meta.title,
+      }))
+      : latestRun
+        ? latestRun.artifactOrder
+          .filter((artifactId) => {
+            const kind = latestRun.artifacts[artifactId]?.kind
+            return kind === 'memo' || kind === 'deliverable'
+          })
+          .map((artifactId) => ({
+            artifactId,
+            runId: latestRun.runId,
+            title: latestRun.artifacts[artifactId]?.title ?? '',
+          }))
+        : []
   const addMenu = latestRun ? (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
@@ -1084,36 +1602,27 @@ export function AgentWorkspace({
             onSelect={() =>
               openCanvasView({ runId: latestRun.runId, view: 'run' })}
           />
-          {memoArtifactId && (
+          {menuDocuments.map((entry) => (
             <OptionMenuItem
               active={false}
               icon={FileText}
-              label={t.agent.canvas.views.document}
+              key={entry.artifactId}
+              label={sessionFileNames[entry.artifactId]
+                || entry.title
+                || t.agent.canvas.views.document}
               onSelect={() =>
                 openCanvasView({
-                  artifactId: memoArtifactId,
-                  runId: latestRun.runId,
-                  view: 'document',
-                })}
-            />
-          )}
-          {deliverableArtifactIds.map((artifactId) => (
-            <OptionMenuItem
-              active={false}
-              icon={FileText}
-              key={artifactId}
-              label={
-                latestRun.artifacts[artifactId]?.title
-                || t.agent.canvas.views.document
-              }
-              onSelect={() =>
-                openCanvasView({
-                  artifactId,
-                  runId: latestRun.runId,
+                  artifactId: entry.artifactId,
+                  runId: entry.runId,
                   view: 'document',
                 })}
             />
           ))}
+          {sessionArtifactIndex?.error && (
+            <p className="px-2.5 py-1 t-hint text-destructive/90">
+              {sessionArtifactIndex.error}
+            </p>
+          )}
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -1139,6 +1648,7 @@ export function AgentWorkspace({
       labels={{
         close: t.agent.canvas.close,
         closeTab: t.agent.canvas.closeTab,
+        tabOverflow: t.agent.canvas.tabOverflow,
         follow: t.agent.canvas.follow,
         pinTab: t.agent.canvas.pinTab,
         pinned: t.agent.canvas.pinned,

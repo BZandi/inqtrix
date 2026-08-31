@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import weakref
 from contextlib import asynccontextmanager
 from types import TracebackType
@@ -133,6 +134,33 @@ def _warn_on_loop_change(session_factory: "async_sessionmaker[AsyncSession]") ->
     )
 
 
+_pooled_engine_capacities: list[int] = []
+_pooled_engine_lock = threading.Lock()
+
+
+def _record_pooled_engine(max_connections: int) -> None:
+    """Note one more pooled engine and what it may hold.
+
+    Counted here because this is the only place a pooled engine is made.
+    Stating the budget anywhere else means enumerating the call sites by
+    hand, and a hand-kept enumeration is wrong the moment a store is
+    added without anyone noticing.
+    """
+    with _pooled_engine_lock:
+        _pooled_engine_capacities.append(max_connections)
+
+
+def pooled_connection_budget() -> tuple[int, int]:
+    """Return how many pooled engines exist and what they may hold together.
+
+    Counts every pooled engine built in this process. NullPool stores are
+    excluded: they hold nothing between operations and instead add one
+    short-lived connection per operation in flight.
+    """
+    with _pooled_engine_lock:
+        return len(_pooled_engine_capacities), sum(_pooled_engine_capacities)
+
+
 def build_engine(
     database_url: str,
     *,
@@ -200,6 +228,7 @@ def build_engine(
             pool_timeout=pool_timeout,
             connect_args=connect_args,
         )
+        _record_pooled_engine(pool_size + max_overflow)
     _make_asyncpg_pool_invalidation_atomic(engine)
     return engine
 

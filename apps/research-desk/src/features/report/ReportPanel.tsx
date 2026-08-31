@@ -12,7 +12,7 @@ import {
 } from '@/components/icons'
 import {
   memo,
-  startTransition,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -34,7 +34,8 @@ import { useRunningDuration } from '@/features/researchRuns/useRunningDuration'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { aiDisclosureFrontmatter, withAiDisclosure } from '@/lib/aiDisclosure'
 import { cn } from '@/lib/utils'
-import { appMotion } from '@/motion/transitions'
+import { StructuralLoadBoundary } from '@/motion/StructuralLoadBoundary'
+import { Skeleton } from '@/components/ui/skeleton'
 import {
   phaseLabel,
   statusBadgeClassName,
@@ -67,6 +68,13 @@ type ReportPanelState = {
   mode: ReportPanelMode
 }
 
+export function reportStructuralIdentity(
+  runId: string | null,
+  mode: ReportPanelMode,
+): string {
+  return runId ? `report:${runId}:${mode}` : 'report:empty'
+}
+
 export const ReportPanel = memo(function ReportPanel({
   onHide,
   onSetReportAutocomplete,
@@ -74,26 +82,17 @@ export const ReportPanel = memo(function ReportPanel({
   selectedRun,
 }: ReportPanelProps) {
   const { t } = useLocale()
-  const reduceMotion = useReducedMotion()
-  const panelState = useMemo(() => resolveReportPanelState(selectedRun), [selectedRun])
+  // The navigation card acknowledges the click urgently in the parent. The
+  // report tree itself enters React's transition lane so parsing a long cached
+  // document cannot delay that feedback; no fixed timer is involved.
+  const targetRun = useDeferredValue(selectedRun)
+  const panelState = useMemo(() => resolveReportPanelState(targetRun), [targetRun])
   const isRunningRun = panelState.mode === 'running'
   const isCompletedRun = panelState.mode === 'completed-with-report'
     || panelState.mode === 'completed-without-report'
-  // The surface body renders from DEFERRED values: mounting a full report
-  // markdown tree takes hundreds of ms of main-thread work, and rendering it
-  // in the same pass as the run selection would delay the click feedback
-  // (card highlight, header) by exactly that time. The swap is additionally
-  // held until the card's selection animation window has passed — the expand
-  // (grid-template-rows transition) and the neighbours' layout animations all
-  // run on the main thread, and a big commit inside that window drops frames.
-  const deferredRun = useAnimationSettledValue(selectedRun)
-  const deferredPanelState = useMemo(() => resolveReportPanelState(deferredRun), [deferredRun])
-  const deferredIsRunningRun = deferredPanelState.mode === 'running'
-  const deferredIsCompletedRun = deferredPanelState.mode === 'completed-with-report'
-    || deferredPanelState.mode === 'completed-without-report'
   const visibleEventCount = useMemo(
-    () => (selectedRun ? selectedRun.events.filter(isDisplayableAgentEvent).length : 0),
-    [selectedRun],
+    () => (targetRun ? targetRun.events.filter(isDisplayableAgentEvent).length : 0),
+    [targetRun],
   )
   const panelTitle = isRunningRun
     ? t.report.agentStepsTitle
@@ -101,17 +100,26 @@ export const ReportPanel = memo(function ReportPanel({
       ? t.report.queueTitle
       : t.report.title
   const canUseReportInChat = Boolean(
-    selectedRun && panelState.mode === 'completed-with-report' && onUseReportInChat,
+    targetRun && panelState.mode === 'completed-with-report' && onUseReportInChat,
   )
 
   return (
-    <motion.aside
-      initial={reduceMotion ? false : { opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={appMotion.panel}
+    // Header and body form one identity-owned surface. The boundary therefore
+    // never exposes a newly selected title above the previous report body.
+    <aside
       className="h-full min-h-0 w-full min-w-0 max-w-full overflow-hidden border-t border-border bg-background lg:border-t-0"
     >
-      <Tabs defaultValue="preview" className="flex h-full min-h-0 flex-col">
+      <StructuralLoadBoundary
+        className="h-full"
+        fallback={<ReportSurfaceSkeleton />}
+        identity={reportStructuralIdentity(targetRun?.runId ?? null, panelState.mode)}
+        phase={targetRun ? (isRunningRun ? 'refreshing' : 'ready') : 'empty'}
+      >
+      <Tabs
+        className="flex h-full min-h-0 flex-col"
+        data-report-surface-run-id={targetRun?.runId ?? ''}
+        defaultValue="preview"
+      >
         <div>
           <div className="flex inqtrix-panel-header items-center justify-between gap-3 border-b border-border px-3">
             <div className="min-w-0">
@@ -127,8 +135,8 @@ export const ReportPanel = memo(function ReportPanel({
                     className="size-7"
                     disabled={!canUseReportInChat}
                     onClick={() => {
-                      if (!selectedRun || !canUseReportInChat) return
-                      onUseReportInChat?.(selectedRun.runId)
+                      if (!targetRun || !canUseReportInChat) return
+                      onUseReportInChat?.(targetRun.runId)
                     }}
                     size="icon"
                     type="button"
@@ -156,11 +164,11 @@ export const ReportPanel = memo(function ReportPanel({
               </Tooltip>
             </div>
           </div>
-          {selectedRun && (
+          {targetRun && (
             <div className="border-b border-border px-4 py-2.5">
               <div className="min-w-0">
                 <p className="t-meta line-clamp-3 break-words text-muted-foreground">
-                  {selectedRun.summary.title}
+                  {targetRun.summary.title}
                 </p>
                 {isRunningRun ? (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -173,7 +181,7 @@ export const ReportPanel = memo(function ReportPanel({
                     </span>
                   </div>
                 ) : (
-                  panelState.mode === 'completed-with-report' && selectedRun.source === 'mock' && (
+                  panelState.mode === 'completed-with-report' && targetRun.source === 'mock' && (
                     <Badge
                       className="mt-1.5 shrink-0 border-border bg-muted text-muted-foreground hover:bg-muted"
                       variant="outline"
@@ -205,86 +213,86 @@ export const ReportPanel = memo(function ReportPanel({
           )}
         </div>
 
-        {/* Surface bodies are keyed by surface KIND, never by runId: a keyed
-            remount would replay the enter fade while the heavy report markdown
-            mounts at opacity 0 (visible blank on report-to-report switches).
-            Switching runs inside the same surface swaps content instantly; the
-            inner runId key only remounts the scroll container (scroll reset,
-            fresh per-run UI state) without any animation. */}
-        {!deferredRun ? (
-          <motion.div
-            animate={{ opacity: 1, y: 0 }}
-            className="flex min-h-0 flex-1"
-            initial={reduceMotion ? false : { opacity: 0, y: 4 }}
-            key="empty"
-            transition={appMotion.panel}
-          >
+        {!targetRun ? (
+          <div className="flex min-h-0 flex-1" key="empty">
             <EmptyReportPanel />
-          </motion.div>
-        ) : deferredIsCompletedRun ? (
-          <motion.div
-            animate={{ opacity: 1, y: 0 }}
-            className="min-h-0 flex-1 overflow-hidden"
-            initial={reduceMotion ? false : { opacity: 0, y: 4 }}
-            key="report"
-            transition={appMotion.panel}
-          >
-            <ScrollArea className="h-full min-h-0" key={deferredRun.runId}>
+          </div>
+        ) : isCompletedRun ? (
+          <div className="min-h-0 flex-1 overflow-hidden" key="report">
+            <ScrollArea className="h-full min-h-0" key={targetRun.runId}>
               <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="preview">
-                <ReportPreview run={deferredRun} markdown={deferredPanelState.markdown} />
+                <ReportPreview run={targetRun} markdown={panelState.markdown} />
               </TabsContent>
               <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="evidence">
-                <ReportEvidence run={deferredRun} />
+                <ReportEvidence run={targetRun} />
               </TabsContent>
               <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="agentSteps">
-                <ReportAgentSteps run={deferredRun} />
+                <ReportAgentSteps run={targetRun} />
               </TabsContent>
               <TabsContent className="m-0 w-full min-w-0 max-w-full overflow-hidden p-4" value="export">
-                <ReportExport markdown={deferredPanelState.markdown} onSetAutocomplete={onSetReportAutocomplete} run={deferredRun} />
+                <ReportExport markdown={panelState.markdown} onSetAutocomplete={onSetReportAutocomplete} run={targetRun} />
               </TabsContent>
             </ScrollArea>
-          </motion.div>
+          </div>
         ) : (
-          <motion.div
-            animate={{ opacity: 1, y: 0 }}
-            className="min-h-0 flex-1 overflow-hidden"
-            initial={reduceMotion ? false : { opacity: 0, y: 4 }}
-            key="status"
-            transition={appMotion.panel}
-          >
-            {deferredIsRunningRun ? (
-              <RunStatusPanel key={deferredRun.runId} run={deferredRun} />
+          <div className="min-h-0 flex-1 overflow-hidden" key="status">
+            {isRunningRun ? (
+              <RunStatusPanel key={targetRun.runId} run={targetRun} />
             ) : (
-              <ScrollArea className="h-full min-h-0" key={deferredRun.runId}>
-                <RunStatusPanel run={deferredRun} />
+              <ScrollArea className="h-full min-h-0" key={targetRun.runId}>
+                <RunStatusPanel run={targetRun} />
               </ScrollArea>
             )}
-          </motion.div>
+          </div>
         )}
       </Tabs>
-    </motion.aside>
+      </StructuralLoadBoundary>
+    </aside>
   )
 })
 
-/* The run-card select/expand animations (appMotion.card 0.22s, the card's
-   200ms grid-template-rows transition, neighbour layout shifts) are all
-   main-thread bound, so the settle window must outlast the longest of them
-   before the heavy report commit is allowed to land. */
-const SELECTION_ANIMATION_SETTLE_MS = 300
+/** Complete target silhouette used only after the shared cold-wait delay. */
+function ReportSurfaceSkeleton() {
+  return (
+    <div aria-hidden className="flex h-full min-h-0 flex-col bg-background">
+      <div className="flex inqtrix-panel-header shrink-0 items-center gap-3 border-b border-border px-3">
+        <Skeleton className="h-4 w-28" />
+        <Skeleton className="ml-auto size-7 rounded-md" />
+      </div>
+      <div className="shrink-0 border-b border-border px-4 py-2.5">
+        <Skeleton className="h-4 w-2/3" />
+        <Skeleton className="mt-2 h-8 w-56" />
+      </div>
+      <ReportBodySkeleton />
+    </div>
+  )
+}
 
-function useAnimationSettledValue<T>(value: T): T {
-  const [settled, setSettled] = useState(value)
-
-  useEffect(() => {
-    if (Object.is(value, settled)) return undefined
-
-    const handle = window.setTimeout(() => {
-      startTransition(() => setSettled(value))
-    }, SELECTION_ANIMATION_SETTLE_MS)
-    return () => window.clearTimeout(handle)
-  }, [value, settled])
-
-  return settled
+/** Document-shaped placeholder for the report body's staged mount, at the
+ * body's own padding (TabsContent p-4). A FULL page of heading + paragraph
+ * silhouette: the report fills the panel, so a top strip of bars made the
+ * swap read as "empty becomes text" below — the crossfade can only blend
+ * what overlaps. Overflow is cropped like real text at the panel edge. */
+function ReportBodySkeleton() {
+  const paragraph = (key: number, widths: readonly string[]) => (
+    <div className="flex flex-col gap-2" key={key}>
+      {widths.map((width, index) => (
+        <Skeleton className={cn('h-4', width)} key={index} />
+      ))}
+    </div>
+  )
+  return (
+    <div aria-hidden className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-4">
+      <Skeleton className="h-6 w-2/5" />
+      {paragraph(0, ['w-[92%]', 'w-[86%]', 'w-[89%]', 'w-[64%]'])}
+      {paragraph(1, ['w-[88%]', 'w-[93%]', 'w-[71%]'])}
+      <Skeleton className="h-5 w-1/4" />
+      {paragraph(2, ['w-[90%]', 'w-[85%]', 'w-[94%]', 'w-[58%]'])}
+      {paragraph(3, ['w-[87%]', 'w-[92%]', 'w-[66%]'])}
+      <Skeleton className="h-5 w-1/3" />
+      {paragraph(4, ['w-[91%]', 'w-[88%]', 'w-[79%]'])}
+    </div>
+  )
 }
 
 function resolveReportPanelState(selectedRun: ResearchRunRecord | null): ReportPanelState {

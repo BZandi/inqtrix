@@ -33,6 +33,7 @@ export type MarkdownBlockPngOptions = {
   style: {
     boxSizing: 'border-box'
     height: string
+    margin: '0'
     maxWidth: 'none'
     overflow: 'visible'
     padding: string
@@ -108,6 +109,13 @@ export function markdownBlockPngOptions(
     style: {
       boxSizing: 'border-box',
       height: `${metrics.exportHeight}px`,
+      // The capture inlines the node's COMPUTED styles, and a centered
+      // block (`margin-inline: auto`) computes to the pixel offset that
+      // centred it inside its original, much wider column. Re-rendered at
+      // the block's own width that offset pushes the whole drawing outside
+      // the image — a silently empty PNG. The capture frame is the block
+      // itself, so it is never centred in anything: pin the margin to zero.
+      margin: '0',
       maxWidth: 'none',
       overflow: 'visible',
       padding: `${metrics.padding}px`,

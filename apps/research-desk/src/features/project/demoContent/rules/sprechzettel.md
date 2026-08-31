@@ -9,7 +9,7 @@ rule_id: "rule-1780932163235-7ckb3x"
 schema_version: 1
 title: "Sprechzettel"
 updated_at: "2026-01-01T07:00:05.000Z"
-visibility: {"chat":true,"editor":true}
+visibility: {"agent":true,"chat":true,"editor":true}
 ---
 # Basis-Prompt: Fundierten Sprechzettel für höheres Management erstellen
 

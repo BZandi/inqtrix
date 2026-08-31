@@ -24,6 +24,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Textarea } from '@/components/ui/textarea'
 import { resizeTextareaToRows } from '@/features/composer/textareaAutosize'
 import type {
+  EditorCommentAnchorRecord,
   EditorCommentKind,
   EditorCommentThreadRecord,
   EditorDocumentRecord,
@@ -38,7 +39,7 @@ import {
 } from '@/features/textImprove'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
-import { InqtrixCollaborationCaret, commentDecorationPluginKey, createEditorExtensions, normalizeEditorMarkdownForTiptap, serializeEditorFinalProjectionMarkdown, serializeEditorMarkdown, suggestionDecorationPluginKey, type CollaborationReviewOverlayUpdate } from '../tiptap'
+import { InqtrixCollaborationCaret, commentDecorationPluginKey, createEditorExtensions, editorMarkdownForTiptap, normalizeEditorMarkdownForTiptap, serializeEditorFinalProjectionMarkdown, serializeEditorMarkdown, suggestionDecorationPluginKey, type CollaborationReviewOverlayUpdate } from '../tiptap'
 import type { CollaborationDocumentHandle } from '../useCollaborationDocument'
 import { BlockHandle } from '../BlockHandle'
 import { TableControls } from '../TableControls'
@@ -46,13 +47,12 @@ import { SelectionToolbar } from '../SelectionToolbar'
 import { MarkdownSourceEditor } from '../MarkdownSourceEditor'
 import { DocumentDiffView } from '../DocumentDiffView'
 import { suggestionDiffPlan } from '../suggestionDiff'
+import { resolveSuggestionTarget } from '../useEditorSuggestions'
 import {
-  blockInsertionPositionForRange,
   blockWidgetPositionForRange,
-  clampAnchor,
   createCommentFromSelection,
+  materializeAnchorForRange,
   resolveMaterializedAnchor,
-  resolveAnchorRange,
   shouldParsePastedMarkdown,
 } from '../anchoring'
 import { COMMENT_KIND_ORDER, commentKindMeta } from '../commentKinds'
@@ -84,6 +84,14 @@ export type MarkdownEditorSurfaceProps = {
   mode: ProjectState['editorUi']['viewMode']
   onChange: (contentMarkdown: string) => void
   onCreateComment: (comment: EditorCommentThreadRecord) => void
+  /** P9e: when set, the bubble menu's comment button hands the
+   * MATERIALIZED anchor and the selection's viewport position to the
+   * host instead of opening the built-in form (anchor extraction must
+   * happen at click time — the host popover steals the selection). */
+  externalCommentComposer?: (payload: {
+    anchor: EditorCommentAnchorRecord
+    position: { left: number; top: number }
+  }) => void
   onCreateTeamComment?: (input: {
     anchor: EditorCommentThreadRecord['anchor']
     bodyMarkdown: string
@@ -247,6 +255,7 @@ export function MarkdownEditorSurface({
   mode,
   onChange,
   onCreateComment,
+  externalCommentComposer,
   onCreateTeamComment,
   onCollaborationSuggestionUndo,
   onEditorReady,
@@ -297,7 +306,8 @@ export function MarkdownEditorSurface({
   const suggestionsSignature = editorSuggestionDecorationSignature(suggestions)
   const suggestionUiSignature = suggestions.map((suggestion) =>
     `${suggestion.id}:${runningSuggestionIds.includes(suggestion.id) ? 'running' : 'idle'}:${suggestionErrors[suggestion.id] ?? ''}`).join('|')
-  const tiptapContentMarkdown = normalizeEditorMarkdownForTiptap(document.contentMarkdown)
+  // Eigener, gespeicherter Inhalt: KEINE Einfuhr-Regel (siehe editorMarkdownForTiptap).
+  const tiptapContentMarkdown = editorMarkdownForTiptap(document.contentMarkdown)
   const collaborationMode = document.contentMode === 'collaboration'
   const collaborationBinding = collaborationBindingForEditorDocument(document, collaboration)
   const lifecyclePolicy = editorSurfaceLifecyclePolicy({
@@ -392,6 +402,13 @@ export function MarkdownEditorSurface({
           divider: copy.slashDivider,
           suggestUnavailable: copy.slashSuggestUnavailable,
         },
+      },
+      codeBlockLabels: {
+        copied: copy.codeBlockCopied,
+        copy: copy.codeBlockCopy,
+        languageAria: copy.codeBlockLanguageAria,
+        plainOption: copy.codeBlockLanguagePlain,
+        unavailable: copy.codeBlockLanguageUnavailable,
       },
       onClick: (commentId) => {
         if (teamCommentIdsRef.current.has(commentId)) {
@@ -649,6 +666,18 @@ export function MarkdownEditorSurface({
               if (!comment) return
               onCreateComment(comment)
             }}
+            onExternalComment={externalCommentComposer
+              ? () => {
+                const { from, to } = editor.state.selection
+                if (from === to) return
+                const anchor = materializeAnchorForRange(editor, { from, to })
+                const coords = editor.view.coordsAtPos(to)
+                externalCommentComposer({
+                  anchor,
+                  position: { left: coords.left, top: coords.bottom + 8 },
+                })
+              }
+              : undefined}
             onCreateTeamComment={onCreateTeamComment
               ? (bodyMarkdown, mentionUserIds) => {
                   const comment = createCommentFromSelection(
@@ -758,25 +787,21 @@ function resolveSuggestionDecorationTarget(
   editor: Editor,
   suggestion: EditorSuggestionRecord,
 ): { from: number; to: number; widgetAt: number } | null {
-  const position = suggestion.editPosition ?? 'replace'
-  if (position === 'append') {
-    const end = editor.state.doc.content.size
-    return { from: end, to: end, widgetAt: end }
+  // P7-E2 wrapper dedup: ONE resolver decides where a suggestion lives.
+  // The decoration formerly re-resolved with the RAW stored anchor
+  // (stale absolute hint under Yjs shifts); delegating to
+  // resolveSuggestionTarget shares the relative-anchor path and every
+  // future policy change, and this wrapper only derives widget/insert
+  // positions from the shared result.
+  const { target } = resolveSuggestionTarget(editor, suggestion)
+  if (!target) return null
+  if (target.kind === 'replace') {
+    return {
+      ...target.range,
+      widgetAt: blockWidgetPositionForRange(editor, target.range),
+    }
   }
-  const anchorText = (suggestion.anchorText ?? suggestion.originalText).trim()
-  if (!anchorText) return null
-  const range = resolveAnchorRange(editor, {
-    hint: clampAnchor(suggestion.anchor, editor).from,
-    quoteAfter: suggestion.anchor.quoteAfter,
-    quoteBefore: suggestion.anchor.quoteBefore,
-    text: anchorText,
-  })
-  if (!range) return null
-  if (position === 'replace') {
-    return { ...range, widgetAt: blockWidgetPositionForRange(editor, range) }
-  }
-  const at = blockInsertionPositionForRange(editor, range, position)
-  return { from: at, to: at, widgetAt: at }
+  return { from: target.at, to: target.at, widgetAt: target.at }
 }
 
 function EditorBubbleMenu({
@@ -784,6 +809,7 @@ function EditorBubbleMenu({
   copy,
   editor,
   onCreateComment,
+  onExternalComment,
   onCreateTeamComment,
   onTeamCommentDraftChange,
   privateCommentsEnabled,
@@ -795,6 +821,10 @@ function EditorBubbleMenu({
   copy: EditorCopy
   editor: Editor
   onCreateComment: (commentMarkdown: string, kind: EditorCommentKind) => void
+  /** P9e: host-owned comment composer (the agent canvas popover). When
+   * set, the comment button hands off instead of opening the built-in
+   * editor form — ONE comment field per surface. */
+  onExternalComment?: () => void
   onCreateTeamComment?: (
     bodyMarkdown: string,
     mentionUserIds: string[],
@@ -1048,6 +1078,12 @@ function EditorBubbleMenu({
             }}
             privateCommentEnabled={privateCommentsEnabled}
             onStartComment={(visibility) => {
+              // P9e: a host composer (agent canvas) takes over private
+              // comments entirely — team threads keep the built-in form.
+              if (onExternalComment && visibility !== 'team') {
+                onExternalComment()
+                return
+              }
               setCommentVisibility(visibility)
               setCommentDraft(visibility === 'team' ? teamCommentDraft : '')
               setIsCommenting(true)

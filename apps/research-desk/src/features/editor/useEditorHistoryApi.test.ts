@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import type {
@@ -8,11 +10,13 @@ import {
   canPersistEditorCommentsForDocument,
   editorCommentsForAutosave,
   editorDocumentDetailProvenanceKey,
+  editorLocallyAuthoritativeDocumentIds,
   editorServerDocumentObservation,
   editorDocumentsForAutosave,
   planEditorCommentReconciliation,
   planEditorDocumentAutosave,
   planEditorOpenHydration,
+  resolveEditorDocumentBodyHydration,
   shouldLoadLegacyEditorBody,
 } from './useEditorHistoryApi'
 
@@ -350,6 +354,103 @@ describe('editor document autosave planning', () => {
   })
 })
 
+describe('editor document body readiness', () => {
+  it('does not promote metadata-only rows to loaded bodies on background refresh', () => {
+    expect([...editorLocallyAuthoritativeDocumentIds({
+      alreadyHydrated: false,
+      loadedDocumentIds: [],
+      projectDocumentIds: ['local-body', 'metadata-row'],
+    })]).toEqual(['local-body', 'metadata-row'])
+    expect([...editorLocallyAuthoritativeDocumentIds({
+      alreadyHydrated: true,
+      loadedDocumentIds: ['local-body'],
+      projectDocumentIds: ['local-body', 'metadata-row'],
+    })]).toEqual(['local-body'])
+  })
+
+  it('renders local and already hydrated server bodies without a pending phase', () => {
+    expect(resolveEditorDocumentBodyHydration({
+      documentId: 'local-document',
+      error: null,
+      hasExactDocumentDetail: false,
+      hasLoadedDocumentBody: false,
+      hasServerDocument: false,
+      requiresExactDocumentDetail: false,
+    })).toEqual({
+      documentId: 'local-document',
+      error: null,
+      phase: 'ready',
+    })
+    expect(resolveEditorDocumentBodyHydration({
+      documentId: 'server-document',
+      error: null,
+      hasExactDocumentDetail: false,
+      hasLoadedDocumentBody: true,
+      hasServerDocument: true,
+      requiresExactDocumentDetail: false,
+    }).phase).toBe('ready')
+  })
+
+  it('keeps metadata-only server documents pending until their body is authoritative', () => {
+    expect(resolveEditorDocumentBodyHydration({
+      documentId: 'server-document',
+      error: null,
+      hasExactDocumentDetail: false,
+      hasLoadedDocumentBody: false,
+      hasServerDocument: true,
+      requiresExactDocumentDetail: false,
+    })).toEqual({
+      documentId: 'server-document',
+      error: null,
+      phase: 'pending',
+    })
+  })
+
+  it('requires exact lifecycle detail for collaboration documents', () => {
+    const shared = {
+      documentId: 'collaboration-document',
+      error: null,
+      hasLoadedDocumentBody: true,
+      hasServerDocument: true,
+      requiresExactDocumentDetail: true,
+    }
+    expect(resolveEditorDocumentBodyHydration({
+      ...shared,
+      hasExactDocumentDetail: false,
+    }).phase).toBe('pending')
+    expect(resolveEditorDocumentBodyHydration({
+      ...shared,
+      hasExactDocumentDetail: true,
+    }).phase).toBe('ready')
+  })
+
+  it('makes a terminal body failure visible without leaving a pending skeleton', () => {
+    expect(resolveEditorDocumentBodyHydration({
+      documentId: 'server-document',
+      error: 'Document body unavailable',
+      hasExactDocumentDetail: false,
+      hasLoadedDocumentBody: false,
+      hasServerDocument: true,
+      requiresExactDocumentDetail: false,
+    })).toEqual({
+      documentId: 'server-document',
+      error: 'Document body unavailable',
+      phase: 'error',
+    })
+  })
+
+  it('uses an immediate empty phase when no document is selected', () => {
+    expect(resolveEditorDocumentBodyHydration({
+      documentId: null,
+      error: 'ignored',
+      hasExactDocumentDetail: false,
+      hasLoadedDocumentBody: false,
+      hasServerDocument: false,
+      requiresExactDocumentDetail: false,
+    })).toEqual({ documentId: null, error: null, phase: 'empty' })
+  })
+})
+
 describe('authoritative editor comment reconciliation', () => {
   it('drops a stale cached private comment after reset and an authoritative empty list', () => {
     const local = comment('comment-1')
@@ -403,5 +504,87 @@ describe('authoritative editor comment reconciliation', () => {
 
     expect([...plan.pendingDeletedCommentIds]).toEqual(['deleted-comment'])
     expect(plan.serverComments).toEqual([])
+  })
+})
+
+describe('F-A2-01: the share flush locks before it reads (source pins)', () => {
+  const source = readFileSync(
+    fileURLToPath(new URL('./useEditorHistoryApi.ts', import.meta.url)),
+    'utf8',
+  )
+  const body = source.slice(source.indexOf('const flushDocumentForShare'))
+    .slice(0, 2400)
+
+  it('takes only a documentId — never a caller-frozen record', () => {
+    expect(body).toContain('documentId: string')
+    expect(body).not.toContain('document: EditorDocumentRecord')
+  })
+
+  it('waits for the in-flight flush, acquires the lock, THEN reads live', () => {
+    const waits = body.indexOf('while (flushingRef.current)')
+    const locks = body.indexOf('flushingRef.current = true')
+    const reads = body.indexOf('documentsRef.current[documentId]')
+    expect(waits).toBeGreaterThan(-1)
+    expect(locks).toBeGreaterThan(waits)
+    expect(reads).toBeGreaterThan(locks)
+  })
+})
+
+describe('F-A2-01: rebased-then-retry reaches saved (pure composition)', () => {
+  // The pre-fix loop: a frozen snapshot re-sent revision N+1 forever.
+  // The fix re-reads the live record — after the concurrent writer won
+  // and the 409 path rebased the base, a retry MUST compute a payload
+  // the server CAS accepts (current + 1).
+  it('a snapshot payload stays stale; a live-read payload advances', async () => {
+    const { researchDeskReducer } = await import('@/features/researchDesk/state')
+    const { serverDocumentPayload } = await import('./editorSync')
+    const { createEmptyProjectState } = await import('@/features/project/seedProject')
+
+    const snapshot = { ...BASE_DOCUMENT, revision: 3 }
+    let state = {
+      ...createEmptyProjectState(),
+      editorDocumentOrder: [snapshot.id],
+      editorDocuments: { [snapshot.id]: snapshot },
+    }
+    // Concurrent autosave wins: server (and live record) move to 4.
+    state = researchDeskReducer(state, {
+      documentId: snapshot.id,
+      revision: 4,
+      type: 'adoptEditorDocumentRevision',
+    })
+    // The frozen snapshot would re-send base+1 = 4 against a server at 4
+    // (base 4 requires payload 5) — exactly the never-succeeding retry.
+    expect(serverDocumentPayload(snapshot).revision).toBe(4)
+    // The 409 path rebases the LIVE record onto the server base ...
+    state = researchDeskReducer(state, {
+      contentMarkdown: '# Server-Stand',
+      documentId: snapshot.id,
+      pushedContentMarkdown: snapshot.contentMarkdown,
+      revision: 4,
+      type: 'rebaseServerEditorDocument',
+    })
+    // ... and a live re-read now computes the accepted payload.
+    const live = state.editorDocuments[snapshot.id]
+    expect(live.revision).toBe(4)
+    expect(serverDocumentPayload(live).revision).toBe(5)
+  })
+})
+
+describe('P8 Kleinbefund #9: activation callbacks receive the LIVE record', () => {
+  it('EditorWorkspace re-reads editorDocumentsRef before spreading', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('./EditorWorkspace.tsx', import.meta.url)),
+      'utf8',
+    )
+    const handler = source.slice(
+      source.indexOf('const handleEnableCollaboration'),
+    ).slice(0, 4200)
+    const liveRead = handler.indexOf(
+      'editorDocumentsRef.current[document.id]',
+    )
+    const spread = handler.indexOf('...liveDocument')
+    expect(liveRead).toBeGreaterThan(-1)
+    expect(spread).toBeGreaterThan(liveRead)
+    expect(handler).not.toContain('...document,')
   })
 })

@@ -206,7 +206,9 @@ Semantics worth knowing as an operator:
 * SIGTERM stops claiming and drains in-flight runs (90s); undrained
   runs are NOT cancelled — heartbeat silence hands them to another
   worker. Per-worker parallelism: `INQTRIX_WORKER_CONCURRENCY`
-  (default 2).
+  (default 100). It sizes the research loop directly; the indexing,
+  upload and deletion loops each run at the lower of it and their own
+  ceiling, and a ceiling that binds is named in the startup log.
 * Without `INQTRIX_QUEUE_BACKEND` (or with the memory storage
   default) nothing changes: runs live in process memory exactly as
   before. `INQTRIX_QUEUE_BACKEND=valkey` without the Postgres backend

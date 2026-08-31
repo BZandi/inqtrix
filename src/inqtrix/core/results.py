@@ -17,6 +17,100 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 WebRecency = Literal["day", "week", "month", "year"]
 
+# Visible request bounds for the canvas context (P4). Violations are
+# REJECTED with the offending field named — never silently truncated
+# (no-silent-caps doctrine): the full text always either arrives intact
+# or the caller learns exactly why it did not.
+CANVAS_CONTEXT_MAX_COMMENTS = 20
+CANVAS_QUOTE_MAX_CHARS = 2_000
+CANVAS_QUOTE_CONTEXT_MAX_CHARS = 500
+CANVAS_COMMENT_MAX_CHARS = 4_000
+
+
+class CanvasComment(BaseModel):
+    """One user comment anchored to a text selection in a canvas document.
+
+    The anchor triple (``quote`` plus optional before/after context)
+    follows the editor's anchoring convention; the server passes it to
+    the model verbatim and never re-resolves it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        description="Canvas artifact the comment anchors to.",
+    )
+    """Canvas artifact the comment anchors to."""
+    revision: int = Field(
+        ...,
+        ge=1,
+        description="Artifact revision the user commented on.",
+    )
+    """Artifact revision the user commented on."""
+    quote: str = Field(
+        ...,
+        min_length=1,
+        max_length=CANVAS_QUOTE_MAX_CHARS,
+        description="The selected text, verbatim.",
+    )
+    """The selected text, verbatim."""
+    quote_before: str = Field(
+        "",
+        max_length=CANVAS_QUOTE_CONTEXT_MAX_CHARS,
+        description="Text immediately before the selection (anchor context).",
+    )
+    """Text immediately before the selection (anchor context)."""
+    quote_after: str = Field(
+        "",
+        max_length=CANVAS_QUOTE_CONTEXT_MAX_CHARS,
+        description="Text immediately after the selection (anchor context).",
+    )
+    """Text immediately after the selection (anchor context)."""
+    comment: str = Field(
+        ...,
+        min_length=1,
+        max_length=CANVAS_COMMENT_MAX_CHARS,
+        description="The user's note about the selection, verbatim.",
+    )
+    """The user's note about the selection, verbatim."""
+
+
+class CanvasContext(BaseModel):
+    """Structured canvas attachment of an Agent Desk submission (P4).
+
+    Travels as a dedicated request field — NEVER serialized into
+    ``question`` (the question column is clipped at persistence, reaches
+    share-inbox titles before acceptance, and renders raw in the chat
+    bubble). Snapshot semantics: the context reflects the moment of
+    submission and is frozen with the first run segment's checkpointed
+    user message — later canvas edits never rewrite it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        description="The canvas document the user had open.",
+    )
+    """The canvas document the user had open."""
+    revision: int = Field(
+        ...,
+        ge=1,
+        description="Revision of that document at submission time.",
+    )
+    """Revision of that document at submission time."""
+    comments: tuple[CanvasComment, ...] = Field(
+        default=(),
+        max_length=CANVAS_CONTEXT_MAX_COMMENTS,
+        description="Queued selection comments, in queue order.",
+    )
+    """Queued selection comments, in queue order."""
+
 
 class SourcePolicy(BaseModel):
     """Per-run availability of the Agent Desk's external sources."""
@@ -194,6 +288,35 @@ class RunRequest(BaseModel):
         ),
     )
     """One-shot server-enforced route; empty delegates to the normal agent policy."""
+    canvas_context: CanvasContext | None = Field(
+        default=None,
+        description=(
+            "Canvas attachment of an agent-kernel submission: the open "
+            "document (id + revision) and queued selection comments. "
+            "None for every other mode and for runs without canvas "
+            "context."
+        ),
+    )
+    """Canvas attachment of an agent-kernel submission (P4). Injected into the kernel user message as a fenced data section; frozen with the first segment's checkpoint; never inherited by child runs and never part of run summaries. ``None`` everywhere else."""
+    report_requirement: str = Field(
+        "",
+        description=(
+            "Composed result requirement set BEFORE the run: how the "
+            "result has to look (structure, focus, audience). Already "
+            "resolved and composed server-side from free text plus "
+            "attached library rules. Empty when the user set none."
+        ),
+    )
+    """Result requirement set at submit time, composed server-side (free text + attached library rules, each with its origin marker). The only way to state one for runs that never reach a plan gate — ``autonomous``, the speed tier, delegated children, and the kernel, which has no plan gate at all. A later plan-gate decision REPLACES it; an approval that says nothing leaves it standing. Never inherited by child runs."""
+    attached_reports: tuple[dict[str, Any], ...] = Field(
+        default=(),
+        description=(
+            "Research-Desk reports the user attached, already resolved "
+            "server-side to {report_id, title, reference_count}. Names "
+            "only — the bodies are fetched by the kernel tool."
+        ),
+    )
+    """Research reports attached to an agent-kernel run, resolved against the caller's own visibility at submit time. Only the NAMES travel: a real report has a median of ~54k characters, and its sources become citable only by passing through the run's evidence ledger, which ``read_research_report`` does on demand. Never inherited by child runs; empty everywhere else."""
 
     @model_validator(mode="after")
     def _exclusive_directive_contract(self) -> "RunRequest":

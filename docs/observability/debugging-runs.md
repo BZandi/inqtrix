@@ -126,8 +126,8 @@ need guaranteed sub-second cancellation:
 
 Check which HTTP surface returned 429:
 
-- `/v1/chat/completions`: compare `MAX_CONCURRENT` (default 6) to active research requests in the access log. If active requests equal the cap, increase the setting. If not, the semaphore may have leaked — the normal cause would be an exception escaping outside the `stream_response` context manager.
-- `/v1/runs`: inspect `GET /v1/runs`. If active runs equal `RUN_MAX_CONCURRENT` (or `MAX_CONCURRENT` when `RUN_MAX_CONCURRENT` is unset) and queued runs equal `RUN_QUEUE_MAX_SIZE`, the queue is full. Increase `RUN_QUEUE_MAX_SIZE`, increase the active native run cap, or add front-door rate limiting. If the list looks empty but 429 persists, check whether terminal records are still inside `RUN_COMPLETED_TTL_SECONDS` with open event subscribers.
+- `/v1/chat/completions`: compare `MAX_CONCURRENT` (default 100) to active research requests in the access log. If active requests equal the cap, increase the setting. If not, the semaphore may have leaked — the normal cause would be an exception escaping outside the `stream_response` context manager.
+- `/v1/runs`: inspect `GET /v1/runs`. If active runs equal `RUN_MAX_CONCURRENT` (default 100) and queued runs equal `RUN_QUEUE_MAX_SIZE` (default 100), the queue is full. Increase `RUN_QUEUE_MAX_SIZE`, increase the active native run cap, or add front-door rate limiting. If the list looks empty but 429 persists, check whether terminal records are still inside `RUN_COMPLETED_TTL_SECONDS` with open event subscribers.
 
 Run the cancel-on-disconnect and run-store tests, then inspect the unified uvicorn/Inqtrix log.
 

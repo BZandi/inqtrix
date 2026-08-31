@@ -909,3 +909,73 @@ describe('private collaboration suggestion publication', () => {
     })
   })
 })
+
+describe('Anweisungslauf: welche Vorschlaege ein neuer Lauf ablöst', () => {
+  // Ein neuer Anweisungslauf loest die Vorschlaege des VORIGEN ab. Die Regel
+  // schluesselte einmal auf `origin.kind === 'global_run'` -- und traf damit
+  // auch Vorschlaege, die zu einer Sammel-Notiz des Nutzers gehoeren, denn
+  // die tragen dieselbe Kennung. Ergebnis waere gewesen: der Nutzer laesst
+  // sich eine Notiz beantworten, tippt danach eine Anweisung, und seine
+  // offene Notiz-Antwort ist stillschweigend weg.
+  function vorschlag(
+    id: string,
+    origin: EditorSuggestionRecord['origin'],
+  ): EditorSuggestionRecord {
+    return {
+      anchor: { from: 0, to: 1, selectedText: 'x', quoteBefore: '', quoteAfter: '' },
+      blockId: '',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      documentId: 'ed_1',
+      groupId: `group-${id}`,
+      id,
+      originalMarkdown: 'alt',
+      originalText: 'alt',
+      origin,
+      proposedText: 'neu',
+      revision: 1,
+      status: 'pending',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }
+  }
+
+  function nachNeuemLauf(vorhandene: EditorSuggestionRecord[]) {
+    const basis: ProjectState = {
+      ...withDoc(doc('ed_1')),
+      editorSuggestions: Object.fromEntries(vorhandene.map((s) => [s.id, s])),
+    }
+    return researchDeskReducer(basis, {
+      group: {
+        createdAt: '2026-01-02T00:00:00.000Z',
+        documentId: 'ed_1',
+        id: 'group-neu',
+        origin: { kind: 'global_run' },
+      },
+      suggestions: [vorschlag('neu-1', { commentId: 'c-neu', kind: 'assistant_edit' })],
+      type: 'createEditorSuggestionGroup',
+    })
+  }
+
+  it('laesst die Vorschlaege zu Notizen des Nutzers unberuehrt', () => {
+    const ausNotiz = vorschlag('aus-notiz', { commentId: 'c-notiz', kind: 'global_run' })
+
+    const next = nachNeuemLauf([ausNotiz])
+
+    expect(next.editorSuggestions['aus-notiz'].status).toBe('pending')
+  })
+
+  it('loest den vorigen Anweisungslauf ab -- im Kollaborationsmodus', () => {
+    const vorigerLauf = vorschlag('vorher', { commentId: 'c-traeger', kind: 'assistant_edit' })
+
+    const next = nachNeuemLauf([vorigerLauf])
+
+    expect(next.editorSuggestions.vorher.status).toBe('rejected')
+  })
+
+  it('loest den vorigen Anweisungslauf ab -- im Markdown-Modus', () => {
+    const vorigerLauf = vorschlag('vorher-md', { kind: 'global_run' })
+
+    const next = nachNeuemLauf([vorigerLauf])
+
+    expect(next.editorSuggestions['vorher-md'].status).toBe('rejected')
+  })
+})

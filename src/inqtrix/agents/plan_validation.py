@@ -125,7 +125,7 @@ def validate_plan(
             )
         if len(task.queries) > MAX_TASK_QUERIES:
             errors.append(
-                f"Task {task.id}: zu viele Suchanfragen "
+                f"Task {task.id}: zu viele Fragen "
                 f"({len(task.queries)}, max. {MAX_TASK_QUERIES})."
             )
         if task.tool_kind == "web_instant" and len(task.queries) != 1:
@@ -138,7 +138,7 @@ def validate_plan(
         ):
             errors.append(
                 f"Task {task.id}: {task.tool_kind} braucht mindestens "
-                "eine konkrete Suchanfrage in queries."
+                "eine konkrete Frage in queries."
             )
         if allowed_collection_ids is not None:
             for collection_id in task.params.collection_ids or []:

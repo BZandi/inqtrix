@@ -801,6 +801,26 @@ def _patch_states(
 
 
 def _change_summary(body: dict[str, Any]) -> dict[str, Any]:
+    """Pruefe die Anzeige-Zusammenfassung auf Form und Groesse -- nie auf Zeichen.
+
+    ``before`` und ``after`` sind woertlicher Nutzertext: der Sidecar zieht sie
+    mit ``textBetween`` aus den Textknoten des Dokuments, Auszeichnung gibt es
+    in diesem String gar nicht mehr. Eine Zeichenregel hier lehnt darum keine
+    Auszeichnung ab, sondern eine Tastatureingabe -- und weil die Ablehnung als
+    HTTP 400 auf dem Schreibpfad landet, kostet sie nicht die Zusammenfassung,
+    sondern die Aenderung selbst und damit das Dokument fuer alle Beteiligten.
+
+    Frueher standen hier vier Bedingungen gegen ``<`` und ``>``. Sie waren
+    gegenueber ihrem eigenen Zweck invertiert: der Erzeuger entfernte
+    vollstaendige Tags bereits, sodass ``<script>x</script>`` als ``x``
+    ankam und ANGENOMMEN wurde, waehrend ``x < y`` unveraendert ankam und
+    ABGELEHNT wurde. Geschuetzt wurde nichts -- die einzige Senke ist ein
+    React-Textkind, das ohnehin escapt.
+
+    Was bleibt, traegt die Absicherung vollstaendig: Typ, hoechstens drei
+    Eintraege, je 160 Zeichen, ``position`` nicht negativ, ``kind`` aus einer
+    geschlossenen Menge.
+    """
     value = body.get("change_summary")
     if not isinstance(value, dict):
         raise ValueError("invalid_change_summary")
@@ -833,10 +853,6 @@ def _change_summary(body: dict[str, Any]) -> dict[str, Any]:
             or position < 0
             or not isinstance(kind, str)
             or kind not in allowed_kinds
-            or "<" in before
-            or ">" in before
-            or "<" in after
-            or ">" in after
         ):
             raise ValueError("invalid_change_summary")
         edits.append(

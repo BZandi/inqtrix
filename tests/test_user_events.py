@@ -266,3 +266,23 @@ async def test_user_stream_rechecks_identity_before_quiet_keepalive() -> None:
     assert "event: ready" in ready
     with pytest.raises(StopAsyncIteration):
         await anext(iterator)
+
+
+def test_postgres_store_constructor_rejects_nonpositive_knobs() -> None:
+    """All three sizing guards, offline: importing the store needs no DB.
+
+    Previously only gated integration runs would have exercised these,
+    i.e. the default lane had zero coverage for a plain ValueError.
+    """
+    from inqtrix.storage.user_events_postgres import PostgresUserEventStore
+
+    for kwargs in (
+        {"retention_seconds": 0},
+        {"poll_seconds": 0},
+        {"cleanup_interval_seconds": 0},
+    ):
+        (name,) = kwargs
+        with pytest.raises(ValueError, match=name):
+            PostgresUserEventStore(
+                session_factory=None, app_role="inqtrix_app", **kwargs
+            )

@@ -426,6 +426,9 @@ def submit_agent(
     source_policy: dict[str, str] | None = None,
     tool_directives: list[str] | None = None,
     agent_overrides: dict[str, Any] | None = None,
+    report_guidance: str | None = None,
+    report_rule_ids: list[str] | None = None,
+    expect_status: int = 202,
 ) -> str:
     body: dict[str, Any] = {
         "question": "Erstelle eine Marktanalyse.",
@@ -443,8 +446,14 @@ def submit_agent(
         body["tool_directives"] = tool_directives
     if agent_overrides is not None:
         body["agent_overrides"] = agent_overrides
+    if report_guidance is not None:
+        body["report_guidance"] = report_guidance
+    if report_rule_ids is not None:
+        body["report_rule_ids"] = report_rule_ids
     response = client.post("/v1/runs", json=body)
-    assert response.status_code == 202, response.text
+    assert response.status_code == expect_status, response.text
+    if expect_status != 202:
+        return response.text
     return response.json()["run_id"]
 
 
@@ -991,6 +1000,56 @@ def test_autonomous_mode_skips_plan_interrupt(monkeypatch):
         assert plan["status"] == "approved"
 
 
+def test_delegated_balanced_run_inherits_the_plan_approval(monkeypatch):
+    """A delegated child's round-0 plan gate is covered by the delegation
+    approval (Betreiber-Entscheid 2026-08-27): whoever approved dispatching
+    the child has seen its objective, so a balanced child completes without
+    any human wait while the plan row still records an approved version."""
+    client = make_agent_client(monkeypatch)
+    store = client.container.run_service.run_store
+    real_get = store.get
+    observed_get_kwargs: list[dict[str, Any]] = []
+
+    def child_row_get(run_id: str, **kwargs: Any) -> dict[str, Any]:
+        # The run row is the algorithm's one truthful childhood source;
+        # faking it here exercises the real read point in run().
+        observed_get_kwargs.append(kwargs)
+        return {**real_get(run_id, **kwargs), "parent_run_id": "run_parent"}
+
+    monkeypatch.setattr(store, "get", child_row_get)
+    with client:
+        run_id = submit_agent(client, autonomy="balanced")
+        wait_status(client, run_id, {"completed"})
+        assert human_wait_statuses(client, run_id) == []
+        plan = client.get(f"/v1/runs/{run_id}/plan").json()
+        assert plan["version"] == 1
+        assert plan["status"] == "approved"
+    # The read must PRESENT the owner's visibility: the Postgres store's
+    # authorization predicate answers RunNotFound to a visible_to-less
+    # read of an owned (child) row — the in-memory twin masks that, so
+    # the call shape is pinned here and the live stack proves the rest.
+    assert observed_get_kwargs
+    assert all("visible_to" in kwargs for kwargs in observed_get_kwargs)
+
+
+def test_delegated_strict_run_keeps_every_gate(monkeypatch):
+    """Permission beats delegation: a strict child still parks on its own
+    gates — the delegation approval never widens strict."""
+    client = make_agent_client(monkeypatch)
+    store = client.container.run_service.run_store
+    real_get = store.get
+
+    def child_row_get(run_id: str, **kwargs: Any) -> dict[str, Any]:
+        return {**real_get(run_id, **kwargs), "parent_run_id": "run_parent"}
+
+    monkeypatch.setattr(store, "get", child_row_get)
+    with client:
+        run_id = submit_agent(client, autonomy="strict")
+        wait_status(client, run_id, {"waiting_for_approval"})
+        approvals = client.get(f"/v1/runs/{run_id}/approvals").json()["data"]
+        assert approvals[0]["status"] == "pending"
+
+
 def test_strict_mode_approves_discovery_before_probes(monkeypatch):
     client = make_agent_client(monkeypatch)
     with client:
@@ -1207,7 +1266,8 @@ def test_report_guidance_reaches_the_synthesis_prompts(monkeypatch):
         ]
         assert synthesis_prompts, "synthesis never ran"
         assert any(
-            "Nutzer-Vorgaben zum Bericht" in prompt
+            "Ergebnisvorgabe" in prompt
+            and "[Freie Vorgabe]" in prompt
             and "Sprechzettel" in prompt
             for prompt in synthesis_prompts
         )
@@ -3211,6 +3271,211 @@ def test_replan_with_web_delta_regates_in_balanced(monkeypatch):
         ]
 
 
+def test_report_guidance_can_be_cleared_at_a_later_gate(monkeypatch):
+    """A requirement the user withdraws must actually go away.
+
+    The guidance used to be stored and applied on truthiness alone, so
+    the emptied field never reached the state: the first gate's wording
+    kept shaping every later section and the user had no way to take it
+    back. Presence is the decision now — an absent key keeps what
+    stands, an empty key clears it.
+    """
+    sufficiency_calls = {"n": 0}
+
+    def sufficiency_script(prompt: str) -> dict[str, Any]:
+        sufficiency_calls["n"] += 1
+        if sufficiency_calls["n"] == 1:
+            return {"coverage": "uncovered", "missing": ["Quellen fehlen"]}
+        return {"coverage": "covered", "missing": []}
+
+    delta = replan_delta(
+        {
+            "id": "t2",
+            "title": "Nachrecherche",
+            "tool_kind": "web_instant",
+            "queries": ["Welche Quellen ergaenzen die Marktlage im Detail?"],
+        }
+    )
+    llm = ScriptedLLM(
+        overrides={
+            "SufficiencyJudgement": sufficiency_script,
+            "ReplanDeltaModel": delta,
+        }
+    )
+    client = make_agent_client(
+        monkeypatch, llm=llm, search=NoEvidenceSearch()
+    )
+
+    def decide(run_id: str, guidance: str) -> None:
+        approvals = client.get(f"/v1/runs/{run_id}/approvals").json()["data"]
+        pending = [a for a in approvals if a["status"] == "pending"]
+        assert pending, approvals
+        decided = client.post(
+            f"/v1/runs/{run_id}/approvals/{pending[0]['approval_id']}",
+            json={"decision": "approve", "report_guidance": guidance},
+        )
+        assert decided.status_code == 200, decided.text
+
+    with client:
+        run_id = submit_agent(client)
+        wait_status(client, run_id, {"waiting_for_approval"})
+        decide(run_id, "Schreibe ausschliesslich in Reimform.")
+        wait_status(client, run_id, {"waiting_for_approval"})
+        before = len(client.llm.prompts)
+        decide(run_id, "")
+        wait_status(client, run_id, {"completed"})
+        after_clearing = [
+            prompt
+            for name, prompt in client.llm.prompts[before:]
+            if name in ("ReportOutline", "SectionText", "AgentCriticReport")
+        ]
+        assert after_clearing, "synthesis never ran after the second gate"
+        assert not any("Reimform" in prompt for prompt in after_clearing)
+
+
+def test_a_renamed_session_memo_keeps_its_name(monkeypatch):
+    """A name the user gave the document must survive the next turn.
+
+    The synthesis re-titled the session memo on every canvas turn from
+    the fresh outline, so a rename lasted exactly until the next
+    request — the file in the transcript changed identity under the
+    user, with no way to tell why. The name belongs to the document.
+    """
+    client = make_agent_client(monkeypatch)
+    with client:
+        first = submit_agent(client, session_id="sess-rename")
+        wait_status(client, first, {"waiting_for_approval"})
+        approve_pending(client, first)
+        wait_status(client, first, {"completed"})
+        memos = [
+            row
+            for row in client.get(f"/v1/runs/{first}/artifacts").json()["data"]
+            if row["kind"] == "memo"
+        ]
+        assert memos, "the mission wrote no memo"
+        memo_id = memos[0]["artifact_id"]
+
+        renamed = client.patch(
+            f"/v1/runs/{first}/artifacts/{memo_id}",
+            json={"title": "Mein eigener Name"},
+        )
+        assert renamed.status_code == 200, renamed.text
+
+        second = submit_agent(client, session_id="sess-rename")
+        wait_status(client, second, {"waiting_for_approval"})
+        approve_pending(client, second)
+        wait_status(client, second, {"completed"})
+        detail = client.get(
+            f"/v1/runs/{second}/artifacts/{memo_id}"
+        ).json()
+        assert detail["title"] == "Mein eigener Name", detail["title"]
+        # The turn still wrote: only the NAME is stable, not the content.
+        assert detail["revision"] > memos[0]["revision"]
+
+
+def test_a_rejected_subquery_keeps_the_verified_siblings(monkeypatch):
+    """One unusable sub-answer must not throw away the checked ones.
+
+    A rejected answer never enters the synthesis — that part is right.
+    But the task used to stop at the FIRST rejection, so a single
+    malformed evidence block discarded every sibling query that had
+    verified, and with a one-task plan the whole run failed. The gap
+    travels with the result now: named in the answer, visible as a
+    failed step, and the remaining evidence still reaches the report.
+    """
+    from inqtrix.core.results import AgentResult
+
+    safe_reason = (
+        "Die Antwort wurde nicht veröffentlicht, weil der erforderliche "
+        "Belegblock nicht sicher gelesen und geprüft werden konnte."
+    )
+
+    class _OneBadOneGoodKnowledge:
+        id = "knowledge"
+        display_name = "Knowledge partial rejection (test stub)"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def capabilities(self) -> dict:
+            return {}
+
+        def run(self, request, *, runtime, context):
+            del request, runtime, context
+            self.calls += 1
+            if self.calls == 1:
+                return AgentResult(
+                    answer=safe_reason,
+                    result_type="knowledge_result",
+                    raw={
+                        "answer": safe_reason,
+                        "usage": {},
+                        "result_state": {
+                            "answer": safe_reason,
+                            "report_references": [],
+                            "_terminal_failure": {
+                                "type": "knowledge_grounding_format_invalid",
+                                "message": safe_reason,
+                            },
+                        },
+                    },
+                )
+            return AgentResult(
+                answer="Belegte Teilantwort. [K1]",
+                result_type="knowledge_result",
+                raw={
+                    "answer": "Belegte Teilantwort. [K1]",
+                    "usage": {},
+                    "result_state": {
+                        "answer": "Belegte Teilantwort. [K1]",
+                        "report_references": [
+                            {
+                                "label": "K1",
+                                "title": "Internes Dokument",
+                                "document_id": "doc-1",
+                                "chunk_index": 0,
+                                "source_text": "Belegter Satz.",
+                            }
+                        ],
+                    },
+                },
+            )
+
+    plan = {
+        "summary_markdown": "Interne Evidenz prüfen.",
+        "tasks": [
+            {
+                "id": "t1",
+                "title": "Interne Quellen befragen",
+                "tool_kind": "rag_query",
+                "queries": ["Erste Teilfrage?", "Zweite Teilfrage?"],
+            },
+            {
+                "id": "s",
+                "title": "Synthese",
+                "tool_kind": "synthesis",
+                "depends_on": ["t1"],
+            },
+        ],
+    }
+    client = make_agent_client(
+        monkeypatch,
+        llm=ScriptedLLM(overrides={"ExecutionPlanModel": plan}),
+    )
+    client.container.registry.register(_OneBadOneGoodKnowledge())
+    with client:
+        run_id = submit_agent(client, autonomy="autonomous")
+        wait_status(client, run_id, {"completed"})
+        stored = client.get(f"/v1/runs/{run_id}/plan").json()
+
+    task = next(item for item in stored["tasks"] if item["task_id"] == "t1")
+    assert task["status"] != "failed", task["status"]
+    # The gap is NAMED, not swallowed …
+    assert "Erste Teilfrage?" in task["result_summary"]
+    # … and the verified sibling survived.
+    assert "Belegte Teilantwort" in task["result_summary"]
+
+
 def test_critic_research_routes_to_additive_replan(monkeypatch):
     critic_calls = {"n": 0}
 
@@ -3375,7 +3640,7 @@ def test_no_web_plan_when_search_unavailable(monkeypatch):
         def search(self, *a: Any, **k: Any) -> GroundedSearchResult:
             raise AssertionError("web must not be called")
 
-    container = register_routes(
+    register_routes(
         router,
         providers=SimpleNamespace(llm=llm, search=None),
         strategies=SimpleNamespace(),
@@ -3631,3 +3896,216 @@ def test_user_research_edit_consent_survives_critic_replan(monkeypatch):
         } == {"compact"}
         assert client.llm.calls.count("structured:ExecutionPlanModel") == 1
         assert client.llm.calls.count("structured:ReplanDeltaModel") == 1
+
+
+def test_a_submitted_requirement_shapes_a_run_that_never_gates(monkeypatch):
+    """S6: three mission paths never reach a plan gate — autonomous, the
+    speed tier and delegated children. Before the submit-time entry point
+    they had NO way to state how the result has to look."""
+    client = make_agent_client(monkeypatch)
+    with client:
+        run_id = submit_agent(
+            client,
+            autonomy="autonomous",
+            report_guidance="Gliedere als Sprechzettel fuer die GF.",
+        )
+        wait_status(client, run_id, {"completed"})
+        approvals = client.get(f"/v1/runs/{run_id}/approvals").json()["data"]
+        assert not [a for a in approvals if a["kind"] in ("plan", "replan")], (
+            "autonomous must not gate — otherwise this proves nothing"
+        )
+        synthesis_prompts = [
+            prompt
+            for name, prompt in client.llm.prompts
+            if name in ("ReportOutline", "SectionText")
+        ]
+        assert synthesis_prompts, "synthesis never ran"
+        assert any(
+            "Ergebnisvorgabe" in prompt
+            and "[Freie Vorgabe]" in prompt
+            and "Sprechzettel" in prompt
+            for prompt in synthesis_prompts
+        )
+
+
+def test_the_plan_gate_replaces_a_submitted_requirement(monkeypatch):
+    """The gate is the later word: a user who refines the requirement
+    there must not end up with both texts fighting in the prompt."""
+    client = make_agent_client(monkeypatch)
+    with client:
+        run_id = submit_agent(client, report_guidance="Als Fliesstext.")
+        wait_status(client, run_id, {"waiting_for_approval"})
+        pending = [
+            a
+            for a in client.get(f"/v1/runs/{run_id}/approvals").json()["data"]
+            if a["status"] == "pending"
+        ]
+        decided = client.post(
+            f"/v1/runs/{run_id}/approvals/{pending[0]['approval_id']}",
+            json={"decision": "approve", "report_guidance": "Als Tabelle."},
+        )
+        assert decided.status_code == 200
+        wait_status(client, run_id, {"completed"})
+        synthesis_prompts = [
+            prompt
+            for name, prompt in client.llm.prompts
+            if name in ("ReportOutline", "SectionText")
+        ]
+        assert synthesis_prompts, "synthesis never ran"
+        assert any("Als Tabelle." in prompt for prompt in synthesis_prompts)
+        assert not any(
+            "Als Fliesstext." in prompt for prompt in synthesis_prompts
+        )
+
+
+def test_an_approval_that_says_nothing_keeps_the_submitted_requirement(
+    monkeypatch,
+):
+    """Presence, not truthiness. Approving a plan without touching the
+    requirement field means "the plan is fine", not "drop my
+    requirement"."""
+    client = make_agent_client(monkeypatch)
+    with client:
+        run_id = submit_agent(
+            client, report_guidance="Gliedere als Sprechzettel fuer die GF."
+        )
+        wait_status(client, run_id, {"waiting_for_approval"})
+        pending = [
+            a
+            for a in client.get(f"/v1/runs/{run_id}/approvals").json()["data"]
+            if a["status"] == "pending"
+        ]
+        decided = client.post(
+            f"/v1/runs/{run_id}/approvals/{pending[0]['approval_id']}",
+            json={"decision": "approve"},
+        )
+        assert decided.status_code == 200
+        wait_status(client, run_id, {"completed"})
+        synthesis_prompts = [
+            prompt
+            for name, prompt in client.llm.prompts
+            if name in ("ReportOutline", "SectionText")
+        ]
+        assert synthesis_prompts, "synthesis never ran"
+        assert any("Sprechzettel" in prompt for prompt in synthesis_prompts)
+
+
+def test_a_requirement_on_a_non_agent_run_is_a_loud_400(monkeypatch):
+    """Only the agent engines render it. A research run that silently
+    accepted the field would drop it without a word."""
+    client = make_agent_client(monkeypatch)
+    with client:
+        response = client.post(
+            "/v1/runs",
+            json={
+                "question": "Marktlage?",
+                "report_guidance": "Als Tabelle.",
+            },
+        )
+        assert response.status_code == 400
+        assert "report_guidance" in response.text
+
+
+def test_a_requirement_over_the_limit_is_refused_not_shortened(monkeypatch):
+    """No silent caps: a text the composer would have to shorten is
+    refused with its limit named."""
+    client = make_agent_client(monkeypatch)
+    with client:
+        body = submit_agent(
+            client,
+            report_guidance="x" * 2001,
+            expect_status=400,
+        )
+        assert "2000" in body
+
+
+def test_an_unknown_rule_refuses_the_submission(monkeypatch):
+    """An id the caller cannot see fails loudly: starting the run without
+    it would work under requirements the user believes are in force."""
+    client = make_agent_client(monkeypatch)
+    with client:
+        body = submit_agent(
+            client,
+            report_rule_ids=["template-does-not-exist"],
+            expect_status=400,
+        )
+        assert "template-does-not-exist" in body
+
+
+def test_a_delegated_child_does_not_inherit_the_requirement(monkeypatch):
+    """The requirement describes the RESULT the user sees. A research
+    child produces evidence for the parent, not the deliverable — giving
+    it the parent's report format would shape the wrong artifact. The
+    parent's state carries a requirement here; the child submit must not
+    pass it on."""
+    from inqtrix.agents import algorithm as algorithm_module
+    from inqtrix.agents.control_ports import PlanTaskRecord
+
+    submitted: list[dict[str, Any]] = []
+
+    class _RecordingRunService:
+        run_store = SimpleNamespace(
+            list=lambda **kwargs: [], get=lambda *a, **k: {}
+        )
+
+        def submit(self, **kwargs: Any) -> dict[str, Any]:
+            submitted.append(kwargs)
+            return {"run_id": "run_child"}
+
+    deps = SimpleNamespace(
+        run_service=_RecordingRunService(),
+        resolver=SimpleNamespace(
+            resolve=lambda payload: SimpleNamespace(
+                mode="research", stack_name="default"
+            )
+        ),
+        context=SimpleNamespace(
+            workspace_id=None,
+            principal=None,
+            run_id="run_parent",
+            stack_name="",
+        ),
+        source_policy=SimpleNamespace(web="allowed", knowledge="allowed"),
+        emit=lambda *a, **k: None,
+        visible_to=None,
+        run_id="run_parent",
+    )
+    monkeypatch.setattr(
+        algorithm_module, "require_task_allowed", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        algorithm_module, "coerce_source_policy", lambda _deps: None
+    )
+    monkeypatch.setattr(
+        algorithm_module, "_existing_child_for_attempt", lambda *a, **k: None
+    )
+    # A REAL record, not a stand-in: a stub would silently drift from
+    # the fields the child submit actually reads.
+    task = PlanTaskRecord(
+        task_id="t1",
+        plan_id="plan_v1",
+        run_id="run_parent",
+        ordinal=0,
+        title="Marktlage recherchieren",
+        tool_kind="web_research",
+        objective="Marktzahlen 2026 belegen",
+        queries=["Marktlage 2026"],
+    )
+    try:
+        algorithm_module._submit_child_run(
+            deps,
+            {
+                "run_id": "run_parent",
+                "report_guidance": "Gliedere als Sprechzettel fuer die GF.",
+                "session_id": None,
+            },
+            task,
+            1,
+            research_policy=SimpleNamespace(
+                allowed=True, profile="standard", max_profile="standard"
+            ),
+        )
+    except Exception:  # noqa: BLE001 - the stub ends after the submit
+        pass
+    assert submitted, "the child was never submitted — proves nothing"
+    assert not submitted[0].get("report_requirement")

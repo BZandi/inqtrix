@@ -26,9 +26,6 @@ from inqtrix.result import (
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.settings import AgentSettings
 from inqtrix.strategies import (
-    SourceTieringStrategy,
-    StopCriteriaStrategy,
-    StrategyContext,
     create_default_strategies,
 )
 

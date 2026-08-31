@@ -13,7 +13,10 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from collections.abc import Sequence
+
 from sqlalchemy import delete, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from inqtrix.content.prompt_templates import (
     PromptTemplateConflict,
@@ -21,7 +24,10 @@ from inqtrix.content.prompt_templates import (
     PromptTemplateRecord,
 )
 from inqtrix.storage.db import tenant_session
-from inqtrix.storage.prompt_template_orm import prompt_templates
+from inqtrix.storage.prompt_template_orm import (
+    prompt_template_seed_markers,
+    prompt_templates,
+)
 from inqtrix.storage.resource_access import (
     VISIBLE_SHARE_PERMISSION,
     append_resource_effects,
@@ -127,6 +133,72 @@ class PostgresPromptTemplateRepository:
                 scope="prompt_templates",
             )
         return record
+
+    async def seed_default_templates(
+        self,
+        records: "Sequence[PromptTemplateRecord]",
+        *,
+        tenant_id: str,
+        user_id: uuid.UUID,
+    ) -> bool:
+        """Claim the seed marker and insert *records* in ONE transaction.
+
+        The ``ON CONFLICT DO NOTHING`` insert of the marker row is the
+        serialization point: exactly one of any concurrent first
+        listings claims it; a crash rolls marker AND rows back together.
+        A user who already owns templates (client-sync push races the
+        first listing) gets the marker without rows — stock content
+        never injects into a grown library.
+        """
+        now = time.time()
+        async with self._session(tenant_id) as session:
+            claimed = await session.execute(
+                pg_insert(prompt_template_seed_markers)
+                .values(
+                    tenant_id=tenant_id, user_id=user_id, seeded_at=now
+                )
+                .on_conflict_do_nothing(
+                    index_elements=["tenant_id", "user_id"]
+                )
+            )
+            if not claimed.rowcount:
+                return False
+            # Same active-owner guard as create(): a user disabled in
+            # this instant must not gain rows.
+            if not await lock_active_users(
+                session, tenant_id=tenant_id, user_ids=(user_id,)
+            ):
+                raise PromptTemplateNotFound("seed")
+            owns_any = await session.scalar(
+                select(prompt_templates.c.id)
+                .where(
+                    prompt_templates.c.tenant_id == tenant_id,
+                    prompt_templates.c.owner_user_id == user_id,
+                )
+                .limit(1)
+            )
+            if owns_any is not None:
+                return False
+            for record in records:
+                await session.execute(
+                    insert(prompt_templates).values(
+                        id=record.id,
+                        tenant_id=record.tenant_id,
+                        owner_user_id=record.owner_user_id,
+                        title=record.title,
+                        label=record.label,
+                        category=record.category,
+                        content_markdown=record.content_markdown,
+                        visibility=record.visibility,
+                        include_in_autocomplete=(
+                            record.include_in_autocomplete
+                        ),
+                        revision=record.revision,
+                        created_at=record.created_at,
+                        updated_at=record.updated_at,
+                    )
+                )
+        return True
 
     async def get(
         self, template_id: str, *, tenant_id: str

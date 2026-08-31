@@ -25,6 +25,14 @@ export function knowledgeStepLine(
   const facts = step.facts
 
   switch (step.kind) {
+    case 'queued':
+      // Deliberately position-less: the queue emits one frame per segment,
+      // so a rendered position would go stale within seconds.
+      return {
+        id: step.id,
+        primary: step.status === 'running' ? t.stepQueuedRunning : t.stepQueuedDone,
+        status: step.status,
+      }
     case 'context':
       return {
         id: step.id,

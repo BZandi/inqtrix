@@ -3,10 +3,10 @@ import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { appMotion } from '@/motion/transitions'
 import {
-  AGENT_PHASE_STATIONS,
+  agentPulseActiveIndex,
+  agentStationsFor,
   isActiveAgentRun,
   isGateAgentRun,
-  type AgentPhaseStation,
   type AgentRunRecord,
 } from './model'
 
@@ -39,9 +39,17 @@ export function AgentPulseTrack({
   const isWorking = isActiveAgentRun(run.status) && !isGate
   const isDone = run.status === 'completed'
   const isStopped = run.status === 'failed' || run.status === 'cancelled'
-  const activeIndex = isDone
-    ? AGENT_PHASE_STATIONS.length
-    : AGENT_PHASE_STATIONS.indexOf(run.station)
+  // The furthest station this run ACTUALLY reached. Completion used to
+  // fill the whole line, so a kernel run — which only ever reports
+  // intake and execution — claimed it had run a discovery, a plan and a
+  // verification pass. The track is read as a record of what happened,
+  // so it now stops where the run stopped and leaves the rest pale
+  // (F-P14-01, Betreiber-Entscheid b).
+  // Which line this engine actually travels. Measured: the kernel only
+  // ever reports `execution` and `done`, so the mission's six stations
+  // described a flow it never had (F-P14-01).
+  const stations = agentStationsFor(run.snapshot?.execution?.effective_mode)
+  const activeIndex = agentPulseActiveIndex(run.station, isDone, stations)
 
   return (
     <div aria-hidden="true" className={cn('min-w-0', className)}>
@@ -51,15 +59,15 @@ export function AgentPulseTrack({
           compact ? 'gap-0.5' : 'gap-1',
         )}
       >
-        {AGENT_PHASE_STATIONS.map((station, index) => {
-          const stationDone = index < activeIndex || isDone
+        {stations.map((station, index) => {
+          const stationDone = index < activeIndex
           const stationActive = index === activeIndex && !isDone
           return (
             <StationNode
               connectorFlowing={
                 index > 0 && index === activeIndex && isWorking && !reduceMotion
               }
-              connectorDone={index > 0 && index <= activeIndex - 1 + (isDone ? 1 : 0)}
+              connectorDone={index > 0 && index <= activeIndex - 1}
               done={stationDone}
               first={index === 0}
               gate={stationActive && isGate}
@@ -74,7 +82,7 @@ export function AgentPulseTrack({
       </div>
       {withLabels && (
         <div className="mt-1 flex items-center">
-          {AGENT_PHASE_STATIONS.map((station, index) => (
+          {stations.map((station, index) => (
             <span
               className={cn(
                 'min-w-0 flex-1 truncate t-caption font-semibold',
@@ -161,10 +169,11 @@ function StationNode({
 }
 
 function stationLabel(
-  station: AgentPhaseStation,
+  station: string,
   t: ReturnType<typeof useLocale>['t'],
 ): string {
-  return t.agent.stations[station]
+  const labels = t.agent.stations as Record<string, string | undefined>
+  return labels[station] ?? station
 }
 
 /**

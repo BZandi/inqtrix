@@ -7,6 +7,7 @@ with optimistic concurrency (visible conflict text, never a clobber);
 
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -96,7 +97,7 @@ def make_client(llm: ScriptedToolLLM) -> TestClient:
         INQTRIX_AGENT_ALLOW_VOLATILE=True,
         INQTRIX_AGENT_KERNEL_ENABLED=True,
     )
-    register_routes(
+    container = register_routes(
         router,
         providers=SimpleNamespace(llm=llm, search=None),
         strategies=SimpleNamespace(),
@@ -104,7 +105,36 @@ def make_client(llm: ScriptedToolLLM) -> TestClient:
         semaphore_factory=lambda: __import__("asyncio").Semaphore(2),
     )
     app.include_router(router)
-    return TestClient(app)
+    client = TestClient(app)
+    client.container = container  # type: ignore[attr-defined]
+    return client
+
+
+def seed_artifact(
+    client: TestClient, *, run_id: str, kind: str, artifact_id: str
+) -> None:
+    """One artifact written the way a NON-kernel producer writes it.
+
+    The mission owns its memo; this is the only way to get one into the
+    store from a kernel test without running the mission engine. It
+    rides an existing run because artifact writes are authorized
+    against a live run record.
+    """
+    asyncio.run(
+        client.container.agent_control_service.store.upsert_artifact(
+            run_id=run_id,
+            kind=kind,
+            session_id="sess-canvas",
+            title="Memo der Mission",
+            status="ready",
+            content_markdown="# Memo\n\nLangfassung.",
+            payload={},
+            refs=[],
+            updated_by="agent",
+            artifact_id=artifact_id,
+            expected_revision=0,
+        )
+    )
 
 
 def wait_status(
@@ -361,6 +391,151 @@ def test_write_canvas_cannot_update_another_sessions_artifact():
         assert "nicht gefunden" in reply
 
 
+def test_kernel_continues_a_mission_document():
+    """The operator's own workflow: the mission writes the report, the
+    kernel refines it in the same session.
+
+    It used to end as a silent no-op with a wrong diagnosis: the kernel
+    could READ the mission's memo but the update path only accepted
+    ``deliverable``, so it answered "nicht gefunden" for a document it
+    had just read, and the run completed as if nothing had failed. From
+    the user's side there is ONE document of the session; which engine
+    wrote it is machinery.
+    """
+    memo_id = "art_sess-canvas_memo"
+
+    class ContinueMemo(ScriptedToolLLM):
+        def chat(self, messages, *, tools=None, **kwargs):
+            self.chat_calls.append({"messages": list(messages), "tools": tools})
+            # Call 1 belongs to the seed run (it only has to finish so a
+            # real run record exists); the continuation is call 2.
+            if len(self.chat_calls) == 2:
+                return _tool_turn(
+                    "call_continue",
+                    "write_canvas",
+                    {
+                        "title": "Memo der Mission",
+                        "content_markdown": "# Memo\n\nGekuerzte Fassung.",
+                        "artifact_id": memo_id,
+                        "expected_revision": 1,
+                        "reference_ids": [],
+                    },
+                )
+            return _text_turn("Dokument aktualisiert.")
+
+    llm = ContinueMemo([])
+    client = make_client(llm)
+    with client:
+        # A mission-written memo: same session, kind="memo".
+        seed_run = _submit(client)
+        wait_status(client, seed_run, {"completed"})
+        seed_artifact(
+            client, run_id=seed_run, kind="memo", artifact_id=memo_id
+        )
+        run_id = _submit(client)
+        wait_status(client, run_id, {"completed"})
+        detail = client.get(f"/v1/runs/{run_id}/artifacts/{memo_id}").json()
+        assert detail["revision"] == 2, detail
+        assert "Gekuerzte Fassung" in detail["content_markdown"]
+        # The kind survives: one memo per session, one deliverable per
+        # creation — continuing a document must not reclassify it.
+        assert detail["kind"] == "memo"
+
+
+def test_an_update_keeps_the_document_name_and_says_so():
+    """Writing new content is not renaming.
+
+    The update passed the model's title straight through, so any turn
+    could silently re-label a file the user had named — the same root
+    the mission had. The name changes only through the explicit rename;
+    a model that asked for a different one is told, never ignored in
+    silence.
+    """
+    memo_id = "art_sess-canvas_named"
+
+    class RenameByWriting(ScriptedToolLLM):
+        def chat(self, messages, *, tools=None, **kwargs):
+            self.chat_calls.append({"messages": list(messages), "tools": tools})
+            if len(self.chat_calls) == 2:
+                return _tool_turn(
+                    "call_rename_attempt",
+                    "write_canvas",
+                    {
+                        "title": "Ein ganz anderer Name",
+                        "content_markdown": "# Neu\n\nInhalt.",
+                        "artifact_id": memo_id,
+                        "expected_revision": 1,
+                        "reference_ids": [],
+                    },
+                )
+            return _text_turn("Fertig.")
+
+    llm = RenameByWriting([])
+    client = make_client(llm)
+    with client:
+        seed_run = _submit(client)
+        wait_status(client, seed_run, {"completed"})
+        seed_artifact(
+            client, run_id=seed_run, kind="memo", artifact_id=memo_id
+        )
+        run_id = _submit(client)
+        wait_status(client, run_id, {"completed"})
+        detail = client.get(f"/v1/runs/{run_id}/artifacts/{memo_id}").json()
+        assert detail["title"] == "Memo der Mission", detail["title"]
+        assert "Inhalt." in detail["content_markdown"]
+        reply = [
+            m
+            for m in llm.chat_calls[2]["messages"]
+            if m.get("role") == "tool"
+        ][-1]["content"]
+        assert "Der Name bleibt" in reply
+
+
+def test_write_canvas_refuses_a_non_document_artifact():
+    """Machinery is not a file. The refusal must say WHY — the old text
+    claimed "nicht gefunden" for artifacts it had found."""
+    evidence_id = "art_sess-canvas_evidence"
+
+    class TouchEvidence(ScriptedToolLLM):
+        def chat(self, messages, *, tools=None, **kwargs):
+            self.chat_calls.append({"messages": list(messages), "tools": tools})
+            if len(self.chat_calls) == 2:
+                return _tool_turn(
+                    "call_evidence",
+                    "write_canvas",
+                    {
+                        "title": "X",
+                        "content_markdown": "# X",
+                        "artifact_id": evidence_id,
+                        "expected_revision": 1,
+                        "reference_ids": [],
+                    },
+                )
+            return _text_turn("Abgelehnt.")
+
+    llm = TouchEvidence([])
+    client = make_client(llm)
+    with client:
+        seed_run = _submit(client)
+        wait_status(client, seed_run, {"completed"})
+        seed_artifact(
+            client,
+            run_id=seed_run,
+            kind="evidence_bundle",
+            artifact_id=evidence_id,
+        )
+        run_id = _submit(client)
+        wait_status(client, run_id, {"completed"})
+        reply = [
+            m
+            for m in llm.chat_calls[2]["messages"]
+            if m.get("role") == "tool"
+        ][-1]["content"]
+        assert "kein Dokument" in reply
+        assert "evidence_bundle" in reply
+        assert "nicht gefunden" not in reply
+
+
 def test_invalid_deliverable_kind_is_a_visible_tool_error():
     llm = ScriptedToolLLM(
         [
@@ -472,12 +647,149 @@ def test_propose_editor_patch_gates_even_in_autonomous():
             json={"decision": "approve"},
         )
         wait_status(client, run_id, {"completed"})
-        # The capability ran after consent and denied VISIBLY (the demo
-        # deployment has no such editor document).
+        # After consent the READ-BEFORE-PROPOSE enforcement (P7-E1)
+        # denies VISIBLY: no receipt for doc_1 in this run, so the
+        # proposal is refused before the capability is even invoked.
         reply = [
             m
             for m in llm.chat_calls[1]["messages"]
             if m.get("role") == "tool"
         ][-1]["content"]
         assert "Werkzeug-Fehler" in reply
-        assert "editor.document_not_found" in reply
+        assert "editor.read_required" in reply
+        assert "read_editor_document" in reply
+
+
+def _seed_report(client, *, question: str, url: str) -> str:
+    """A completed research report in the store, as the Research Desk
+    would have left it."""
+    store = client.container.run_store
+    summary = store.submit(
+        question=question,
+        stack_name="default",
+        work=lambda handle: None,
+        mode="research",
+        kind="standard",
+    )
+    run_id = str(summary["run_id"])
+    store.complete(
+        run_id,
+        {
+            "answer": "## Kurzfazit\n\nDie belegte Kernaussage [E1].\n",
+            "references": [{"label": "E1", "url": url, "tier": "primary"}],
+        },
+    )
+    return run_id
+
+
+def test_an_attached_report_becomes_citable_and_a_later_source_is_added():
+    """The operator's use case in miniature (P14).
+
+    A report is attached; the kernel reads it, which imports the report's
+    sources into THIS run's ledger under kernel labels. The report's own
+    E-label is invisible to the kernel's citation check, so the import
+    must translate it — and a report the user did NOT attach must stay
+    out of reach even though the caller can see it."""
+    llm = ScriptedToolLLM([])
+    client = make_client(llm)
+    with client:
+        report_id = _seed_report(
+            client,
+            question="Stand der EU-Batterieverordnung?",
+            url="https://example.org/bericht",
+        )
+        other_id = _seed_report(
+            client,
+            question="Nicht angehaengter Bericht?",
+            url="https://example.org/zweiter",
+        )
+        llm._turns = [
+            _tool_turn(
+                "call_read", "read_research_report", {"report_id": report_id}
+            ),
+            _tool_turn(
+                "call_forbidden",
+                "read_research_report",
+                {"report_id": other_id},
+            ),
+            _text_turn("Fertig."),
+        ]
+        response = client.post(
+            "/v1/runs",
+            json={
+                "question": "Schreibe einen Sprechzettel.",
+                "mode": "agent_kernel",
+                "autonomy": "autonomous",
+                "session_id": "sess-reports",
+                "report_ids": [report_id],
+            },
+        )
+        assert response.status_code == 202, response.text
+        run_id = response.json()["run_id"]
+        wait_status(client, run_id, {"completed", "failed"})
+
+        replies = [
+            message["content"]
+            for call in llm.chat_calls
+            for message in call["messages"]
+            if message.get("role") == "tool"
+        ]
+        assert replies, "the report was never read"
+        attached_reply = replies[0]
+        assert "Stand der EU-Batterieverordnung?" in attached_reply
+        # Translated into a kernel label: an [E1] would be invisible to
+        # the citation check — neither valid nor reported as invalid.
+        # The BODY must cite the new label; the old one may only appear
+        # in the translation note, which states the mapping openly.
+        body = attached_reply.split("Hinweis:")[0]
+        assert "[W1]" in body
+        assert "[E1]" not in body
+        assert "[E1] -> [W1]" in attached_reply
+        # The attachment is the consent, not the visibility.
+        refused = [r for r in replies if "nicht angehaengt" in r]
+        assert refused, f"reading an unattached report was not refused: {replies}"
+
+
+def test_the_registry_line_reaches_a_real_run():
+    """The name must be in the first user message, and the body must NOT."""
+    llm = ScriptedToolLLM([])
+    client = make_client(llm)
+    with client:
+        report_id = _seed_report(
+            client, question="Batteriebericht?", url="https://example.org/x"
+        )
+        llm._turns = [_text_turn("Fertig.")]
+        run_id = client.post(
+            "/v1/runs",
+            json={
+                "question": "Schreibe einen Sprechzettel.",
+                "mode": "agent_kernel",
+                "autonomy": "autonomous",
+                "session_id": "sess-registry",
+                "report_ids": [report_id],
+            },
+        ).json()["run_id"]
+        wait_status(client, run_id, {"completed", "failed"})
+        user_message = llm.chat_calls[0]["messages"][-1]["content"]
+        assert report_id in user_message
+        assert "Batteriebericht?" in user_message
+        assert "read_research_report" in user_message
+        # The body stays out: two real reports are ~107k characters.
+        assert "Kurzfazit" not in user_message
+
+
+def test_an_unknown_report_id_refuses_the_submission():
+    llm = ScriptedToolLLM([_text_turn("x")])
+    client = make_client(llm)
+    with client:
+        response = client.post(
+            "/v1/runs",
+            json={
+                "question": "Schreibe einen Sprechzettel.",
+                "mode": "agent_kernel",
+                "session_id": "sess-unknown",
+                "report_ids": ["run_gibt_es_nicht"],
+            },
+        )
+        assert response.status_code == 400
+        assert "run_gibt_es_nicht" in response.text

@@ -142,9 +142,13 @@ export function privateSuggestionDraftRecordFromServer(
   draft: EditorPrivateSuggestionDraftWire,
 ): EditorPrivateSuggestionDraftRecord {
   return {
+    ...(draft.anchor_text ? { anchorText: draft.anchor_text } : {}),
     anchorVersion: draft.anchor_version,
     changeSummary: [...draft.change_summary],
     createdAt: isoFromUnixSeconds(draft.created_at),
+    // Bestandsentwuerfe kennen das Feld nicht; es fehlt dort legitim und
+    // bedeutet weiterhin "Ersetzung", wie beim Kommentarweg schon immer.
+    ...(draft.edit_position ? { editPosition: draft.edit_position } : {}),
     groupId: draft.group_id,
     patchId: draft.patch_id,
     proposedText: draft.proposed_text,

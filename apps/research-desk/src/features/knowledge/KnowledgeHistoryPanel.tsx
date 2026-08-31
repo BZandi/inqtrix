@@ -43,6 +43,9 @@ import type {
 } from '@/features/project/types'
 import { QuotaUsageFooter } from '@/features/quota/QuotaUsageFooter'
 import { useLocale } from '@/i18n/LocaleProvider'
+import { ExplorerSortMenu } from '@/components/ui/explorer-sort-menu'
+import { orderPinnedExplorerItems } from '@/features/project/explorerSort'
+import type { ExplorerSortMode } from '@/features/project/explorerSort'
 import { cn } from '@/lib/utils'
 import { AnimatePresence, motion } from 'motion/react'
 import {
@@ -70,6 +73,12 @@ type KnowledgeHistoryPanelProps = {
   onDeleteSessionGroup: (groupId: string) => void
   onMoveSessionGroup: (groupId: string, targetIndex: number) => void
   onMoveSessionToGroup: (sessionId: string, groupId: string | null, targetIndex: number) => void
+  /** Sort program: a drag in an automatic mode first adopts the visible
+   * order (items, folders) so the switch to manual never jumps. */
+  onAdoptVisibleOrder: (itemIds: string[], folderIds: string[]) => void
+  onChangeSortMode: (mode: ExplorerSortMode) => void
+  sortMode: ExplorerSortMode
+  onPrefetchSession?: (sessionId: string) => void
   onRenameSession: (sessionId: string, title: string) => void
   onRenameSessionGroup: (groupId: string, title: string) => void
   onSelectSession: (sessionId: string) => void
@@ -92,6 +101,10 @@ export function KnowledgeHistoryPanel({
   onDeleteSessionGroup,
   onMoveSessionGroup,
   onMoveSessionToGroup,
+  onAdoptVisibleOrder,
+  onChangeSortMode,
+  sortMode,
+  onPrefetchSession,
   onRenameSession,
   onRenameSessionGroup,
   onSelectSession,
@@ -245,7 +258,10 @@ export function KnowledgeHistoryPanel({
     function finishPointerDrag(upEvent: PointerEvent) {
       const targetIndex = didStartDrag ? readGroupDropTarget(upEvent.clientY, groupId) : null
       cleanupPointerDrag()
-      if (targetIndex !== null) onMoveSessionGroup(groupId, targetIndex)
+      if (targetIndex !== null) {
+        adoptVisibleOrderRef.current()
+        onMoveSessionGroup(groupId, targetIndex)
+      }
     }
 
     function cleanupPointerDrag() {
@@ -324,7 +340,10 @@ export function KnowledgeHistoryPanel({
     function finishPointerDrag(upEvent: PointerEvent) {
       const target = didStartDrag ? readSessionDropTarget(upEvent.clientY, sessionId) : null
       cleanupPointerDrag()
-      if (target) onMoveSessionToGroup(sessionId, target.groupId, target.targetIndex)
+      if (target) {
+        adoptVisibleOrderRef.current()
+        onMoveSessionToGroup(sessionId, target.groupId, target.targetIndex)
+      }
     }
 
     function cleanupPointerDrag() {
@@ -354,24 +373,53 @@ export function KnowledgeHistoryPanel({
       : []),
     [isSearching, sessions, trimmedSearchQuery],
   )
-  const pinnedSessions = sessions.filter((session) => pinnedSessionIdSet.has(session.id))
+  const pinnedSessions = orderPinnedExplorerItems(
+    sessions.filter((session) => pinnedSessionIdSet.has(session.id)),
+    pinnedSessionIds,
+    sortMode,
+    (session) => session.id,
+  )
   const explorerSections = sections.map((section) => ({
     ...section,
     sessions: section.sessions.filter((session) => !pinnedSessionIdSet.has(session.id)),
   })) as KnowledgeSessionHistorySection[]
+  const adoptVisibleOrderIfAutomatic = () => {
+    if (sortMode === 'manual') return
+    onAdoptVisibleOrder(
+      [
+        ...pinnedSessions.map((session) => session.id),
+        ...explorerSections.flatMap((section) => section.sessions.map((session) => session.id)),
+      ],
+      explorerSections.flatMap((section) => (section.kind === 'group' ? [section.groupId] : [])),
+    )
+  }
+  const adoptVisibleOrderRef = useRef(adoptVisibleOrderIfAutomatic)
+  adoptVisibleOrderRef.current = adoptVisibleOrderIfAutomatic
   const hasStructure = pinnedSessions.length > 0
     || explorerSections.some((section) => section.sessions.length > 0 || section.kind === 'group')
   const showUngroupedHeader = explorerSections.some((section) => section.kind === 'group')
   const groupIds = explorerSections.flatMap((section) => (section.kind === 'group' ? [section.groupId] : []))
   const dropGroupIds = draggedGroupId ? groupIds.filter((groupId) => groupId !== draggedGroupId) : groupIds
 
+  const prefetchSessionFromTarget = (target: EventTarget | null) => {
+    if (!onPrefetchSession || !(target instanceof Element)) return
+    const row = target.closest<HTMLElement>('[data-knowledge-history-session-id]')
+    const sessionId = row?.dataset.knowledgeHistorySessionId
+    if (sessionId) onPrefetchSession(sessionId)
+  }
+
   return (
-    <aside className="inqtrix-contained-panel flex h-full min-h-0 w-full flex-col border-r border-border bg-surface/60">
+    <aside
+      className="inqtrix-contained-panel flex h-full min-h-0 w-full flex-col border-r border-border bg-surface/60"
+      onFocusCapture={(event) => prefetchSessionFromTarget(event.target)}
+      onPointerOver={(event) => prefetchSessionFromTarget(event.target)}
+    >
       <div className="flex inqtrix-panel-header items-center justify-between gap-2 border-b border-border px-3">
         <div className="flex min-w-0 items-center gap-2">
           <h2 className="truncate t-section text-foreground">{t.knowledge.sessions}</h2>
         </div>
         <div className="flex items-center gap-1.5">
+          <ExplorerSortMenu mode={sortMode} onChangeMode={onChangeSortMode} />
           <Tooltip>
             <TooltipTrigger asChild>
               <Button

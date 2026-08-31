@@ -165,7 +165,7 @@ describe('inspector collaboration model', () => {
       durabilityStatus: 'idle',
       participants: [],
       synced: false,
-    }).kind).toBe('update_required')
+    }).kind).toBe('reload_required')
     // A rejected origin must not borrow the update label: the remedy is an
     // address, not a client version.
     expect(buildEditorCollaborationStatusModel({
@@ -359,7 +359,7 @@ describe('startupPresentation', () => {
     // The grace exists for expected transients only. An error, a revocation
     // or a forced update must be loud immediately — calming those would be
     // the silent fallback the project forbids.
-    for (const kind of ['error', 'access_revoked', 'update_required', 'origin_rejected', 'read_only'] as const) {
+    for (const kind of ['error', 'access_revoked', 'reload_required', 'origin_rejected', 'read_only'] as const) {
       expect(startupPresentation(kind, 0, true)).toEqual({ calm: false, kind })
     }
   })

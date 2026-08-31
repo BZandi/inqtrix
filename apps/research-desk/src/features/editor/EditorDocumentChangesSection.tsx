@@ -2,6 +2,7 @@ import { AlertTriangle, Check, Sparkles, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import type { EditorSuggestionRecord } from '@/features/project/types'
 import { markdownToPlainTextForEditor } from './anchoring'
+import { SuggestionErrorLine } from './SuggestionErrorLine'
 
 type EditorDocumentChangesLabels = {
   accept: string
@@ -20,6 +21,7 @@ export function EditorDocumentChangesSection({
   onRejectSuggestion,
   onSelectSuggestion,
   publishDisabledReason = null,
+  suggestionErrors,
   suggestions,
 }: {
   labels: EditorDocumentChangesLabels
@@ -29,6 +31,7 @@ export function EditorDocumentChangesSection({
   onRejectSuggestion: (suggestionId: string) => void
   onSelectSuggestion: (suggestionId: string) => void
   publishDisabledReason?: string | null
+  suggestionErrors: Record<string, string>
   suggestions: EditorSuggestionRecord[]
 }) {
   if (suggestions.length === 0) return null
@@ -72,6 +75,7 @@ export function EditorDocumentChangesSection({
             <div className="space-y-1.5">
               {group.suggestions.map((suggestion, index) => (
                 <DocumentChangeCard
+                  error={suggestionErrors[suggestion.id]}
                   index={index + 1}
                   key={suggestion.id}
                   labels={labels}
@@ -91,6 +95,7 @@ export function EditorDocumentChangesSection({
 }
 
 function DocumentChangeCard({
+  error,
   index,
   labels,
   onAccept,
@@ -99,6 +104,7 @@ function DocumentChangeCard({
   publishDisabledReason,
   suggestion,
 }: {
+  error: string | undefined
   index: number
   labels: EditorDocumentChangesLabels
   onAccept: (suggestion: EditorSuggestionRecord) => void
@@ -144,6 +150,7 @@ function DocumentChangeCard({
       {suggestion.warnings?.length ? (
         <p className="t-meta-sm mt-1 text-warning">{suggestion.warnings[0]}</p>
       ) : null}
+      {error ? <SuggestionErrorLine message={error} /> : null}
       <div className="mt-2 flex items-center justify-end gap-1.5">
         <Button
           className="h-7"

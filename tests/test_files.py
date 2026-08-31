@@ -249,7 +249,9 @@ def test_listing_is_creator_scoped_and_legacy_unscoped(tmp_path):
     client, _ = make_files_client(tmp_path)
     with client:
         file_a = upload(client, sub="user-a")["id"]
-        file_b = upload(client, sub="user-b")["id"]
+        # user-b uploads too -- the isolation assertions below must not
+        # see this file; only the side effect matters.
+        upload(client, sub="user-b")
 
         listed_a = client.get(
             "/v1/files", headers={SUB_HEADER: "user-a"}

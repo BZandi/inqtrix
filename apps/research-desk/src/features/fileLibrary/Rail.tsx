@@ -47,6 +47,7 @@ function NavItem({
   icon: Icon,
   label,
   onClick,
+  onPrefetch,
   drop,
 }: {
   active: boolean
@@ -55,6 +56,7 @@ function NavItem({
   icon: LucideIcon
   label: string
   onClick: () => void
+  onPrefetch?: () => void
   drop?: DropProps
 }) {
   return (
@@ -68,6 +70,8 @@ function NavItem({
       onDragLeave={drop?.onDragLeave}
       onDragOver={drop?.onDragOver}
       onDrop={drop?.onDrop}
+      onFocus={onPrefetch}
+      onPointerEnter={onPrefetch}
       type="button"
     >
       <span className="relative shrink-0">
@@ -170,6 +174,7 @@ export function Rail({
   onSelectCollection,
   onSelectIndex,
   onSelectServerCollection,
+  onPrefetchServerCollection,
   query,
   serverCollections,
   storage,
@@ -189,6 +194,7 @@ export function Rail({
   onSelectCollection: (sectionId: string) => void
   onSelectIndex: (indexId: string) => void
   onSelectServerCollection: (collectionId: string) => void
+  onPrefetchServerCollection?: (collectionId: string) => void
   query: string
   serverCollections: RailServerCollection[]
   storage: { collectionCount: number; docCount: number; indexCount: number; usedBytes: number }
@@ -275,6 +281,7 @@ export function Rail({
               key={collection.id}
               label={collection.title}
               onClick={() => onSelectServerCollection(collection.id)}
+              onPrefetch={() => onPrefetchServerCollection?.(collection.id)}
             />
           ))}
         </div>

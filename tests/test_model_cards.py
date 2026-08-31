@@ -88,6 +88,7 @@ def test_catalogue_covers_the_seeded_models() -> None:
     expected = {
         "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
         "claude-sonnet-4-6", "claude-haiku-4-5",
+        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
         "gpt-5.5-pro", "gpt-5.5", "gpt-5.4-pro", "gpt-5.4",
         "gpt-5.4-mini", "gpt-5.4-nano",
         "gpt-5.1", "gpt-5-mini", "gpt-5-nano", "gpt-4.1",

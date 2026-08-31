@@ -24,6 +24,7 @@ from inqtrix.agents.control_ports import (
     ArtifactNotFound,
     ArtifactPublicationFenced,
     ArtifactRevisionConflict,
+    artifact_event_payload,
 )
 from inqtrix.exceptions import AgentCancelled
 from inqtrix.execution_failures import RunExecutionFailure
@@ -110,7 +111,15 @@ class AgentAnswerPublisher:
             self._emit_artifact_signal(handle, finalized)
 
         try:
-            handle.emit_answer(answer, before_ready=_finalize)
+            handle.emit_answer(
+                answer,
+                reference_labels=[
+                    label
+                    for ref in refs
+                    if (label := str(ref.get("label", "") or "").strip())
+                ],
+                before_ready=_finalize,
+            )
         except (ArtifactPublicationFenced, ArtifactRevisionConflict) as exc:
             # RunHandle has already emitted ``answer.interrupted`` with the
             # exact byte offset and the ``finalizing`` stage.
@@ -168,14 +177,7 @@ class AgentAnswerPublisher:
                 if artifact.revision == 1
                 else ARTIFACT_UPDATED_EVENT
             ),
-            {
-                "artifact_id": artifact.artifact_id,
-                "kind": "answer",
-                "revision": artifact.revision,
-                "title": artifact.title,
-                "status": artifact.status,
-                "updated_by": artifact.updated_by,
-            },
+            artifact_event_payload(artifact),
         )
 
     @staticmethod

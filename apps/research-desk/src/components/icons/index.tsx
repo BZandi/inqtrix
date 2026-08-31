@@ -1,7 +1,7 @@
 import { createIcon } from './createIcon'
 
 export type { IconProps, LucideIcon } from './createIcon'
-export { AlignCenter, AlignLeft, AlignRight, ArrowDown, ArrowUp, BookSearch, BrainCircuit, BrainCog, CalendarDays, CirclePause, FolderPlus, Gauge, GitBranchPlus, ListMinus, ListPlus, ListTree, Menu, PenLine, Pin, PinOff, RefreshCw, Route, ScrollText, Share2, SquarePen, ThumbsDown, ThumbsUp, WandSparkles, Waypoints, Workflow, WrapText, Zap, ZoomIn, ZoomOut } from 'lucide-react'
+export { AlignCenter, AlignLeft, AlignRight, ArrowDown, ArrowDownAZ, ArrowUp, BookSearch, BrainCircuit, BrainCog, CalendarClock, CalendarDays, CirclePause, CornerDownLeft, FolderPlus, FolderInput, Gauge, GitBranchPlus, Hand, ListMinus, ListPlus, ListTree, Menu, PenLine, Pin, PinOff, RefreshCw, Route, ScrollText, Share2, SquarePen, ThumbsDown, ThumbsUp, WandSparkles, Waypoints, Workflow, WrapText, Zap, ZoomIn, ZoomOut } from 'lucide-react'
 
 export const AlertTriangle = createIcon('AlertTriangle', 'lucide-alert-triangle', (
   <>

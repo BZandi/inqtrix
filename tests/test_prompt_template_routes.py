@@ -195,11 +195,14 @@ def test_stranger_is_blind_and_cannot_write(world):
     client, _container = world
     created = create_template(client)
 
-    assert (
-        client.get(
-            "/v1/prompt-templates", headers=as_user(RECIPIENT)
-        ).json()["data"]
-        == []
+    stranger_list = client.get(
+        "/v1/prompt-templates", headers=as_user(RECIPIENT)
+    ).json()["data"]
+    # The list carries only the stranger's OWN rows (their lazily
+    # seeded stock prompts) — never the owner's template.
+    assert created["id"] not in [item["id"] for item in stranger_list]
+    assert all(
+        item["access"] == {"mode": "owner"} for item in stranger_list
     )
     denied_update = client.put(
         f"/v1/prompt-templates/{created['id']}",
@@ -221,9 +224,15 @@ def test_ownerless_templates_stay_open(world):
     client, container = world
     template_id = seed_ownerless(container)
     for user_id in (OWNER, RECIPIENT):
-        assert client.get(
+        visible = client.get(
             "/v1/prompt-templates", headers=as_user(user_id)
-        ).json()["data"] == []
+        ).json()["data"]
+        # Scoped users never see the ownerless row; what they DO see
+        # is exclusively their own (seeded) templates.
+        assert template_id not in [item["id"] for item in visible]
+        assert all(
+            item["access"] == {"mode": "owner"} for item in visible
+        )
     listed = client.get("/v1/prompt-templates").json()["data"]
     assert [item["id"] for item in listed] == [template_id]
     assert listed[0]["access"] == {"mode": "unscoped"}
@@ -247,8 +256,11 @@ def test_view_grant_admits_reads_not_writes(world):
     listed = client.get(
         "/v1/prompt-templates", headers=as_user(RECIPIENT)
     ).json()["data"]
-    assert [item["id"] for item in listed] == [created["id"]]
-    assert listed[0]["access"] == {"mode": "shared", "permission": "view"}
+    shared_rows = [item for item in listed if item["id"] == created["id"]]
+    assert len(shared_rows) == 1
+    assert shared_rows[0]["access"] == {
+        "mode": "shared", "permission": "view",
+    }
 
     assert (
         client.put(

@@ -65,6 +65,7 @@ def judge_kernel_sufficiency(deps: "KernelDeps") -> "StructuredOutcome":
         deps.llm,
         success_criteria=[deps.question] if deps.question else [],
         evidence_digest=evidence_digest(list(deps.evidence_refs.values())),
+        clarified_context="\n".join(deps.clarified_answers),
         model=desc.get("model") or None,
         reasoning_effort=desc.get("effort") or None,
         timeout=deps.timeout,

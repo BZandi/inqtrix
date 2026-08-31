@@ -42,6 +42,7 @@ def build_router(container: "AppContainer") -> APIRouter:
     router = APIRouter()
     settings = container.settings
     resolver = container.resolver
+    lanes = container.execution_lanes
     chat_service = container.chat_service
     knowledge_service = container.knowledge_service
     quota_service = container.quota_service
@@ -213,6 +214,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                     providers=resolved.providers,
                     strategies=resolved.strategies,
                     settings=chat_agent_settings,
+                    lanes=lanes,
                     include_progress=include_progress,
                     request=req,
                     cancel_event=cancel_event,
@@ -243,6 +245,7 @@ def build_router(container: "AppContainer") -> APIRouter:
                 resolved=resolved,
                 chat_agent_settings=chat_agent_settings,
                 semaphore=sem,
+                lanes=lanes,
                 principal=principal,
                 cancel_event=cancel_event,
             )

@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 import httpx
 
+from inqtrix.observability.context import current_log_context
+
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 log = logging.getLogger("inqtrix")
 
@@ -275,7 +277,9 @@ class CollaborationNodeClient:
 
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         try:
-            response = await self._client.post(path, json=body)
+            response = await self._client.post(
+                path, json=body, headers=_correlation_headers()
+            )
         except httpx.HTTPError as exc:
             raise CollaborationServiceUnavailable(
                 "collaboration service is unreachable"
@@ -296,14 +300,68 @@ class CollaborationNodeClient:
             ) from exc
 
 
+def _correlation_headers() -> dict[str, str]:
+    """Die Korrelations-Id dieser Anfrage an den Knoten weiterreichen.
+
+    Ein Klick erzeugt Logzeilen an mehreren Stellen. Ohne mitgereichte Id
+    lassen sie sich nur ueber geratene Zeitstempel verbinden -- bei zwei
+    gleichzeitigen Nutzern also gar nicht.
+
+    Dieser Kopf verbindet ZWEI Stationen: die Zeile des Gateways und die
+    Ablehnungszeile des Sidecars (``correlationField`` in dessen
+    ``httpRouter``). Die dritte -- der Rueckweg Sidecar -> interne API, auf
+    dem der Ablehnungsgrund ueberhaupt entsteht -- bleibt ausdruecklich
+    UNVERBUNDEN: der Kopfsatz jenes Aufrufs ist im Sidecar fest verdrahtet,
+    und ihn durchzureichen hiesse, die Id durch drei Schichten zu faedeln
+    oder einen Kontextspeicher einzufuehren. Der Nutzen deckt das heute
+    nicht; die Luecke ist benannt, nicht uebersehen.
+
+    Leer, wenn kein Kontext gebunden ist (Hintergrundaufgaben, Tests): dann
+    darf der Knoten seine eigene Id vergeben, statt eine leere zu erben.
+    """
+    request_id = current_log_context().get("request_id", "")
+    return {"X-Request-ID": request_id} if request_id else {}
+
+
+#: Der Platzhalter, mit dem der Sidecar sagt: "abgelehnt, aber ich habe
+#: dafuer kein eigenes Wort". Er ist kein Grund, sondern das Eingestaendnis,
+#: keinen zu kennen -- der echte reist in ``upstream_reason`` daneben mit.
+_UNNAMED_NODE_CONFLICT = "upstream_conflict"
+
+
 def _response_reason(response: httpx.Response) -> str:
+    """Den Grund lesen, den der Knoten genannt hat -- den genauesten.
+
+    Der Sidecar bildet die rund vierzig Konfliktgruende der internen API auf
+    seine kleine Vokabelliste ab, weil die den WebSocket-Schliesscode
+    steuert. Was er nicht abbilden kann, heisst bei ihm
+    ``upstream_conflict``, und der urspruengliche Name faehrt in
+    ``upstream_reason`` mit. Wer nur ``reason`` liest, wirft ihn hier
+    endgueltig weg: der Nutzer liest dann "upstream_conflict", waehrend im
+    Sidecar-Log "patch_not_found" steht, und niemand kann die beiden
+    verbinden.
+
+    Der Ersatzname gewinnt bewusst NUR gegen den Platzhalter. Bildet der
+    Sidecar auf einen eigenen Grund ab (etwa ``sequence_conflict``), traegt
+    dieser eine eigene Behandlung und bleibt massgeblich -- auch wenn
+    daneben ein feinerer Name steht.
+    """
     try:
         payload = _object(response.json(), "response")
     except ValueError:
         return "node_rejected"
     error = payload.get("error")
-    if isinstance(error, dict) and isinstance(error.get("reason"), str):
-        return error["reason"]
+    if isinstance(error, dict):
+        reason = error.get("reason")
+        upstream = error.get("upstream_reason")
+        if (
+            reason == _UNNAMED_NODE_CONFLICT
+            and isinstance(upstream, str)
+            and upstream
+        ):
+            return upstream
+        if isinstance(reason, str):
+            return reason
     if isinstance(payload.get("reason"), str):
         return payload["reason"]
     return "node_rejected"

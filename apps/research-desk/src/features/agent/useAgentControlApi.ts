@@ -6,6 +6,7 @@ import {
   applyEditorPatch,
   cancelAgentRunTask,
   decideAgentRunApproval,
+  fetchResearchRunSummary,
   exportAgentRunArtifact,
   getAgentRunArtifact,
   getAgentRunPlan,
@@ -16,6 +17,8 @@ import {
   listAgentRunApprovals,
   listAgentRunArtifacts,
   listAgentRunClarifications,
+  listAgentSessionArtifacts,
+  renameAgentRunArtifact,
   rejectEditorPatch,
   updateAgentRunArtifact,
   type InqtrixRequestError,
@@ -30,11 +33,16 @@ import {
   TERMINAL_AGENT_TASK_STATUSES,
   canEditAgentRun,
   type AgentRunRecord,
+  type AgentSessionArtifactIndex,
 } from './model'
 
 export type ArtifactSaveResult =
   | { kind: 'saved'; revision: number }
   | { kind: 'conflict'; currentRevision: number | null }
+  | { kind: 'locked' }
+
+export type ArtifactRenameResult =
+  | { kind: 'renamed' }
   | { kind: 'locked' }
 
 const TASK_RESULT_CACHE_MAX = 50
@@ -52,17 +60,24 @@ export function useAgentControlApi({
   dispatch,
   enabled,
   runs,
+  sessionArtifacts = {},
   workspaceId,
 }: {
   apiKey: string | undefined
   dispatch: Dispatch<ResearchDeskAction>
   enabled: boolean
   runs: Record<string, AgentRunRecord>
+  /** Anchor-independent per-session artifact index (P4). */
+  sessionArtifacts?: Record<string, AgentSessionArtifactIndex>
   workspaceId: string
 }) {
   const optionsRef = useRef({ apiKey, workspaceId })
   optionsRef.current = { apiKey, workspaceId }
   const inFlightRef = useRef(new Set<string>())
+  // A failed fetch is a terminal readiness signal for the current row
+  // revision. Without this guard, a missing answer body retried on every
+  // render and could keep a structural loading boundary alive forever.
+  const failedRef = useRef(new Set<string>())
   const runsRef = useRef(runs)
   runsRef.current = runs
   const enabledRef = useRef(enabled)
@@ -86,7 +101,20 @@ export function useAgentControlApi({
   const taskResultPrefetchFailedRef = useRef(new Set<string>())
 
   useEffect(() => {
+    failedRef.current.clear()
+  }, [apiKey, workspaceId])
+
+  useEffect(() => {
     if (!enabled) return
+    // A reducer success/error action settles the current stale cycle. Drop
+    // only failures whose fetch condition is no longer active; if a later SSE
+    // event re-flags the same constant surface key, it starts unblocked. A
+    // still-active failed condition remains suppressed, so renders cannot
+    // create a tight retry loop.
+    failedRef.current = currentAgentControlFetchFailures(
+      runs,
+      failedRef.current,
+    )
     for (const run of Object.values(runs)) {
       if (run.kind !== 'agent') continue
       if (run.planStale) {
@@ -134,6 +162,31 @@ export function useAgentControlApi({
           })
         })
       }
+      // Gate rows of parked CHILDREN: their approvals/clarifications live
+      // under the child run id (owner-visible), the parent's child.progress
+      // stream flags them. Fetched here so the composer tray can offer the
+      // child's gate (F-P0-CHILDGATE).
+      for (const [childRunId, gates] of Object.entries(run.childGates)) {
+        if (!gates.stale) continue
+        void refetch(childGateFetchKey(run.runId, childRunId), async () => {
+          const [approvals, clarifications, childSummary] = await Promise.all([
+            listAgentRunApprovals(childRunId, optionsRef.current),
+            listAgentRunClarifications(childRunId, optionsRef.current),
+            // The child's run row carries the FULL delegated question —
+            // the gate context must be completely readable (every other
+            // parent-side source is a truncated preview).
+            fetchResearchRunSummary(childRunId, optionsRef.current),
+          ])
+          dispatch({
+            approvals,
+            childRunId,
+            clarifications,
+            question: childSummary.question,
+            runId: run.runId,
+            type: 'setAgentChildGates',
+          })
+        })
+      }
       if (run.patchStale && run.patchId) {
         const patchId = run.patchId
         void refetch(`${run.runId}:patch`, async () => {
@@ -172,7 +225,7 @@ export function useAgentControlApi({
             || answer.publicationNeedsReconcile === true
           )
         ) {
-          void refetch(`${run.runId}:answer`, async () => {
+          void refetch(answerFetchKey(run, answer), async () => {
             const artifact = await getAgentRunArtifact(
               run.runId,
               answer.artifactId,
@@ -189,15 +242,63 @@ export function useAgentControlApi({
       }
     }
 
-    function refetch(key: string, fetcher: () => Promise<void>) {
-      if (inFlightRef.current.has(key)) return Promise.resolve()
-      inFlightRef.current.add(key)
-      return fetcher()
+    // Anchor-independent session artifact index (P4): fetched when its
+    // stale flag is set. Success and failure BOTH clear the flag (the
+    // failure stays visible on the index), so renders cannot loop — the
+    // next SSE artifact signal is the honest retry moment.
+    for (const [sessionId, index] of Object.entries(sessionArtifacts)) {
+      if (!index.stale) continue
+      const sessionKey = `${sessionId}:session_artifacts`
+      if (inFlightRef.current.has(sessionKey)) continue
+      inFlightRef.current.add(sessionKey)
+      void listAgentSessionArtifacts(sessionId, optionsRef.current)
+        .then((result) => {
+          dispatch({
+            artifacts: result.data,
+            sessionId,
+            type: 'setAgentSessionArtifacts',
+          })
+        })
         .catch((error: unknown) => {
+          dispatch({
+            message: error instanceof Error ? error.message : String(error),
+            sessionId,
+            type: 'markAgentSessionArtifactsError',
+          })
+        })
+        .finally(() => {
+          inFlightRef.current.delete(sessionKey)
+        })
+    }
+
+    function refetch(key: string, fetcher: () => Promise<void>) {
+      if (inFlightRef.current.has(key) || failedRef.current.has(key)) {
+        return Promise.resolve()
+      }
+      inFlightRef.current.add(key)
+      return withControlFetchDeadline(
+        fetcher(),
+        // The reader needs to know it is not their agent that stalled.
+        'Die Entscheidung konnte nicht geladen werden (Zeitüberschreitung). '
+        + 'Seite neu laden.',
+      )
+        .then(() => {
+          failedRef.current.delete(key)
+        })
+        .catch((error: unknown) => {
+          // The condition may have settled while the request was in flight.
+          // In that case retaining its failure would suppress a future cycle
+          // even though this request no longer belongs to the visible state.
+          if (agentControlFetchKeys(runsRef.current).has(key)) {
+            failedRef.current.add(key)
+          }
           // Loud, never silent: the run card shows the fetch failure. The
           // surface's stale flag clears with it (no tight retry loop).
-          const [runId, surface] = key.split(':')
+          const [runId, surface, childRunId] = key.split(':')
           dispatch({
+            ...(surface === 'child_gates' && childRunId
+              ? { childRunId }
+              : {}),
             message: error instanceof Error ? error.message : String(error),
             runId,
             surface: surface as
@@ -206,7 +307,8 @@ export function useAgentControlApi({
               | 'clarifications'
               | 'artifacts'
               | 'answer'
-              | 'patch',
+              | 'patch'
+              | 'child_gates',
             type: 'markAgentRunError',
           })
         })
@@ -214,7 +316,7 @@ export function useAgentControlApi({
           inFlightRef.current.delete(key)
         })
     }
-  }, [dispatch, enabled, runs])
+  }, [dispatch, enabled, runs, sessionArtifacts])
 
   const decideApproval = useCallback(
     async (
@@ -277,6 +379,69 @@ export function useAgentControlApi({
         clarifications: [clarification],
         runId,
         type: 'setAgentRunClarifications',
+      })
+      return clarification
+    },
+    [dispatch, requireEditableRun],
+  )
+
+  // Child-gate decisions target the CHILD's run id (its rows are
+  // owner-scoped and directly decidable), but every local echo lands on
+  // the PARENT record — the child's own summary in the response is
+  // deliberately discarded because agent_child runs never become desk
+  // records. Editability is judged on the parent: the tray only offers
+  // child gates there, and a share recipient cannot reach the child's
+  // URLs anyway (rule R7).
+  const decideChildApproval = useCallback(
+    async (
+      parentRunId: string,
+      childRunId: string,
+      approvalId: string,
+      decision: AgentApprovalDecisionRequest,
+    ) => {
+      requireEditableRun(parentRunId)
+      const result = await decideAgentRunApproval(
+        childRunId,
+        approvalId,
+        decision,
+        optionsRef.current,
+      )
+      const { run: childSummary, ...approval } = result
+      void childSummary
+      // Seeding the fresh row dismisses the card; the child.progress
+      // resume event is the durable confirmation.
+      dispatch({
+        approvals: [approval],
+        childRunId,
+        runId: parentRunId,
+        type: 'setAgentChildGates',
+      })
+      return approval
+    },
+    [dispatch, requireEditableRun],
+  )
+
+  const answerChildClarification = useCallback(
+    async (
+      parentRunId: string,
+      childRunId: string,
+      clarificationId: string,
+      answer: AgentClarificationAnswerRequest,
+    ) => {
+      requireEditableRun(parentRunId)
+      const result = await answerAgentRunClarification(
+        childRunId,
+        clarificationId,
+        answer,
+        optionsRef.current,
+      )
+      const { run: childSummary, ...clarification } = result
+      void childSummary
+      dispatch({
+        childRunId,
+        clarifications: [clarification],
+        runId: parentRunId,
+        type: 'setAgentChildGates',
       })
       return clarification
     },
@@ -444,6 +609,45 @@ export function useAgentControlApi({
     [loadArtifact, requireEditableRun],
   )
 
+  const renameArtifact = useCallback(
+    async (
+      runId: string,
+      artifactId: string,
+      title: string,
+      sessionId: string | null,
+    ): Promise<ArtifactRenameResult> => {
+      requireEditableRun(runId)
+      try {
+        await renameAgentRunArtifact(
+          runId,
+          artifactId,
+          { title },
+          optionsRef.current,
+        )
+      } catch (error) {
+        if (hasHttpStatus(error, 409)) return { kind: 'locked' }
+        throw error
+      }
+      // The rename event reaches only LIVE streams; a settled run has
+      // none — refresh the row and the session name index directly so
+      // chips, tabs and the registry follow without a reload.
+      await loadArtifact(runId, artifactId)
+      if (sessionId) {
+        const result = await listAgentSessionArtifacts(
+          sessionId,
+          optionsRef.current,
+        )
+        dispatch({
+          artifacts: result.data,
+          sessionId,
+          type: 'setAgentSessionArtifacts',
+        })
+      }
+      return { kind: 'renamed' }
+    },
+    [dispatch, loadArtifact, requireEditableRun],
+  )
+
   const exportArtifact = useCallback(
     async (runId: string, artifactId: string, title?: string) => {
       return exportAgentRunArtifact(
@@ -538,18 +742,158 @@ export function useAgentControlApi({
     [dispatch, requireEditableRun],
   )
 
+  const isTranscriptHydrated = useCallback((runId: string): boolean => {
+    // Demo/local runs carry their rows in reducer actions; there is no control
+    // API whose initial stale defaults could ever settle.
+    if (!enabledRef.current) return true
+    const run = runsRef.current[runId]
+    if (!run) return true
+    return agentTranscriptHydrated(run, failedRef.current)
+  }, [])
+
   return {
+    answerChildClarification,
     answerClarification,
     applyPatch,
     cancelTask,
     decideApproval,
+    decideChildApproval,
     exportArtifact,
     loadArtifact,
     loadTaskResult,
+    isTranscriptHydrated,
     prefetchTaskResult,
     rejectPatch,
+    renameArtifact,
     saveArtifact,
   }
+}
+
+function answerFetchKey(
+  run: Pick<AgentRunRecord, 'runId'>,
+  answer: Pick<AgentRunRecord['artifacts'][string], 'artifactId' | 'revision'>,
+): string {
+  return `${run.runId}:answer:${answer.artifactId}:${answer.revision}`
+}
+
+function childGateFetchKey(runId: string, childRunId: string): string {
+  return `${runId}:child_gates:${childRunId}`
+}
+
+/** Deadline for one control-surface fetch. */
+export const CONTROL_FETCH_TIMEOUT_MS = 20_000
+
+/**
+ * Turn an endless wait into a stated failure.
+ *
+ * The failure path here is already loud — the run card shows it. But a
+ * request that never resolves AND never rejects is neither: it stays
+ * marked in flight forever, so nothing is shown and nothing retries.
+ * That is exactly what happened when the browser's connection pool ran
+ * dry with two agent runs open: the surface said "waiting for your
+ * approval" while the fetch that would have rendered the decision hung
+ * silently, for minutes.
+ *
+ * A deadline converts that into the failure the surface already knows
+ * how to report.
+ */
+export function withControlFetchDeadline<T>(
+  work: Promise<T>,
+  message: string,
+  timeoutMs: number = CONTROL_FETCH_TIMEOUT_MS,
+  schedule: (fn: () => void, ms: number) => unknown = setTimeout,
+  cancel: (handle: never) => void = clearTimeout as never,
+): Promise<T> {
+  let timer: unknown
+  return Promise.race([
+    work,
+    new Promise<never>((_resolve, reject) => {
+      timer = schedule(() => reject(new Error(message)), timeoutMs)
+    }),
+  ]).finally(() => {
+    cancel(timer as never)
+  })
+}
+
+function agentControlFetchKeys(
+  runs: Record<string, AgentRunRecord>,
+): Set<string> {
+  const keys = new Set<string>()
+  for (const run of Object.values(runs)) {
+    if (run.kind !== 'agent') continue
+    if (run.planStale) keys.add(`${run.runId}:plan`)
+    if (run.approvalsStale) keys.add(`${run.runId}:approvals`)
+    if (run.clarificationsStale) keys.add(`${run.runId}:clarifications`)
+    if (run.patchStale && run.patchId) keys.add(`${run.runId}:patch`)
+    for (const [childRunId, gates] of Object.entries(run.childGates)) {
+      if (gates.stale) keys.add(childGateFetchKey(run.runId, childRunId))
+    }
+    if (run.artifactsStale) {
+      keys.add(`${run.runId}:artifacts`)
+      continue
+    }
+    const answer = run.artifactOrder
+      .map((id) => run.artifacts[id])
+      .find((artifact) => artifact?.kind === 'answer')
+    if (
+      answer
+      && answer.status !== 'writing'
+      && (
+        answer.contentMarkdown === undefined
+        || answer.publicationNeedsReconcile === true
+      )
+    ) {
+      keys.add(answerFetchKey(run, answer))
+    }
+  }
+  return keys
+}
+
+/** Retain terminal failures only while their exact stale/revision cycle is
+ * still requested. Once that condition settles, the same surface key is
+ * available to a later invalidation without permitting render-driven retries. */
+export function currentAgentControlFetchFailures(
+  runs: Record<string, AgentRunRecord>,
+  failures: ReadonlySet<string>,
+): Set<string> {
+  const requested = agentControlFetchKeys(runs)
+  return new Set([...failures].filter((key) => requested.has(key)))
+}
+
+/** Readiness of the transcript's row-backed geometry. Failed requests are
+ * terminal too: the visible run error replaces an endless loading state. */
+export function agentTranscriptHydrated(
+  run: AgentRunRecord,
+  terminalFetches: ReadonlySet<string> = new Set(),
+): boolean {
+  const runId = run.runId
+  if (run.planStale && !terminalFetches.has(`${runId}:plan`)) return false
+  if (
+    run.approvalsStale
+    && !terminalFetches.has(`${runId}:approvals`)
+  ) return false
+  if (
+    run.clarificationsStale
+    && !terminalFetches.has(`${runId}:clarifications`)
+  ) return false
+  if (
+    run.artifactsStale
+    && !terminalFetches.has(`${runId}:artifacts`)
+  ) return false
+  if (run.artifactsStale) return true
+  const answer = run.artifactOrder
+    .map((id) => run.artifacts[id])
+    .find((artifact) => artifact?.kind === 'answer')
+  if (
+    answer
+    && answer.status !== 'writing'
+    && (
+      answer.contentMarkdown === undefined
+      || answer.publicationNeedsReconcile === true
+    )
+    && !terminalFetches.has(answerFetchKey(run, answer))
+  ) return false
+  return true
 }
 
 export async function refreshPlanAfterApprovalDecision<Plan>({

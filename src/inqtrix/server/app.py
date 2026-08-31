@@ -229,6 +229,7 @@ def create_app(
             _semaphore = asyncio.Semaphore(settings.server.max_concurrent)
         return _semaphore
 
+
     # Run-store selection (memory default, durable opt-in) happens in
     # the container's build_run_store bridge so the Postgres backends
     # share one engine; nothing is built here anymore.
@@ -315,32 +316,36 @@ def create_app(
                 "and restricted application role."
             )
         if settings.storage.backend == "postgres":
-            # Reviewable connection budget (Sichtbarkeit): count the
-            # pooled engines this process ACTUALLY builds, not a literal,
-            # so the number is trustworthy in every config. Always: the
-            # platform-persistence bundle + the durable run store (2).
-            # Conditionally: the auth-session bundle (cookie-session
-            # modes only) and the indexing store (knowledge enabled).
-            # NullPool stores add one short-lived connection per in-flight
-            # operation on top and are not counted here.
-            pooled_engines = 2
-            if auth_provider.mode in ("local", "ldap", "oidc"):
-                pooled_engines += 1
-            if settings.knowledge.enabled:
-                pooled_engines += 1
-            log.info(
-                "Postgres-Verbindungsbudget | pool_size=%d "
-                "max_overflow=%d | %d gepoolte Engines -> worst case %d "
-                "persistente Verbindungen pro API-Prozess (+ NullPool "
-                "pro Operation).",
-                settings.storage.pool_size,
-                settings.storage.pool_max_overflow,
-                pooled_engines,
-                pooled_engines
-                * (
-                    settings.storage.pool_size
-                    + settings.storage.pool_max_overflow
+            # The engines have been built by now, so the count comes from
+            # what exists rather than from a list kept by hand.
+            from inqtrix.storage.connection_budget import (
+                report_connection_budget,
+            )
+
+            container = getattr(_app.state, "container", None)
+            checkpointer = getattr(container, "agent_checkpointer", None)
+            await report_connection_budget(
+                    database_url=settings.storage.database_url,
+                process_label="API-Prozess",
+                pool_size=settings.storage.pool_size,
+                pool_max_overflow=settings.storage.pool_max_overflow,
+                # The agent checkpointer speaks a different driver and keeps
+                # its own pool, so no engine count can see it.
+                extra_connections=(
+                    checkpointer.max_connections if checkpointer is not None else 0
                 ),
+                extra_label="Agent-Checkpointer",
+                # Run threads drive a NullPool bundle: one connection per
+                # operation, none while a run waits on its provider. They
+                # hold nothing at rest, so no pool count sees them -- but a
+                # synchronised burst can ask for one per in-flight run, and
+                # that is the number the server has to survive.
+                transient_peak=(
+                    settings.server.run_max_concurrent
+                    or settings.server.max_concurrent
+                ),
+                transient_label="Lauf-Threads, NullPool",
+                transient_knob="RUN_MAX_CONCURRENT",
             )
         if (
             settings.server.run_max_concurrent_per_user is not None
@@ -359,6 +364,43 @@ def create_app(
                 "beschnitten. Cap auf mindestens die Wellenbreite setzen.",
                 settings.server.run_max_concurrent_per_user,
                 settings.agent_platform.max_parallel_children,
+            )
+        from inqtrix.agents.plan_validation import MAX_PLAN_TASKS_DEFAULT
+
+        # A wave is never wider than the plan the validator accepts, so
+        # the raw knob overstates the peak whenever it exceeds that
+        # ceiling. Warning on the overstated number would cry wolf —
+        # and a warning nobody believes is worse than none.
+        effective_wave = min(
+            settings.agent_platform.max_parallel_children,
+            MAX_PLAN_TASKS_DEFAULT,
+        )
+        peak_agent_calls = (
+            effective_wave
+            * settings.agent_platform.max_parallel_queries_per_task
+        )
+        run_lane = (
+            settings.server.run_max_concurrent
+            or settings.server.max_concurrent
+        )
+        if peak_agent_calls > run_lane:
+            # Visible constraint (No Silent Fallbacks): one run's widest
+            # wave, each task running its sub-queries concurrently, can
+            # demand more model calls than the lane admits. The excess
+            # does not fail — it queues, and the run simply takes longer
+            # for a reason nothing on any surface states. Loud at
+            # startup, not discovered as a mysteriously slow agent.
+            log.warning(
+                "Wirksame Wellenbreite %d (Plangrenze) x "
+                "INQTRIX_AGENT_MAX_PARALLEL_QUERIES_PER_TASK=%d = %d "
+                "gleichzeitige Modellaufrufe aus EINEM Lauf, aber die "
+                "Spur laesst nur %d zu — Wellen stauen sich. "
+                "MAX_CONCURRENT anheben oder die Abfragen-Parallelitaet "
+                "senken.",
+                effective_wave,
+                settings.agent_platform.max_parallel_queries_per_task,
+                peak_agent_calls,
+                run_lane,
             )
         if database_ready and settings.sharing.restrict_to_workspace_members:
             from inqtrix.services.workspace_administration import (
@@ -392,10 +434,11 @@ def create_app(
         # boot would otherwise disable upload recovery for the whole
         # process lifetime. Each pass degrades to a WARNING on storage
         # errors and succeeds on its own once the database returns.
-        # Accepted trade-off: unlike the queue-mode worker, which
-        # re-verifies the database contract per claim, a reconciler pass
-        # may resume previously accepted uploads while the boot contract
-        # check still fails against a DML-compatible schema.
+        # Accepted trade-off: unlike the queue-mode worker, which fences
+        # every claim transaction on the schema head and re-runs the full
+        # database contract probe on a coalesced interval, a reconciler
+        # pass may resume previously accepted uploads while the boot
+        # contract check still fails against a DML-compatible schema.
         if upload_reconciler is not None:
             upload_reconciler.start()
         try:
@@ -513,6 +556,17 @@ def create_app(
             )
             if collaboration_service is not None:
                 await collaboration_service.aclose()
+            # Last: request code still unwinding above may hand work to a
+            # lane, and a closed executor would reject it. Nothing here
+            # depends on the lanes, so releasing them at the end is free.
+            # The agent checkpointer holds its own psycopg pool, which no
+            # engine disposal reaches.
+            checkpointer = getattr(container, "agent_checkpointer", None)
+            if checkpointer is not None:
+                checkpointer.close()
+            lanes = getattr(container, "execution_lanes", None)
+            if lanes is not None:
+                lanes.close()
 
     # Usage ledger: the provider wrappers feed llm_usage rows through the
     # process recorder; the lifespan finally closes it. Installed BEFORE the

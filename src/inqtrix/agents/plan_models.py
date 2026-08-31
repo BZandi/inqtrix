@@ -124,8 +124,15 @@ class PlanTaskModel(BaseModel):
     the collected report instead of a lone Pydantic failure."""
     objective: str = ""
     """What the task must produce."""
-    queries: list[str] = Field(default_factory=list)
-    """Concrete search/ask strings (max 8; enforced by the validator)."""
+    queries: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Self-contained, naturally phrased evidence questions "
+            "(web) or guiding questions (rag); max 8, enforced by the "
+            "validator — never keyword chains."
+        ),
+    )
+    """Concrete task questions (max 8; enforced by the validator)."""
     gap_ids: list[str] = Field(default_factory=list)
     """Discovery gaps the task covers (synthesis carries none)."""
     depends_on: list[str] = Field(default_factory=list)

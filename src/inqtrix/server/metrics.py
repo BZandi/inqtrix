@@ -60,6 +60,11 @@ _ADMISSION_REASONS = ("queue_full", "per_user_limit", "quota")
 # Latency buckets (seconds) spanning fast JSON reads to long SSE polls.
 _LATENCY_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30)
 
+# A scrape slower than this is worth explaining in the log: below it the split
+# between waiting for a thread and collecting is noise, above it something is
+# genuinely contended and the operator needs to know which side.
+_SLOW_SCRAPE_SECONDS = 1.0
+
 # Set by setup_metrics when metrics are enabled AND the extra is present;
 # None otherwise, which makes record_admission_rejected a no-op. Process-
 # global because the increment sites (quota_error_response, the run-cap
@@ -263,7 +268,30 @@ def setup_metrics(
         # event loop a slow or hung database would stall EVERY request,
         # not just the DB-bound ones — a scrape must never be able to do
         # that, so it runs off-loop.
-        payload = await asyncio.to_thread(generate_latest, registry)
+        #
+        # A slow scrape has two possible causes that look identical from
+        # outside: no thread was free, or the collectors themselves were
+        # slow. Timing both sides of the handoff separates them, so the
+        # answer is in the log instead of being guessed at.
+        submitted = time.monotonic()
+        started: list[float] = []
+
+        def _collect() -> bytes:
+            started.append(time.monotonic())
+            return generate_latest(registry)
+
+        payload = await asyncio.to_thread(_collect)
+        finished = time.monotonic()
+        entered = started[0] if started else finished
+        waited, worked = entered - submitted, finished - entered
+        if waited + worked >= _SLOW_SCRAPE_SECONDS:
+            log.warning(
+                "Prometheus-Scrape dauerte %.2fs: %.2fs Wartezeit auf einen "
+                "Thread, %.2fs Sammlung (inkl. Datenbank).",
+                waited + worked,
+                waited,
+                worked,
+            )
         return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
 
     app.add_api_route(

@@ -174,7 +174,7 @@ const copy = {
       saving: 'Wird gespeichert',
       syncing: 'Wird synchronisiert',
       origin_rejected: 'Serveradresse stimmt nicht',
-      update_required: 'Update erforderlich',
+      reload_required: 'Neu laden erforderlich',
     },
     projection: 'Bestätigter Stand',
     diagnostics: 'Verbindungsdiagnose',
@@ -182,7 +182,7 @@ const copy = {
     nextReconnect: 'Nächster Versuch',
     retryNow: 'Jetzt erneut verbinden',
     signInAgain: 'Erneut anmelden',
-    updateApp: 'App aktualisieren',
+    reloadPage: 'Seite neu laden',
     unconfirmed: 'Nicht bestätigte Änderungen',
     none: 'Keine',
     participants: 'Teilnehmende',
@@ -242,7 +242,7 @@ const copy = {
       saving: 'Saving',
       syncing: 'Syncing',
       origin_rejected: 'Server address mismatch',
-      update_required: 'Update required',
+      reload_required: 'Reload required',
     },
     projection: 'Confirmed version',
     diagnostics: 'Connection diagnostics',
@@ -250,7 +250,7 @@ const copy = {
     nextReconnect: 'Next attempt',
     retryNow: 'Reconnect now',
     signInAgain: 'Sign in again',
-    updateApp: 'Update app',
+    reloadPage: 'Reload page',
     unconfirmed: 'Unconfirmed changes',
     none: 'None',
     participants: 'Participants',
@@ -818,7 +818,7 @@ export function EditorCollaborationStatus({
         }
       : model.recoverability === 'reload' && onReload
         ? {
-            label: labels.updateApp,
+            label: labels.reloadPage,
             run: async () => onReload(),
           }
         : null

@@ -282,6 +282,19 @@ export const SCENARIO_INVENTORY: readonly ScenarioDefinition[] = [
     ['system-smoke'],
   ),
   collaborationScenario(
+    'system.ai-suggestion-accept',
+    'An assistant suggestion publishes and reaches the second session',
+    '@ai-suggestion-accept',
+    ['system-smoke'],
+    ['desktop'],
+  ),
+  collaborationScenario(
+    'system.collaboration-stays-connected',
+    'Two writing sessions stay connected without a reconnect banner',
+    '@stays-connected',
+    ['system-smoke'],
+  ),
+  collaborationScenario(
     'system.suggestions',
     'Suggestion acceptance and rejection',
     '@suggestions',

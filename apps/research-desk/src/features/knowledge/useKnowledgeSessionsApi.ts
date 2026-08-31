@@ -94,6 +94,7 @@ export function useKnowledgeSessionsApi({
   deleteSession: (sessionId: string) => Promise<void>
   error: string | null
   isSelectedSessionItemsLoading: boolean
+  prefetchSessionItems: (sessionId: string) => Promise<void>
   retrySessionDeletion: (sessionId: string) => Promise<void>
 } {
   const [error, setError] = useState<string | null>(null)
@@ -508,10 +509,15 @@ export function useKnowledgeSessionsApi({
     && !itemsLoadResolved.has(selectedSessionId),
   )
 
+  const prefetchSessionItems = useCallback(async (sessionId: string) => {
+    await loadSessionItems(sessionId, { surfaceErrors: false })
+  }, [loadSessionItems])
+
   return {
     deleteSession,
     error: deletionError ?? error,
     isSelectedSessionItemsLoading,
+    prefetchSessionItems,
     retrySessionDeletion,
   }
 }

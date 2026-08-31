@@ -64,18 +64,75 @@ def test_policy_matrix_per_autonomy():
         "load_skill",
         "propose_editor_patch",
     }
-    assert "when" not in balanced["web_instant"]
+    # P6B: every balanced gate except the always-gated patch tool carries
+    # a grant-aware predicate. Fail-closed: outside a deps context (no
+    # run) nothing counts as granted, so the gate fires.
+    assert "when" in balanced["web_instant"]
+    assert "when" not in balanced["propose_editor_patch"]
     assert balanced["web_instant"]["allowed_decisions"] == [
         "approve",
         "edit",
         "reject",
     ]
+    probe = SimpleNamespace(tool_call={"args": {"query": "x"}})
+    assert balanced["web_instant"]["when"](probe) is True
+    from inqtrix.agents.kernel.deps import set_kernel_deps
+
+    try:
+        set_kernel_deps(
+            SimpleNamespace(tool_grants=frozenset({"web_instant"}))
+        )
+        # A grant suppresses exactly its own tool's gate ...
+        assert balanced["web_instant"]["when"](probe) is False
+        # ... and never a different tool's gate.
+        assert balanced["load_skill"]["when"](probe) is True
+    finally:
+        set_kernel_deps(None)
+    assert balanced["web_instant"]["when"](probe) is True
     when = balanced["search_project_knowledge"]["when"]
     scoped = SimpleNamespace(
         tool_call={"args": {"query": "x", "collection_ids": ["col_1"]}}
     )
     unscoped = SimpleNamespace(tool_call={"args": {"query": "x"}})
     assert when(scoped) is False
+    assert when(unscoped) is True
+    # A granted knowledge search stops gating even unscoped; the scoped
+    # path stays ungated as before.
+    try:
+        set_kernel_deps(
+            SimpleNamespace(
+                tool_grants=frozenset({"search_project_knowledge"})
+            )
+        )
+        assert when(unscoped) is False
+        assert when(scoped) is False
+    finally:
+        set_kernel_deps(None)
+
+    # P10-K2: a run the USER scoped at submission counts as scoped even
+    # when the model omits collection_ids (it never learns of the pin).
+    try:
+        set_kernel_deps(
+            SimpleNamespace(
+                tool_grants=frozenset(),
+                knowledge_scope_explicit=True,
+            )
+        )
+        assert when(unscoped) is False
+    finally:
+        set_kernel_deps(None)
+    # The project-wide default still gates.
+    try:
+        set_kernel_deps(
+            SimpleNamespace(
+                tool_grants=frozenset(),
+                knowledge_scope_explicit=False,
+            )
+        )
+        assert when(unscoped) is True
+    finally:
+        set_kernel_deps(None)
+    # No segment context at all -> fail closed.
     assert when(unscoped) is True
 
     # Child-run tools carry the single-dispatch predicate in every gated
@@ -108,7 +165,10 @@ def test_policy_matrix_per_autonomy():
         "search_project_knowledge",
         "read_project_document",
         "read_canvas",
+        "read_research_report",
         "write_canvas",
+        "read_editor_document",
+        "search_editor_document",
         "run_web_research",
         "run_deep_mission",
         "delegate_batch",
@@ -1233,3 +1293,121 @@ def test_knowledge_only_offers_read_canvas_for_archive_recovery():
         offered = _offered_tool_names(llm)
         assert "read_canvas" in offered
         assert "web_instant" not in offered
+
+
+# -- P6B: run-wide tool grants (approval_scope) ----------------------------- #
+
+
+def test_run_scope_approve_grants_the_tool_for_the_rest_of_the_run():
+    """approve + approval_scope=run: the SECOND call of the granted tool
+    executes without parking, one approval row total, and the execution
+    block advertises the grant."""
+    llm = ScriptedToolLLM(
+        [
+            _tool_turn("call_g1", "web_instant", {"query": "Frage eins"}),
+            _tool_turn("call_g2", "web_instant", {"query": "Frage zwei"}),
+            _text_turn("Beide Suchen liefen."),
+        ]
+    )
+    search = RecordingSearch()
+    client = make_client(llm, search)
+    with client:
+        run_id = _submit(client, autonomy="balanced")
+        wait_status(client, run_id, {"waiting_for_approval"})
+        approval = _pending_tool_approval(client, run_id)
+        decided = client.post(
+            f"/v1/runs/{run_id}/approvals/{approval['approval_id']}",
+            json={"decision": "approve", "approval_scope": "run"},
+        )
+        assert decided.status_code == 200, decided.text
+        wait_status(client, run_id, {"completed"})
+        assert search.queries == ["Frage eins", "Frage zwei"]
+        rows = client.get(f"/v1/runs/{run_id}/approvals").json()["data"]
+        assert len(rows) == 1
+        assert rows[0]["decision_payload"] == {"approval_scope": "run"}
+        execution = client.get(f"/v1/runs/{run_id}/result").json()[
+            "execution"
+        ]
+        assert execution["tool_grants"] == ["web_instant"]
+
+
+def test_once_scope_approve_keeps_gating_the_second_call():
+    """approval_scope=once stores nothing: the second call parks again
+    and the grant surface stays empty."""
+    llm = ScriptedToolLLM(
+        [
+            _tool_turn("call_o1", "web_instant", {"query": "Frage eins"}),
+            _tool_turn("call_o2", "web_instant", {"query": "Frage zwei"}),
+            _text_turn("Beide Suchen liefen."),
+        ]
+    )
+    search = RecordingSearch()
+    client = make_client(llm, search)
+    with client:
+        run_id = _submit(client, autonomy="balanced")
+        wait_status(client, run_id, {"waiting_for_approval"})
+        first = _pending_tool_approval(client, run_id)
+        decided = client.post(
+            f"/v1/runs/{run_id}/approvals/{first['approval_id']}",
+            json={"decision": "approve", "approval_scope": "once"},
+        )
+        assert decided.status_code == 200, decided.text
+        wait_status(client, run_id, {"waiting_for_approval"})
+        second = _pending_tool_approval(client, run_id)
+        assert second["approval_id"] != first["approval_id"]
+        # A plain approve stayed replay-identical: once stored nothing.
+        rows = client.get(f"/v1/runs/{run_id}/approvals").json()["data"]
+        first_row = next(
+            row
+            for row in rows
+            if row["approval_id"] == first["approval_id"]
+        )
+        assert first_row["decision_payload"] == {}
+        decided = client.post(
+            f"/v1/runs/{run_id}/approvals/{second['approval_id']}",
+            json={"decision": "approve"},
+        )
+        assert decided.status_code == 200, decided.text
+        wait_status(client, run_id, {"completed"})
+        assert search.queries == ["Frage eins", "Frage zwei"]
+        execution = client.get(f"/v1/runs/{run_id}/result").json()[
+            "execution"
+        ]
+        assert execution["tool_grants"] == []
+
+
+def test_strict_ignores_run_scope_grants_and_gates_every_call():
+    """strict stays per-call BY DESIGN: a stored run grant has no gating
+    effect and the snapshot honestly shows no active grant."""
+    llm = ScriptedToolLLM(
+        [
+            _tool_turn("call_s1", "web_instant", {"query": "Frage eins"}),
+            _tool_turn("call_s2", "web_instant", {"query": "Frage zwei"}),
+            _text_turn("Beide Suchen liefen."),
+        ]
+    )
+    search = RecordingSearch()
+    client = make_client(llm, search)
+    with client:
+        run_id = _submit(client, autonomy="strict")
+        wait_status(client, run_id, {"waiting_for_approval"})
+        first = _pending_tool_approval(client, run_id)
+        decided = client.post(
+            f"/v1/runs/{run_id}/approvals/{first['approval_id']}",
+            json={"decision": "approve", "approval_scope": "run"},
+        )
+        assert decided.status_code == 200, decided.text
+        wait_status(client, run_id, {"waiting_for_approval"})
+        second = _pending_tool_approval(client, run_id)
+        assert second["approval_id"] != first["approval_id"]
+        decided = client.post(
+            f"/v1/runs/{run_id}/approvals/{second['approval_id']}",
+            json={"decision": "approve"},
+        )
+        assert decided.status_code == 200, decided.text
+        wait_status(client, run_id, {"completed"})
+        assert search.queries == ["Frage eins", "Frage zwei"]
+        execution = client.get(f"/v1/runs/{run_id}/result").json()[
+            "execution"
+        ]
+        assert execution["tool_grants"] == []

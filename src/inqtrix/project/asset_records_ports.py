@@ -15,9 +15,32 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, get_args, runtime_checkable
 
 from inqtrix.project.scoped_upsert import ResourceScope
+
+# The two intents a caller can create an asset row with. A Literal rather
+# than a free string: the store contract knows exactly these two, and a typo
+# must fall at typecheck time, not land as a silent new state in the
+# database. The column itself cannot carry the intent -- server_file_id=NULL
+# also means "local-only asset that was never uploaded", which is
+# legitimately "ready".
+InitialUploadStatus = Literal["ready", "awaiting_upload"]
+
+
+def ensure_initial_upload_status(value: str) -> None:
+    """Reject unknown insert intents at runtime, derived from the Literal.
+
+    The Literal above binds only a typechecker, and none runs in this
+    repo's verification chain -- a typo would otherwise land as a silent
+    new state in the database. Both store backends call this before the
+    INSERT; the allowed set has exactly one definition.
+    """
+    if value not in get_args(InitialUploadStatus):
+        raise ValueError(
+            "initial_upload_status must be one of "
+            f"{get_args(InitialUploadStatus)}, got {value!r}"
+        )
 
 
 class SectionNotFound(KeyError):
@@ -251,7 +274,19 @@ class AssetStore(Protocol):
         updated_at: float,
         created_by_user_id: uuid.UUID | None,
         workspace_id: str | None,
-    ) -> AssetRecord: ...
+        initial_upload_status: InitialUploadStatus = "ready",
+    ) -> AssetRecord:
+        """Create or update one asset row.
+
+        ``initial_upload_status`` takes effect ONLY when the row is
+        inserted. The caller knows what it is creating: ``save_asset``
+        a finished local asset (``"ready"``), ``reserve_upload`` a
+        reserved landing slot (``"awaiting_upload"``). On an existing
+        row the stored status is untouched -- ``upload_status`` is
+        deliberately absent from the mutable column set, or a repeated
+        reservation could reset a finalised row.
+        """
+        ...
 
     async def list_assets_page(
         self,

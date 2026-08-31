@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import exists, func, insert, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from inqtrix.agents.artifact_lines import count_line_changes
 from inqtrix.agents.control_ports import (
     TERMINAL_APPROVAL_SETTLE_NOTE,
     APPROVAL_STATUS_BY_DECISION,
@@ -767,7 +768,19 @@ class PostgresAgentControlStore(BaseSessionStore):
                 .mappings()
                 .one()
             )
-            return _artifact_from_row(row)
+            record = _artifact_from_row(row)
+            # P9: the previous body is already in memory (existing) —
+            # count the line delta once here; only the RETURNED record
+            # carries it, reads keep yielding None.
+            counted = count_line_changes(
+                existing.content_markdown if existing is not None else "",
+                content_markdown,
+            )
+            if counted is not None:
+                record = replace(
+                    record, lines_added=counted[0], lines_removed=counted[1]
+                )
+            return record
 
     async def revise_session_artifacts_atomically(
         self,
@@ -828,6 +841,9 @@ class PostgresAgentControlStore(BaseSessionStore):
                         created_at=now,
                     )
                 )
+                counted = count_line_changes(
+                    current.content_markdown, item.content_markdown
+                )
                 stored_rows.append(
                     replace(
                         current,
@@ -836,6 +852,8 @@ class PostgresAgentControlStore(BaseSessionStore):
                         updated_by="agent",
                         content_markdown=item.content_markdown,
                         updated_at=now,
+                        lines_added=counted[0] if counted else None,
+                        lines_removed=counted[1] if counted else None,
                     )
                 )
             return stored_rows
@@ -906,6 +924,55 @@ class PostgresAgentControlStore(BaseSessionStore):
                     created_at=now,
                 )
             )
+            return _artifact_from_row(row)
+
+        return await authorize(_write)
+
+    async def rename_artifact(
+        self,
+        *,
+        run_id: str,
+        artifact_id: str,
+        title: str,
+        authorize: Any,
+    ) -> ArtifactRecord:
+        async def _write(
+            session: "AsyncSession", _cancel_child: Any
+        ) -> ArtifactRecord:
+            # Metadata-only (P9): no revision bump, no revision row —
+            # the content history must not record a rename.
+            row = (
+                (
+                    await session.execute(
+                        update(run_artifacts)
+                        .where(
+                            run_artifacts.c.artifact_id == artifact_id,
+                            run_artifacts.c.run_id == run_id,
+                            run_artifacts.c.status == "ready",
+                        )
+                        .values(title=title, updated_at=time.time())
+                        .returning(run_artifacts)
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                current = (
+                    (
+                        await session.execute(
+                            select(run_artifacts.c.status).where(
+                                run_artifacts.c.artifact_id == artifact_id,
+                                run_artifacts.c.run_id == run_id,
+                            )
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if current is None:
+                    raise ArtifactNotFound(artifact_id)
+                raise ArtifactLocked(artifact_id)
             return _artifact_from_row(row)
 
         return await authorize(_write)

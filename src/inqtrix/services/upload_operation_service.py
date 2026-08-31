@@ -34,6 +34,7 @@ from inqtrix.services.file_service import (
     FileTextExtractionError,
     SpooledUpload,
 )
+from inqtrix.storage.migration_contract import SchemaHeadMismatch
 from inqtrix.sync_bridge import run_coro_sync
 from inqtrix.urls import sanitize_error
 
@@ -741,6 +742,20 @@ class UploadReconciler:
                             operation_id,
                             type(exc).__name__,
                         )
+            except SchemaHeadMismatch as exc:
+                # The claim transaction's schema fence fired: the database
+                # moved past the head this process was built for. That can
+                # never heal for THIS process (its expected head is a code
+                # constant), so retrying every pass would only downgrade a
+                # fatal state to warning spam. Stop loudly; the upgraded
+                # process brings a matching reconciler.
+                log.error(
+                    "Upload-Reconciler: Schema-Kopf hat sich unter dem "
+                    "Prozess bewegt — Reconciler stoppt, ein aktualisierter "
+                    "Prozess uebernimmt. %s",
+                    exc,
+                )
+                return
             except Exception as exc:
                 log.warning(
                     "Upload-Reconciler-Durchlauf fehlgeschlagen "

@@ -30,6 +30,9 @@ from inqtrix.auth.permissions import (
     SharePermission,
     WorkspaceRole,
 )
+from inqtrix.storage.authorization_generation import (
+    read_authorization_generation,
+)
 from inqtrix.storage.db import tenant_session
 from inqtrix.storage.editor_orm import editor_documents
 from inqtrix.storage.identity_orm import (
@@ -137,6 +140,15 @@ class PostgresIdentityBackend:
             self._session_factory, tenant_id=tenant_id, app_role=self._app_role
         )
 
+    async def authorization_generation(
+        self, *, tenant_id: str, user_id: uuid.UUID
+    ) -> int | None:
+        """The user's commit-ordered authorization generation (frame hint)."""
+        async with self._session(tenant_id) as session:
+            return await read_authorization_generation(
+                session, tenant_id=tenant_id, user_id=user_id
+            )
+
     async def _append_share_effects(
         self,
         session: AsyncSession,
@@ -169,7 +181,11 @@ class PostgresIdentityBackend:
         targets = {row.recipient_user_id}
         if owner_user_id is not None:
             targets.add(owner_user_id)
-        for target_user_id in targets:
+        # Sorted like every other invalidation writer: the generation
+        # bump inside append_user_invalidation locks one row per target,
+        # and a hash-ordered iteration would invert lock order against
+        # concurrent sorted writers over the same user pair (deadlock).
+        for target_user_id in sorted(targets, key=str):
             await append_user_invalidation(
                 session,
                 tenant_id=row.tenant_id,

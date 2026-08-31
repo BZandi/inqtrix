@@ -140,7 +140,7 @@ The editor API remains additive and keeps Markdown compatibility:
 | `PATCH /v1/editor/documents/{id}` | Owner-only title/folder/metadata update using `expected_metadata_revision`. |
 | `POST /v1/editor/documents/{id}/collaboration:enable` | Owner-only, atomic Markdown-to-Yjs conversion. |
 | `POST /v1/editor/documents/{id}/collaboration/session` | Issues or rotates the opaque lease and returns room, access, user, and protocol/schema metadata. |
-| `GET /v1/editor/documents/{id}/activity` | Keyset page of attributed direct, suggestion, decision, comment, and system updates. Bounded summaries expose at most three sanitized edits. |
+| `GET /v1/editor/documents/{id}/activity` | Keyset page of attributed direct, suggestion, decision, comment, and system updates. Bounded summaries expose at most three edits, each a verbatim excerpt of at most 160 characters. The excerpt is display text, never markup: it is never sanitised and never rejected on its characters, because it is the user's own typing and the only consumer renders it as escaped text. |
 | `GET/POST /v1/editor/documents/{id}/collaboration/comments` | Incrementally lists or creates durable shared threads with participant metadata. |
 | `POST .../comments/{thread_id}/replies` | Adds an idempotent reply with optional participant mentions. |
 | `PATCH .../comments/{thread_id}` | Resolves or reopens a thread under live permission and revision checks. |

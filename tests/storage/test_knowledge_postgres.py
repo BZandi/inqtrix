@@ -255,7 +255,7 @@ async def test_migration_marked_generation_admits_only_its_document_payloads(
         embedding_dim=2,
         created_by_user_id=OWNER_USER_ID,
     )
-    document = await store.add_document(
+    await store.add_document(
         collection_id=collection.id,
         title="Migrated",
         text="verified source",

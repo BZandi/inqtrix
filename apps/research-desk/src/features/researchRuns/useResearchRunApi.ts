@@ -14,7 +14,11 @@ import {
   hasHttpStatus,
   listResearchRuns,
 } from '@/api/inqtrixClient'
-import { subscribeRunEvents } from './runEventChannel'
+import {
+  isParkedRunStatus,
+  noteParkedTransition,
+  subscribeRunEvents,
+} from './runEventChannel'
 import type {
   CreateResearchRunRequest,
   ResearchRunEvent,
@@ -30,8 +34,18 @@ const RUN_PAGE_LIMIT = 100
 
 type LiveRunCallbacks = {
   onEvent: (event: ResearchRunEvent) => void
+  /** Catch-up delivery: replayed/missed events arrive as ONE batch (one
+   * commit, rows render in place) instead of N live-looking onEvent calls.
+   * Optional so per-run consumers without history handling keep the
+   * per-event path. */
+  onHistory?: (events: ResearchRunEvent[]) => void
   onResult: (result: ResearchRunResult) => void
   onRunError: (runId: string, message: string) => void
+  /** The run answered 404/401 on the event channel: no longer available
+   * to this session (deliberately non-disclosing -- revoked, deleted,
+   * expired and foreign all look identical). Optional: without it the
+   * channel still ends cleanly; the record just keeps its last state. */
+  onRunUnavailable?: (runId: string) => void
   onSummary: (summary: ResearchRunSummary, options?: { select?: boolean }) => void
 }
 
@@ -72,8 +86,10 @@ export function useResearchRunApi({
   canList,
   enabled,
   onEvent,
+  onHistory,
   onResult,
   onRunError,
+  onRunUnavailable,
   onReplace,
   onSummary,
   refreshToken = 0,
@@ -88,6 +104,12 @@ export function useResearchRunApi({
   // shows a visible degradation hint for these.
   const [pollingRunIds, setPollingRunIds] = useState<string[]>([])
   const streamsRef = useRef(new Map<string, AbortController>())
+  // Runs parked on a human decision. They produce no events, but an SSE
+  // stream still holds one of the browser's six connections per origin
+  // — with two agent runs open, approval gates, `/quota/usage` and even
+  // `/api/auth/session` starved while the server answered in 27 ms.
+  // A parked run polls instead; the wake signal is unchanged.
+  const parkedRunsRef = useRef(new Set<string>())
   const replayedTerminalRunIdsRef = useRef(new Set<string>())
   const perRunCallbacksRef = useRef(new Map<string, PerRunCallbacks>())
   const streamScopeRef = useRef<{
@@ -96,19 +118,23 @@ export function useResearchRunApi({
   } | null>(null)
   const callbacksRef = useRef<LiveRunCallbacks>({
     onEvent,
+    onHistory,
     onResult,
     onRunError,
+    onRunUnavailable,
     onSummary,
   })
 
   useEffect(() => {
     callbacksRef.current = {
       onEvent,
+      onHistory,
       onResult,
       onRunError,
+      onRunUnavailable,
       onSummary,
     }
-  }, [onEvent, onResult, onRunError, onSummary])
+  }, [onEvent, onHistory, onResult, onRunError, onRunUnavailable, onSummary])
 
   const loadResult = useCallback(async (runId: string) => {
     try {
@@ -139,6 +165,12 @@ export function useResearchRunApi({
           const callbacks = perRunCallbacksRef.current.get(summary.run_id)
             ?? callbacksRef.current
           callbacks.onEvent?.(event)
+        },
+        onHistory: (events) => {
+          const callbacks = perRunCallbacksRef.current.get(summary.run_id)
+            ?? callbacksRef.current
+          if (callbacks.onHistory) callbacks.onHistory(events)
+          else for (const event of events) callbacks.onEvent?.(event)
         },
       })
     } catch (error) {
@@ -172,9 +204,17 @@ export function useResearchRunApi({
 
     const controller = new AbortController()
     streamsRef.current.set(summary.run_id, controller)
+    // Seeded from the row so a reload onto a parked run never opens a
+    // stream it would immediately have to give up.
+    if (isParkedRunStatus(summary.status)) {
+      parkedRunsRef.current.add(summary.run_id)
+    } else {
+      parkedRunsRef.current.delete(summary.run_id)
+    }
     void subscribeRunEvents({
       eventsUrl: summary.events_url,
       options: { apiKey, workspaceId },
+      preferPolling: () => parkedRunsRef.current.has(summary.run_id),
       signal: controller.signal,
       // Visible degradation: the timeline shows a hint
       // while the run is on the polling fallback; recovery clears it.
@@ -188,6 +228,7 @@ export function useResearchRunApi({
         })
       },
       onEvent: (event) => {
+        noteParkedTransition(parkedRunsRef.current, event)
         const callbacks = perRunCallbacksRef.current.get(event.run_id) ?? callbacksRef.current
         callbacks.onEvent?.(event)
         if (event.type === 'inqtrix.run.completed') {
@@ -195,6 +236,49 @@ export function useResearchRunApi({
         } else if (event.type === 'inqtrix.run.failed' || event.type === 'inqtrix.run.cancelled') {
           perRunCallbacksRef.current.delete(event.run_id)
         }
+      },
+      onHistory: (events) => {
+        // Catch-up batch (SSE replay before the boundary marker, or a first
+        // polling page): one dispatch, rows render in place. The terminal
+        // side effects still fire — a terminal event inside the batch means
+        // the run settled while this client was away.
+        for (const event of events) {
+          noteParkedTransition(parkedRunsRef.current, event)
+        }
+        const callbacks = perRunCallbacksRef.current.get(summary.run_id)
+          ?? callbacksRef.current
+        if (callbacks.onHistory) callbacks.onHistory(events)
+        else for (const event of events) callbacks.onEvent?.(event)
+        for (const event of events) {
+          if (event.type === 'inqtrix.run.completed') {
+            void loadResult(event.run_id)
+          } else if (event.type === 'inqtrix.run.failed' || event.type === 'inqtrix.run.cancelled') {
+            perRunCallbacksRef.current.delete(event.run_id)
+          }
+        }
+      },
+      onUnavailable: (status) => {
+        const callbacks = perRunCallbacksRef.current.get(summary.run_id)
+          ?? callbacksRef.current
+        if (status === 401 || !callbacks.onRunUnavailable) {
+          // 401 is an AUTH problem, never a calm lock: cookie mode
+          // reloads globally before this fires, but apikey mode has no
+          // reload -- a rotated key must surface loudly, not as
+          // "no longer available". Consumers without the new callback
+          // (per-run incognito surfaces) keep their pre-existing loud
+          // path for the 404 too.
+          callbacks.onRunError?.(
+            summary.run_id,
+            status === 401
+              ? 'Anmeldung abgelaufen oder Zugriffsschlüssel ungültig.'
+              : 'Dieser Lauf ist nicht mehr verfügbar.',
+          )
+        } else {
+          // Calm terminal state, not an error: the server's 404 is
+          // deliberately non-disclosing.
+          callbacks.onRunUnavailable(summary.run_id)
+        }
+        perRunCallbacksRef.current.delete(summary.run_id)
       },
     }).catch((error) => {
       if (controller.signal.aborted) return
@@ -469,17 +553,22 @@ export function shouldReplayTerminalAgentEvents(
 export async function replayTerminalEventPages({
   fetchPage,
   onEvent,
+  onHistory,
 }: {
   fetchPage: (afterSequence: number | null) => Promise<{
     data: ResearchRunEvent[]
     terminal: boolean
   }>
   onEvent: (event: ResearchRunEvent) => void
+  /** Every page of a TERMINAL replay is history by definition; given this,
+   * each page lands as one batch instead of per-event deliveries. */
+  onHistory?: (events: ResearchRunEvent[]) => void
 }): Promise<void> {
   let afterSequence: number | null = null
   for (;;) {
     const page = await fetchPage(afterSequence)
-    for (const event of page.data) onEvent(event)
+    if (onHistory) onHistory(page.data)
+    else for (const event of page.data) onEvent(event)
     if (page.terminal) return
     const latest = page.data.at(-1)?.sequence
     if (latest === undefined || latest === afterSequence) {

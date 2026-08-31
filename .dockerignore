@@ -38,3 +38,8 @@ docs
 examples
 logs
 assets
+
+# Private local operator workspace. Never enters a build context, so it never
+# reaches the podman machine VM and never becomes a layer if a future COPY
+# widens to the repository root.
+untracked

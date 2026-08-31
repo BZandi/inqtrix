@@ -19,6 +19,11 @@ import {
   type MentionMenuOption,
 } from '@/components/ui/mention-menu'
 import { StatusBadge } from '@/features/settings/parts'
+import {
+  REPORT_GUIDANCE_MAX_CHARS_FALLBACK,
+  REPORT_RULE_IDS_MAX_FALLBACK,
+  toggleReportRule,
+} from '@/features/agent/reportRequirement'
 import { useLocale } from '@/i18n/LocaleProvider'
 import type { TranslationDictionary } from '@/i18n/translations'
 import { cn } from '@/lib/utils'
@@ -89,6 +94,11 @@ const MAX_TASK_QUERIES = 8
  * against the same backend validator the agent's planner uses.
  */
 export function PlanReviewBody({
+  decidedGuidance = '',
+  decidedRuleLabels = [],
+  reportRuleOptions = [],
+  reportGuidanceMaxChars = REPORT_GUIDANCE_MAX_CHARS_FALLBACK,
+  reportRuleIdsMax = REPORT_RULE_IDS_MAX_FALLBACK,
   density,
   draft,
   editable,
@@ -96,6 +106,18 @@ export function PlanReviewBody({
   run,
   updateDraft,
 }: {
+  /** The result requirement already in force (from the decided gate).
+   * The plan itself cannot carry it, so a finished plan can only show
+   * it when the caller hands it in. */
+  decidedGuidance?: string
+  /** Prompt-library rules the user may attach as a requirement — those
+   * they marked visible for the agent. */
+  reportRuleOptions?: ReportRuleOption[]
+  /** Server limits for the requirement (published == enforced). */
+  reportGuidanceMaxChars?: number
+  reportRuleIdsMax?: number
+  /** Labels of the rules the decided gate ran under. */
+  decidedRuleLabels?: string[]
   density: 'compact' | 'full'
   draft: AgentPlanDraft | null
   editable: boolean
@@ -159,6 +181,13 @@ export function PlanReviewBody({
                 ?? { status: 'pending' },
               run.taskStates[task.taskId],
             )}
+            reportGuidance={draft.reportGuidance}
+            reportGuidanceMaxChars={reportGuidanceMaxChars}
+            reportRuleIdsMax={reportRuleIdsMax}
+            reportRuleIds={draft.reportRuleIds}
+            reportRuleOptions={reportRuleOptions}
+            decidedGuidance={decidedGuidance}
+            decidedRuleLabels={decidedRuleLabels}
             task={task}
             taskCount={draft.tasks.length}
             updateDraft={updateDraft}
@@ -173,30 +202,6 @@ export function PlanReviewBody({
           planSource={planSource}
           updateDraft={updateDraft}
         />
-      )}
-
-      {editable && (
-        <div>
-          <label
-            className="t-caption text-muted-foreground"
-            htmlFor="agent-plan-report-guidance"
-          >
-            {t.agent.plan.reportGuidance}
-          </label>
-          <textarea
-            className="mt-1 w-full resize-none rounded-md border border-border bg-card px-2.5 py-1.5 t-meta text-foreground placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            id="agent-plan-report-guidance"
-            maxLength={2000}
-            onChange={(event) =>
-              updateDraft((current) => ({
-                ...current,
-                reportGuidance: event.target.value,
-              }))}
-            placeholder={t.agent.plan.reportGuidancePlaceholder}
-            rows={2}
-            value={draft.reportGuidance}
-          />
-        </div>
       )}
 
       {(full || draft.assumptions.length > 0) && draft.assumptions.length > 0 && (
@@ -270,12 +275,19 @@ function wavePrefix(
 
 function PlanTaskRow({
   agentTier,
+  decidedGuidance,
   depth,
   editable,
   full,
   index,
   liveState,
+  decidedRuleLabels,
   planSource,
+  reportGuidance,
+  reportGuidanceMaxChars,
+  reportRuleIds,
+  reportRuleIdsMax,
+  reportRuleOptions,
   status,
   task,
   taskCount,
@@ -289,6 +301,15 @@ function PlanTaskRow({
   liveState?: { status: string; error?: string }
   planSource: PlanSourceInfo
   status: AgentTaskEffectiveStatus
+  /** Draft value of the result requirement — the synthesis row owns it. */
+  reportGuidance: string
+  reportRuleIds: string[]
+  reportRuleOptions: ReportRuleOption[]
+  reportGuidanceMaxChars: number
+  reportRuleIdsMax: number
+  /** The requirement already in force, for a plan that is decided. */
+  decidedGuidance: string
+  decidedRuleLabels: string[]
   task: AgentPlanTaskDraft
   taskCount: number
   updateDraft: (update: (draft: AgentPlanDraft) => AgentPlanDraft) => void
@@ -482,6 +503,73 @@ function PlanTaskRow({
           {t.agent.plan.expectedOutput}: {task.expectedOutput}
         </p>
       )}
+      {/* The result requirement belongs to the row that produces the
+          result. It used to sit at the bottom of the panel, below the
+          task list and three add-buttons, where the one control that
+          shapes the output was the least likely thing to be found. */}
+      {isSynthesis && full && editable && (
+        <div className="mt-1.5 pl-6">
+          <label
+            className="t-hint text-muted-foreground/80"
+            htmlFor="agent-plan-report-guidance"
+          >
+            {t.agent.plan.reportGuidance}
+          </label>
+          <ReportRulePicker
+            attached={reportRuleIds}
+            max={reportRuleIdsMax}
+            onToggle={(ruleId) =>
+              updateDraft((current) => ({
+                ...current,
+                // The SERVER's cap, honored here: attaching a fourth
+                // rule used to be accepted by the gate and then refused
+                // at the decision, with the whole decision lost.
+                reportRuleIds: toggleReportRule(
+                  current.reportRuleIds,
+                  ruleId,
+                  reportRuleIdsMax,
+                ),
+                reportRequirementTouched: true,
+              }))}
+            options={reportRuleOptions}
+          />
+          <textarea
+            className="mt-1 w-full resize-none rounded-md border border-border bg-card px-2.5 py-1.5 t-meta text-foreground placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            id="agent-plan-report-guidance"
+            maxLength={reportGuidanceMaxChars}
+            onChange={(event) =>
+              updateDraft((current) => ({
+                ...current,
+                reportGuidance: event.target.value,
+                // Touching it here is what makes the field travel —
+                // including an emptied one, which is how a requirement
+                // is deliberately cleared at the gate.
+                reportRequirementTouched: true,
+              }))}
+            placeholder={t.agent.plan.reportGuidancePlaceholder}
+            rows={2}
+            value={reportGuidance}
+          />
+        </div>
+      )}
+      {isSynthesis
+        && full
+        && !editable
+        && (decidedGuidance || decidedRuleLabels.length > 0) && (
+        <div className="mt-1.5 pl-6">
+          <p className="t-hint text-muted-foreground/80">
+            {t.agent.plan.reportGuidanceEffective}
+          </p>
+          {decidedRuleLabels.length > 0 && (
+            <p className="mt-0.5 t-meta text-muted-foreground">
+              {decidedRuleLabels.map((label) => `@rules:${label}`).join(' · ')}
+            </p>
+          )}
+          <p className="mt-0.5 whitespace-pre-line break-words t-meta text-foreground/85">
+            {decidedGuidance}
+          </p>
+        </div>
+      )}
       {liveState?.status === 'failed' && liveState.error && (
         <p className="mt-0.5 pl-6 t-meta-sm text-destructive">
           {t.agent.timeline.taskFailed.replace('{error}', liveState.error)}
@@ -493,6 +581,107 @@ function PlanTaskRow({
         </p>
       )}
     </li>
+  )
+}
+
+export type ReportRuleOption = {
+  ruleId: string
+  label: string
+  title: string
+}
+
+/**
+ * Attaching a saved requirement instead of retyping it.
+ *
+ * Ids only leave the client: the server resolves label, revision and
+ * text from the deciding caller's own library, so an attachment can
+ * never smuggle text into the writing prompts. Rules appear here only
+ * when their owner marked them visible for the agent — a rule written
+ * for chat should not start steering reports by itself.
+ */
+function ReportRulePicker({
+  attached,
+  max,
+  onToggle,
+  options,
+}: {
+  attached: string[]
+  max: number
+  onToggle: (ruleId: string) => void
+  options: ReportRuleOption[]
+}) {
+  const { t } = useLocale()
+  // Render the ATTACHMENTS first, then the offers — an attached rule
+  // that has left the catalog (its agent visibility switched off, or the
+  // rule deleted) must stay visible and detachable. Rendering `options`
+  // alone hid it while it kept shaping the report, and — once the draft
+  // survived a reload — left a stored id that no control could remove,
+  // so every approve failed with a 400 naming an id the UI never showed.
+  const attachedRows = attached.map((ruleId) => ({
+    option: options.find((item) => item.ruleId === ruleId)
+      ?? { ruleId, label: ruleId, title: t.agent.plan.reportRuleUnknown },
+    known: options.some((item) => item.ruleId === ruleId),
+  }))
+  const offered = options.filter((item) => !attached.includes(item.ruleId))
+  if (attachedRows.length === 0 && offered.length === 0) return null
+  // At the cap the remaining rules are visibly out of reach, so the
+  // limit is legible BEFORE the click — instead of a click that quietly
+  // does nothing.
+  const atCap = attached.length >= max
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1">
+      {attachedRows.map(({ known, option }) => (
+        <button
+          aria-pressed
+          className={cn(
+            'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 t-hint transition-colors',
+            known
+              ? 'border-brand/50 bg-brand/10 text-brand'
+              : 'border-warning/50 bg-warning/10 text-warning',
+          )}
+          key={option.ruleId}
+          onClick={() => onToggle(option.ruleId)}
+          title={option.title}
+          type="button"
+        >
+          <BookOpen className="icon-xs" />
+          {option.label}
+        </button>
+      ))}
+      {offered.map((option) => {
+        const active = false
+        const blocked = !active && atCap
+        return (
+          <button
+            aria-pressed={active}
+            className={cn(
+              'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 t-hint transition-colors',
+              active
+                ? 'border-brand/50 bg-brand/10 text-brand'
+                : 'border-border text-muted-foreground hover:text-foreground',
+              blocked && 'cursor-not-allowed opacity-40 hover:text-muted-foreground',
+            )}
+            disabled={blocked}
+            key={option.ruleId}
+            onClick={() => onToggle(option.ruleId)}
+            title={
+              blocked
+                ? t.agent.plan.reportRulesCap.replace('{max}', String(max))
+                : option.title
+            }
+            type="button"
+          >
+            <BookOpen className="icon-xs" />
+            {option.label}
+          </button>
+        )
+      })}
+      <span className="t-hint text-muted-foreground/70">
+        {atCap
+          ? t.agent.plan.reportRulesCap.replace('{max}', String(max))
+          : t.agent.plan.reportRulesHint}
+      </span>
+    </div>
   )
 }
 

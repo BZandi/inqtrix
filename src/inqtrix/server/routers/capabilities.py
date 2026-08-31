@@ -13,6 +13,13 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter
 
+from inqtrix.services.attached_report_resolver import (
+    MAX_ATTACHED_REPORTS,
+)
+from inqtrix.agents.report_requirement import (
+    REPORT_GUIDANCE_MAX_CHARS,
+    REPORT_RULE_IDS_MAX,
+)
 from inqtrix.agents.kernel.algorithm import configured_kernel_limits
 from inqtrix.agents.limit_contract import QUICK_WEB_SEARCH_LIMIT
 from inqtrix.agents.tier_policy import (
@@ -406,6 +413,19 @@ def build_router(container: "AppContainer") -> APIRouter:
                     settings.agent_platform.discovery_max_tool_calls
                 ),
                 "max_plan_tasks": settings.agent_platform.max_plan_tasks,
+                # Result requirement (S6/S4): published == enforced. The
+                # composer and the plan gate both render THESE numbers
+                # instead of repeating the server's constants, so a
+                # text the surface accepts is never one the server
+                # refuses.
+                "report_requirement": {
+                    "max_chars": REPORT_GUIDANCE_MAX_CHARS,
+                    "max_rules": REPORT_RULE_IDS_MAX,
+                },
+                # Attached research reports (P14): published == enforced,
+                # so the composer disables the fourth chip instead of the
+                # server refusing the submission afterwards.
+                "attached_reports": {"max_reports": MAX_ATTACHED_REPORTS},
                 "limits": {
                     "tokens": {
                         "enabled": settings.quota.max_tokens_per_run > 0,

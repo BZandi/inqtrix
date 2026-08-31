@@ -42,7 +42,6 @@ from tests.eval.agent_kernel_harness import (
     grade_trial,
     pass_hat_k,
     run_scenario_trials,
-    summarize_trials,
     write_kernel_eval_artifact,
 )
 

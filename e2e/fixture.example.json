@@ -27,7 +27,9 @@
       "expectedPermission": "suggest",
       "expectedAuthorId": "00000000-0000-4000-8000-000000000002"
     },
-    "revocation": "collaboration-e2e-revocation"
+    "revocation": "collaboration-e2e-revocation",
+    "staysConnected": "ed_example_stays_connected",
+    "aiSuggestion": "ed_example_ai_suggestion"
   },
   "controls": {
     "baseURL": "https://collaboration-fixture-control.example.test",
@@ -60,8 +62,14 @@
     }
   },
   "transports": {
-    "vite": { "baseURL": "http://127.0.0.1:5173" },
-    "nginx": { "baseURL": "http://127.0.0.1:8080" },
-    "python-gateway": { "baseURL": "http://127.0.0.1:4173" }
+    "vite": {
+      "baseURL": "http://127.0.0.1:5173"
+    },
+    "nginx": {
+      "baseURL": "http://127.0.0.1:8080"
+    },
+    "python-gateway": {
+      "baseURL": "http://127.0.0.1:4173"
+    }
   }
 }

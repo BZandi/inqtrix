@@ -35,6 +35,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import ValidationError
 
+from inqtrix.services.report_requirement_resolver import (
+    ReportRequirementError,
+    resolve_report_requirement,
+)
 from inqtrix.agents.control_ports import (
     APPROVAL_DECISIONS,
     APPROVAL_STATUS_BY_DECISION,
@@ -70,6 +74,9 @@ from inqtrix.exceptions import RunNotFound
 from inqtrix.execution_authority import pinned_knowledge_collection_ids
 
 if TYPE_CHECKING:
+    from inqtrix.services.prompt_template_service import (
+        PromptTemplateService,
+    )
     from inqtrix.agents.control_ports import AgentControlStore
     from inqtrix.auth.principal import Principal, UserContext
     from inqtrix.runs.ports import RunStorePort
@@ -320,6 +327,7 @@ class AgentControlService:
         audit: Any = None,
         editor_persistence: "EditorPersistenceService | None" = None,
         knowledge: "CollectionPreflight | None" = None,
+        prompt_templates: "PromptTemplateService | None" = None,
         durable: bool = False,
         max_plan_tasks: int = 8,
     ) -> None:
@@ -328,6 +336,7 @@ class AgentControlService:
         self._audit = audit
         self._editor_persistence = editor_persistence
         self._knowledge = knowledge
+        self._prompt_templates = prompt_templates
         self._durable = durable
         self._max_plan_tasks = max_plan_tasks
 
@@ -565,10 +574,12 @@ class AgentControlService:
         decision: str,
         plan_body: dict[str, Any] | None,
         note: str,
-        report_guidance: str = "",
+        report_guidance: str | None = None,
+        report_rule_ids: list[str] | None = None,
         principal: "Principal | None" = None,
         visible_to: "UserContext | None" = None,
         actions_body: list[Any] | None = None,
+        approval_scope: str = "",
     ) -> tuple[ApprovalRecord, dict[str, Any], bool]:
         """Resolve one approval; returns (approval, run summary, replayed).
 
@@ -586,6 +597,17 @@ class AgentControlService:
         (M2): editing a ``kind="tool"`` approval carries the revised
         action list — exactly one action whose args replace the proposed
         ones; the tool itself is not swappable through an edit.
+
+        ``approval_scope`` (P6B): ``"run"`` on a plain tool-gate approve
+        stores a run-wide grant in ``decision_payload`` — the gated tools
+        of this gate stop gating for the rest of the run (folded at every
+        segment start; effective only in the balanced mode table, strict
+        stays per-call). ``"once"``/empty stores nothing, so the replay
+        identity of a plain approve is unchanged. Because
+        ``decision_payload`` IS replay identity, an approve-once retry
+        after an approve-run (or vice versa) conflicts with 409 — exactly
+        like a retry carrying a different edited plan.
+        ``ALWAYS_GATED_TOOLS`` are never grantable.
 
         Raises:
             AgentControlValidationError: Unknown decision verb, edit
@@ -651,24 +673,96 @@ class AgentControlService:
             raise AgentControlValidationError(
                 ["Ein actions-Body ist nur bei decision=edit erlaubt."]
             )
-        if report_guidance and approval.kind not in ("plan", "replan"):
+        if (
+            report_guidance is not None or report_rule_ids is not None
+        ) and approval.kind not in (
+            "plan",
+            "replan",
+        ):
             # Guidance on a gate that cannot honor it must fail loudly —
             # silently dropping user requirements is the one thing the
             # report_guidance feature exists to prevent.
             raise AgentControlValidationError(
                 [
-                    "report_guidance ist nur bei Plan-/Replan-Freigaben "
-                    f"erlaubt (dieses Gate: {approval.kind})."
+                    "report_guidance/report_rule_ids sind nur bei "
+                    "Plan-/Replan-Freigaben erlaubt "
+                    f"(dieses Gate: {approval.kind})."
                 ]
             )
-        if report_guidance:
-            # Decision-scoped report guidance rides the SAME payload the
-            # edit decision already uses — no schema change; the resume
-            # hands it to the synthesis prompts.
+        if report_guidance is not None or report_rule_ids is not None:
+            # Decision-scoped result requirement rides the SAME payload
+            # the edit decision already uses — no schema change; the
+            # resume hands it to the synthesis prompts.
+            # PRESENCE, not truthiness: an empty value is a real one
+            # ("drop my earlier requirement"). Storing only non-empty
+            # text made a once-set requirement unremovable — the cleared
+            # field vanished on the way and the old text kept shaping
+            # every later revision.
+            # SAME resolution as the submit-time requirement: one
+            # catalog lookup, one composition, one ceiling. Two copies
+            # would drift, and a drift here is a security drift.
+            try:
+                composed, rule_parts = await resolve_report_requirement(
+                    free_text=report_guidance or "",
+                    template_ids=report_rule_ids or [],
+                    prompt_templates=self._prompt_templates,
+                    visible_to=visible_to,
+                )
+            except ReportRequirementError as exc:
+                raise AgentControlValidationError(exc.messages) from exc
             decision_payload = {
                 **decision_payload,
-                "report_guidance": report_guidance,
+                "report_guidance": composed,
+                # The parts, for the read-back: the composed text is
+                # what the model sees, this is what the user chose.
+                "report_requirement": {
+                    "free_text": report_guidance or "",
+                    "rules": rule_parts,
+                },
             }
+        if approval_scope:
+            if approval_scope not in ("once", "run"):
+                raise AgentControlValidationError(
+                    [
+                        f"Unbekannter approval_scope {approval_scope!r} "
+                        "(erlaubt: once, run)."
+                    ]
+                )
+            if decision != "approve":
+                raise AgentControlValidationError(
+                    ["approval_scope ist nur bei decision=approve erlaubt."]
+                )
+            if approval.kind != "tool":
+                raise AgentControlValidationError(
+                    [
+                        "approval_scope ist nur bei Tool-Freigaben "
+                        f"erlaubt (dieses Gate: {approval.kind})."
+                    ]
+                )
+            if approval_scope == "run":
+                from inqtrix.agents.kernel.policy import ALWAYS_GATED_TOOLS
+
+                always_gated = sorted(
+                    {
+                        str(action.get("tool") or "")
+                        for action in approval.payload.get("actions") or []
+                    }
+                    & set(ALWAYS_GATED_TOOLS)
+                )
+                if always_gated:
+                    raise AgentControlValidationError(
+                        [
+                            f"{', '.join(always_gated)} bleibt in jedem "
+                            "Modus pro Aufruf genehmigungspflichtig — "
+                            "approval_scope=run ist hier nicht erlaubt."
+                        ]
+                    )
+                # The grant rides decision_payload and thereby BECOMES
+                # replay identity; "once" deliberately stores nothing.
+                decision_payload = {
+                    **decision_payload,
+                    "approval_scope": "run",
+                }
 
         decided_by = principal.user_id if principal is not None else None
         if approval.status != "pending":
@@ -1091,6 +1185,17 @@ class AgentControlService:
             run_id, artifact_id, revision=revision
         )
 
+    async def list_session_artifacts(
+        self, session_id: str
+    ) -> list[ArtifactRecord]:
+        """ALL session-scoped artifacts, oldest first, META-ONLY.
+
+        Anchor-independent by design: a session artifact's ``run_id``
+        moves to the newest updating run, so run-scoped listings lose it
+        — this is the ONE listing that never does (P4 chips/F-NEU-1).
+        """
+        return await self._store.list_session_artifacts(session_id)
+
     async def user_update_artifact(
         self,
         *,
@@ -1127,6 +1232,55 @@ class AgentControlService:
         await self._record_audit(
             principal,
             action="agent.artifact_edited",
+            run_id=run_id,
+            detail={
+                "artifact_id": artifact_id,
+                "revision": str(artifact.revision),
+            },
+        )
+        return artifact
+
+    async def rename_artifact(
+        self,
+        *,
+        run_id: str,
+        artifact_id: str,
+        title: str,
+        principal: "Principal | None",
+        visible_to: "UserContext | None" = None,
+        workspace_id: str | None = None,
+    ) -> ArtifactRecord:
+        """Metadata-only user rename (P9, K3); multi-tab signal.
+
+        The event stays deliberately kind-less like the user PUT (it
+        must never chip) and carries the new title plus ``renamed`` so
+        clients refresh names without treating it as a content write.
+        """
+        artifact = await self._store.rename_artifact(
+            run_id=run_id,
+            artifact_id=artifact_id,
+            title=title,
+            authorize=self._authorized_control_callable(
+                run_id,
+                principal=principal,
+                visible_to=visible_to,
+                workspace_id=workspace_id,
+            ),
+        )
+        await self._emit(
+            run_id,
+            ARTIFACT_UPDATED_EVENT,
+            {
+                "artifact_id": artifact.artifact_id,
+                "revision": artifact.revision,
+                "title": artifact.title,
+                "updated_by": "user",
+                "renamed": True,
+            },
+        )
+        await self._record_audit(
+            principal,
+            action="agent.artifact_renamed",
             run_id=run_id,
             detail={
                 "artifact_id": artifact_id,

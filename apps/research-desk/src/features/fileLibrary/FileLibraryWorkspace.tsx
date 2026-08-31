@@ -48,7 +48,11 @@ import { useIndexingJobApi } from './useIndexingJobApi'
 import { useAssetDeletionApi } from './useAssetDeletionApi'
 import { resolveVectorIndexDeletionRoute } from './vectorIndexDeletion'
 import { Rail } from './Rail'
-import { ServerCollectionPanel, type ServerCollectionJobState } from './ServerCollectionPanel'
+import {
+  prefetchServerCollectionDocuments,
+  ServerCollectionPanel,
+  type ServerCollectionJobState,
+} from './ServerCollectionPanel'
 import { useEmbeddingQuota } from '@/features/quota/useEmbeddingQuota'
 import { IndexBar } from './IndexBar'
 import { AddDocsPanel } from './AddDocsPanel'
@@ -2111,6 +2115,15 @@ export function FileLibraryWorkspace({
         onSelectCollection={(sectionId) => selectActiveTarget({ kind: 'collection', sectionId })}
         onSelectIndex={(indexId) => selectActiveTarget({ indexId, kind: 'index' })}
         onSelectServerCollection={(collectionId) => selectActiveTarget({ collectionId, kind: 'server-collection' })}
+        onPrefetchServerCollection={knowledgeSync
+          ? (collectionId) => {
+              void prefetchServerCollectionDocuments(
+                collectionId,
+                knowledgeSync,
+                deletionScopeKey,
+              ).catch(() => undefined)
+            }
+          : undefined}
         query={query}
         serverCollections={railServerCollections.map((collection) => ({
           access: collection.access,
@@ -2311,9 +2324,13 @@ export function FileLibraryWorkspace({
           </div>
         ) : null}
 
+        {/* Local targets are reducer snapshots and switch directly. The only
+            genuinely asynchronous target, a server collection, owns a delayed
+            body fallback inside ServerCollectionPanel. */}
         {active.kind === 'server-collection' && activeServerCollection && knowledgeSync ? (
           <ServerCollectionPanel
             assets={assets}
+            cacheScopeKey={deletionScopeKey}
             collection={activeServerCollection}
             deletionOperations={deletionApi.operations}
             ensureAssetBodiesLoaded={ensureAssetBodiesLoaded}

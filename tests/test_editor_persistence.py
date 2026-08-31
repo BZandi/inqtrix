@@ -490,6 +490,131 @@ async def test_comment_delete_and_document_cascade(service) -> None:
 
 
 @pytest.mark.asyncio
+async def test_assistant_edit_carrier_draft_keeps_its_edit_position(service) -> None:
+    """Ein Assistentenlauf braucht eine Traegerzeile und die Einfuegeart.
+
+    Der Waechter laesst eine assistant-Veroeffentlichung nur zu, wenn ein
+    creator-privater Entwurf genau dieses patch_id/command_id vorher
+    autorisiert hat, und ein Entwurf kann nur an einer Kommentarzeile
+    haengen. Ein Assistentenlauf hat keinen Kommentar des Nutzers, also
+    legt er eine eigene Zeile der Art ``assistant_edit`` an.
+
+    Der Entwurf muss dabei ``edit_position`` und ``anchor_text`` tragen:
+    ohne sie faellt der Uebernahmepfad auf "ersetzen" zurueck, und aus
+    "nach dem Anker einfuegen" wird "den Anker ersetzen" -- stiller
+    Textverlust im Dokument des Nutzers.
+    """
+    await _save_doc(
+        service,
+        document_id="ed_assistant_carrier",
+        caller_user_id=USER_A,
+        created_at=1.0,
+    )
+    store = service.store
+    document = await store.get_document("ed_assistant_carrier")
+    store._documents[document.id] = replace(  # type: ignore[attr-defined]
+        document,
+        content_mode="collaboration",
+        collaboration_generation=1,
+        collaboration_schema_version=1,
+        collaboration_schema_hash="0" * 64,
+    )
+    await service.save_comments(
+        document.id,
+        comments=[
+            {
+                **_comment("edc_carrier", created_at=2.0),
+                "kind": "assistant_edit",
+            }
+        ],
+        visible_to=_scoped(USER_A),
+    )
+
+    created = await service.save_comment_suggestion_draft(
+        document.id,
+        "edc_carrier",
+        expected_revision=0,
+        payload={
+            "anchor_text": "Der Ankersatz.",
+            "anchor_version": 1,
+            "change_summary": [],
+            "edit_position": "after",
+            "evidence": None,
+            "group_id": "editor-suggestion-group-carrier",
+            "patch_id": "77777777-7777-4777-8777-777777777777",
+            "proposed_text": "Ein eingefuegter Satz.",
+            "publication_command_id": "88888888-8888-4888-8888-888888888888",
+            "suggestion_id": "editor-suggestion-carrier",
+            "warnings": [],
+        },
+        visible_to=_scoped(USER_A),
+    )
+
+    assert created.edit_position == "after"
+    assert created.anchor_text == "Der Ankersatz."
+
+    # Servergegenlesung: die Angaben ueberleben den Speicher-Rundlauf,
+    # denn genau darauf stuetzt sich der Uebernahmepfad nach einem Neuladen.
+    [carrier], _ = await service.list_comments(
+        document.id,
+        limit=50,
+        after=None,
+        visible_to=_scoped(USER_A),
+    )
+    assert carrier.kind == "assistant_edit"
+    assert carrier.suggestion_draft is not None
+    assert carrier.suggestion_draft.edit_position == "after"
+    assert carrier.suggestion_draft.anchor_text == "Der Ankersatz."
+
+
+@pytest.mark.asyncio
+async def test_suggestion_draft_rejects_an_unknown_edit_position(service) -> None:
+    """Gegenprobe: die Angabe ist eine geschlossene Menge, kein freier String."""
+    await _save_doc(
+        service,
+        document_id="ed_bad_position",
+        caller_user_id=USER_A,
+        created_at=1.0,
+    )
+    store = service.store
+    document = await store.get_document("ed_bad_position")
+    store._documents[document.id] = replace(  # type: ignore[attr-defined]
+        document,
+        content_mode="collaboration",
+        collaboration_generation=1,
+        collaboration_schema_version=1,
+        collaboration_schema_hash="0" * 64,
+    )
+    await service.save_comments(
+        document.id,
+        comments=[
+            {**_comment("edc_bad", created_at=2.0), "kind": "assistant_edit"}
+        ],
+        visible_to=_scoped(USER_A),
+    )
+
+    with pytest.raises(EditorValidationError):
+        await service.save_comment_suggestion_draft(
+            document.id,
+            "edc_bad",
+            expected_revision=0,
+            payload={
+                "anchor_version": 1,
+                "change_summary": [],
+                "edit_position": "sideways",
+                "evidence": None,
+                "group_id": "editor-suggestion-group-bad",
+                "patch_id": "99999999-9999-4999-8999-999999999999",
+                "proposed_text": "x",
+                "publication_command_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "suggestion_id": "editor-suggestion-bad",
+                "warnings": [],
+            },
+            visible_to=_scoped(USER_A),
+        )
+
+
+@pytest.mark.asyncio
 async def test_private_suggestion_draft_revision_privacy_and_cleanup(service) -> None:
     """A private AI draft survives reads but never crosses creator scope."""
     await _save_doc(

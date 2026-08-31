@@ -808,6 +808,28 @@ describe('editor schema gate', () => {
     )).toThrow(UnsupportedSuggestionStructureError)
   })
 
+  it('rejects an attribute-only node change in suggest mode (P5 pin)', () => {
+    // A code-block language switch is a pure AttrStep: the upstream
+    // transform cannot represent it as a trackable suggestion, so the
+    // guard must reject it hard — the UI therefore DISABLES the picker
+    // in suggest mode instead of surfacing this error to the user.
+    const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
+    const document = schema.node('doc', null, [
+      schema.node('codeBlock', { language: 'python' }, schema.text('print(1)')),
+    ])
+    const state = EditorState.create({ schema, doc: document })
+    const attrsOnly = state.tr.setNodeMarkup(0, undefined, {
+      language: 'typescript',
+    })
+    expect(attrsOnly.docChanged).toBe(true)
+    expect(() => transformToInqtrixSuggestionTransaction(
+      attrsOnly,
+      state,
+      { authorId: 'user-1', createdAt: 5, patchId: 'patch-attrs-only' },
+      () => 'suggestion-attrs-only',
+    )).toThrow(UnsupportedSuggestionStructureError)
+  })
+
   it('rejects block suggestion JSON instead of lossy Yjs round-tripping it', () => {
     const schema = getSchema(createEditorSchemaExtensions({ enableUndoRedo: false }))
     const insertion = schema.marks.insertion

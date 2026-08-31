@@ -28,13 +28,16 @@ from inqtrix.agents.control_ports import (
     ArtifactNotFound,
     ArtifactRevisionConflict,
     ClarificationNotFound,
+    artifact_event_payload,
 )
 from inqtrix.agents.kernel.deps import kernel_deps, run_coro
+from inqtrix.agents.artifact_names import NAMED_ARTIFACT_KINDS
 from inqtrix.agents.kernel.interrupts import (
     ask_user_clarification_id,
     deliverable_artifact_id as _deliverable_artifact_id,
 )
 from inqtrix.agents.markdown import normalize_agent_markdown
+from inqtrix.execution_authority import inherited_knowledge_filters
 from inqtrix.agents.report_quality import unknown_citation_labels
 from inqtrix.agents.phase_models import (
     ClarificationOptionModel,
@@ -62,6 +65,33 @@ SKILL_LOADED_MARKER = "[skill_geladen:{skill_id}@{revision}]"
 The algorithm reconstructs activated skills from these markers in the
 checkpointed transcript at segment start — a restriction acquired
 before a park must survive the resume (never a security hole)."""
+
+EDITOR_READ_MARKER = "[editor_gelesen:{document_id}@{revision}]"
+"""Machine-readable first line of a successful editor read/search
+result (P7-E1). The algorithm reconstructs the run's read receipts from
+these markers at segment start (producing-tool check, like the skill
+markers) — a receipt lost to a corrupt marker only forces a re-read,
+so reconstruction skips instead of aborting."""
+
+EDITOR_READ_TOOLS: tuple[str, ...] = (
+    "read_editor_document",
+    "search_editor_document",
+)
+"""The two receipt-producing editor read tools — the ONLY ToolMessage
+names the receipt reconstruction trusts (a marker-shaped line relayed
+by any other tool must never mint a receipt)."""
+
+_EDITOR_SEARCH_MAX_MATCHES = 5
+"""Matches rendered per search — further hits are COUNTED visibly in
+the result line, never silently dropped (rule 9b)."""
+
+_EDITOR_SEARCH_CONTEXT_CHARS = 80
+"""Original-markdown context window per match side; doubles as the
+quote_before/quote_after candidate length."""
+
+_EDITOR_SEARCH_QUERY_MAX = 300
+"""Hard query-length bound for the in-document search — named in the
+tool docstring, refused visibly when exceeded."""
 
 DELIVERABLE_KINDS = ("memo", "email", "talking_points", "generic")
 """Format hints a kernel canvas deliverable may carry
@@ -165,6 +195,63 @@ def _offload_bulky_result(
         # digest head.
         parts.append(f"Statushinweise (vollstaendig):\n{status_lines}")
     return "\n\n".join(parts)
+
+
+def broken_off_child_body(
+    notice: str,
+    *,
+    text: str,
+    source_lines: str,
+    rename_note: str = "",
+) -> str:
+    """Compose what a subtask that stopped early hands to its parent.
+
+    The break-off is stated FIRST and unconditionally: a partial result
+    must never read like a finished one. What follows is only what the
+    child actually produced — nothing to salvage says so plainly rather
+    than presenting an empty stretch as a result.
+    """
+    if not text and not source_lines:
+        return (
+            f"{notice} Es liegt kein Teilergebnis vor. Beruecksichtige "
+            "die Luecke in der Antwort."
+        )
+    parts = [
+        f"{notice} Das folgende TEILERGEBNIS ist unvollstaendig — "
+        "behandle es als Zwischenstand, benenne die Luecke in der "
+        "Antwort und stelle es nie als fertiges Ergebnis dar."
+    ]
+    if text:
+        parts.append(text)
+    if rename_note:
+        parts.append(rename_note)
+    if source_lines:
+        parts.append(f"Quellen:\n{source_lines}")
+    return "\n\n".join(parts)
+
+
+def _merged_refs(
+    existing: list[dict[str, Any]],
+    added: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The document's sources plus the new ones, in first-seen order.
+
+    Identity is ``reference_id`` — the content hash of the citation, so
+    the same source resolved twice stays one entry and its label does not
+    change under the reader. A source already on the document keeps its
+    original row: a re-read that produced a thinner row must not
+    overwrite the richer one it already has.
+    """
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for ref in [*existing, *added]:
+        key = str(ref.get("reference_id") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        merged.append(dict(ref))
+    return merged
 
 
 def _ref_note(ref: dict[str, Any]) -> str:
@@ -358,6 +445,65 @@ except ImportError as _exc:  # pragma: no cover - env-dependent
     _AGENT_EXTRA_ERROR = _exc
 
 
+def _editor_search_matches(
+    content: str, query: str
+) -> tuple[list[dict[str, Any]], int]:
+    """Whitespace-tolerant search mapped back to the ORIGINAL markdown.
+
+    Mirrors the frontend anchor index (anchoring.ts): every whitespace
+    run folds to one space for MATCHING, while a positions array maps
+    each folded character back to its original offset — so a hit is
+    returned as the EXACT original slice (a byte-true ``find`` candidate
+    the server-side anchor resolver matches literally), plus original
+    context windows as quote candidates. Case-sensitive by design, like
+    both anchor resolvers. Returns (rendered matches, total count) —
+    the caller names the not-rendered remainder visibly.
+    """
+    positions: list[int] = []
+    folded_chars: list[str] = []
+    for offset, char in enumerate(content):
+        folded = " " if char.isspace() else char
+        if folded == " " and (not folded_chars or folded_chars[-1] == " "):
+            continue
+        folded_chars.append(folded)
+        positions.append(offset)
+    haystack = "".join(folded_chars)
+    needle_chars: list[str] = []
+    for char in query:
+        folded = " " if char.isspace() else char
+        if folded == " " and (not needle_chars or needle_chars[-1] == " "):
+            continue
+        needle_chars.append(folded)
+    needle = "".join(needle_chars).rstrip()
+    if not needle:
+        return [], 0
+    matches: list[dict[str, Any]] = []
+    total = 0
+    start = 0
+    while True:
+        index = haystack.find(needle, start)
+        if index < 0:
+            break
+        total += 1
+        if len(matches) < _EDITOR_SEARCH_MAX_MATCHES:
+            begin = positions[index]
+            end = positions[index + len(needle) - 1] + 1
+            matches.append(
+                {
+                    "find": content[begin:end],
+                    "quote_before": content[
+                        max(0, begin - _EDITOR_SEARCH_CONTEXT_CHARS):begin
+                    ],
+                    "quote_after": content[
+                        end:end + _EDITOR_SEARCH_CONTEXT_CHARS
+                    ],
+                    "offset": begin,
+                }
+            )
+        start = index + 1
+    return matches, total
+
+
 def build_kernel_tools() -> list[Any]:
     """The kernel's tool list (M2 steps 5-6).
 
@@ -481,10 +627,17 @@ def build_kernel_tools() -> list[Any]:
                 "Der Nutzer hat nicht geantwortet. Arbeite mit der "
                 f"Annahme weiter: {record.default_assumption or 'keine'}."
             )
-        return "\n".join(
+        transcript = "\n".join(
             f"Frage: {prompt}\nAntwort des Nutzers: {answer}"
             for prompt, answer in lines
         )
+        # The model gets this back as the tool result, but the coverage
+        # judge only ever saw the ORIGINAL question — so a gap the user
+        # had just closed kept being reported as open (F-P14-02). Record
+        # it on the run. Deduped because the tool re-executes on resume.
+        if transcript not in deps.clarified_answers:
+            deps.clarified_answers.append(transcript)
+        return transcript
 
     @tool
     def search_project_knowledge(
@@ -495,8 +648,11 @@ def build_kernel_tools() -> list[Any]:
         """Durchsuche die Wissensdatenbank des Nutzers (interne Dokumente).
 
         Nutze dieses Werkzeug fuer Fakten aus den hinterlegten Projekt-
-        Dokumenten. Mit collection_ids suchst du gezielt in bestimmten
-        Sammlungen; ohne Angabe projektweit in allem Sichtbaren.
+        Dokumenten. OHNE collection_ids durchsuchst du genau die
+        Sammlungen, die dieser Lauf freigegeben hat (Liste "Freigegebene
+        Wissens-Sammlungen" in deinem Auftrag) - nicht zwingend alles,
+        was im Projekt existiert. Mit collection_ids verengst du
+        innerhalb dieser Freigabe.
 
         Args:
             query: Die Suchanfrage in natuerlicher Sprache.
@@ -539,6 +695,20 @@ def build_kernel_tools() -> list[Any]:
             else ""
         )
         if not output.hits:
+            # P10-K4: "nothing indexed" and "nothing matched" are
+            # different answers and must read differently — the model
+            # otherwise keeps rephrasing queries against an empty store.
+            if any(
+                getattr(warning, "code", "") == "knowledge.no_collections"
+                for warning in getattr(output, "warnings", [])
+            ):
+                return (
+                    "Dieser Lauf hat KEINE Wissenssammlung im Zugriff — die "
+                    "Wissensdatenbank ist leer oder fuer dich nicht "
+                    "freigegeben. Weitere Suchanfragen aendern daran "
+                    "nichts; sage das offen und nutze eine andere Quelle "
+                    "oder frage nach einer Sammlung."
+                )
             return (
                 f"Keine Treffer in der Wissensdatenbank fuer: {query}"
                 + warning_block
@@ -623,15 +793,15 @@ def build_kernel_tools() -> list[Any]:
         """Fuehre EINE schnelle Websuche mit externer Quelle aus.
 
         Nutze dieses Werkzeug fuer aktuelle oder externe Fakten, die
-        nicht in der Wissensdatenbank stehen. Uebergib eine praezise
-        SUCHQUERY, keine Gespraechsfrage: die wichtigsten Entitaeten
-        und Schluesselwoerter, EIN Suchziel, ohne Fuellwoerter; einen
-        Zeitbezug (Jahr, "aktuell") nur bei Aktualitaetsfragen. Die
-        Query wird dem Nutzer im Standard-Modus woertlich zur Freigabe
+        nicht in der Wissensdatenbank stehen. Uebergib GENAU EINE
+        eigenstaendige, natuerlich formulierte Evidenzfrage mit
+        Gegenstand, Region (falls relevant), Zeitraum und gesuchter
+        Evidenz — keine Keyword-Kette, kein Gespraechston. Die Frage
+        wird dem Nutzer im Standard-Modus woertlich zur Freigabe
         angezeigt und exakt so gesucht.
 
         Args:
-            query: Die konkrete Suchquery (Keywords, ein Suchziel).
+            query: Die eine eigenstaendige Evidenzfrage.
 
         Returns:
             Antworttext der Suche plus Quellenliste (URL, Titel).
@@ -678,6 +848,7 @@ def build_kernel_tools() -> list[Any]:
         artifact_id: str = "",
         expected_revision: int = 0,
         reference_ids: list[str] | None = None,
+        replace_references: bool = False,
     ) -> str:
         """Schreibe oder aktualisiere ein Canvas-Dokument fuer den Nutzer.
 
@@ -697,8 +868,14 @@ def build_kernel_tools() -> list[Any]:
                 Revision des Dokuments (>= 1).
             reference_ids: Die vom Lese-/Recherchewerkzeug gelieferten
                 Beleg-Ids, die dieses Dokument tatsaechlich verwendet.
-                Bei Updates bewahrt ein weggelassenes Feld die bisherigen
-                Belege; eine explizite leere Liste entfernt sie.
+                Bei einem UPDATE werden sie zu den bisherigen Belegen
+                HINZUGEFUEGT — du musst die schon vorhandenen also nicht
+                wiederholen. Weggelassen aendert die Belegliste gar nicht.
+            replace_references: Nur bei Update, nur wenn die Belegliste
+                bewusst neu gesetzt werden soll: dann ERSETZEN die
+                uebergebenen reference_ids die bisherigen vollstaendig
+                (leere Liste = alle Belege entfernen). Ohne diese Angabe
+                geht kein Beleg verloren.
 
         Returns:
             Bestaetigung mit artifact_id und neuer Revision.
@@ -730,13 +907,24 @@ def build_kernel_tools() -> list[Any]:
                 )
             except ArtifactNotFound:
                 return f"Canvas-Dokument nicht gefunden: {artifact_id}."
-            if current.kind != "deliverable":
-                return f"Canvas-Dokument nicht gefunden: {artifact_id}."
+            if current.kind not in NAMED_ARTIFACT_KINDS:
+                # NAMED_ARTIFACT_KINDS is already THE definition of "this
+                # artifact is a file": it decides what gets a file name,
+                # a file row in the transcript and a canvas tab. A
+                # document the user can open must therefore also be a
+                # document the agent can continue — whichever engine
+                # wrote it. Everything else (evidence bundles, context
+                # archives, the answer record) is machinery, not a file.
+                return (
+                    f"Das Artefakt {artifact_id} ist kein Dokument "
+                    f"(Art: {current.kind}) und laesst sich nicht "
+                    "ueberschreiben."
+                )
         if reference_ids is None and current is not None:
             refs = [dict(ref) for ref in current.refs]
         else:
             try:
-                refs = deps.resolve_reference_ids(list(reference_ids or []))
+                resolved = deps.resolve_reference_ids(list(reference_ids or []))
             except ValueError as exc:
                 log.warning(
                     "write_canvas mit unbekanntem Beleg "
@@ -745,6 +933,17 @@ def build_kernel_tools() -> list[Any]:
                     type(exc).__name__,
                 )
                 return f"Belegfehler: {exc}. Lies oder recherchiere erneut."
+            if current is not None and not replace_references:
+                # An update ADDS to the source list (Betreiber-Entscheid
+                # 2026-08-30). A model that fact-checks one paragraph and
+                # passes only the newly found source used to delete every
+                # source the document already carried — silently, because
+                # the write itself succeeds. Losing a citation is the
+                # worst failure this layer has, so it now takes an
+                # explicit replace_references to drop one.
+                refs = _merged_refs(current.refs, resolved)
+            else:
+                refs = resolved
         target_id = artifact_id or _deliverable_artifact_id(
             deps.run_id, tool_call_id
         )
@@ -776,9 +975,18 @@ def build_kernel_tools() -> list[Any]:
             record = run_coro(
                 deps.control.upsert_artifact(
                     run_id=deps.run_id,
-                    kind="deliverable",
+                    # An update keeps the kind it already had: continuing
+                    # a document must not silently reclassify it, and the
+                    # id rule differs per kind (one memo per session
+                    # against one deliverable per creation).
+                    kind=current.kind if current is not None else "deliverable",
                     session_id=deps.session_id or None,
-                    title=title,
+                    # The name belongs to the DOCUMENT: an update keeps
+                    # it, the same rule the mission follows. Renaming is
+                    # an explicit user action, not a side effect of
+                    # writing new content — otherwise every turn could
+                    # silently re-label a file the user had named.
+                    title=current.title if current is not None else title,
                     status="ready",
                     content_markdown=normalized_markdown,
                     payload={"deliverable_kind": deliverable_kind},
@@ -818,18 +1026,105 @@ def build_kernel_tools() -> list[Any]:
             ARTIFACT_CREATED_EVENT
             if record.revision == 1
             else ARTIFACT_UPDATED_EVENT,
-            {
-                "artifact_id": record.artifact_id,
-                "kind": "deliverable",
-                "revision": record.revision,
-                "title": record.title,
-            },
+            artifact_event_payload(record),
         )
         verb = "erstellt" if record.revision == 1 else "aktualisiert"
+        # Never silent: if the model asked for a different name on an
+        # update, say that the name stayed and who may change it.
+        renamed_note = (
+            ""
+            if current is None or title.strip() == current.title
+            else (
+                f" Der Name bleibt '{record.title}' — umbenennen kann "
+                "ihn nur der Nutzer."
+            )
+        )
         return (
-            f"Canvas-Dokument '{title}' {verb} "
+            f"Canvas-Dokument '{record.title}' {verb} "
             f"(artifact_id {record.artifact_id}, Revision "
-            f"{record.revision})."
+            f"{record.revision}).{renamed_note}"
+        )
+
+    @tool
+    def read_research_report(report_id: str) -> str:
+        """Lies einen angehaengten Recherche-Bericht aus dem Research Desk.
+
+        Nutze dieses Werkzeug fuer jeden Bericht, der im Abschnitt
+        "Angehaengte Recherche-Berichte" der Aufgabenstellung genannt ist —
+        der Text steht NICHT in der Nachricht, du musst ihn holen.
+
+        Die Quellen des Berichts werden dabei in die Belege dieses Laufs
+        uebernommen und bekommen eigene [W#]/[K#]-Label; die Label im
+        zurueckgegebenen Text sind bereits darauf uebersetzt. Zitiere also
+        genau die Label, die du hier liest, und haenge die passenden
+        ``reference_id``-Werte an ``write_canvas``.
+
+        Args:
+            report_id: Die Lauf-Id aus der Berichtsliste der Aufgabe.
+
+        Returns:
+            Titel, Stand und vollstaendiger Berichtstext mit uebersetzten
+            Belege-Labels sowie die zugehoerigen Beleg-Ids.
+        """
+        blocked = _require_allowed("read_research_report")
+        if blocked:
+            return blocked
+        deps = kernel_deps()
+        wanted = str(report_id or "").strip()
+        # Only what the USER attached to this run. Without this the model
+        # could read any run id it can see — the attachment is the
+        # consent, not the visibility.
+        if wanted not in set(deps.attached_report_ids or ()):
+            attached = ", ".join(deps.attached_report_ids or ()) or "(keine)"
+            return (
+                f"Der Bericht {wanted or '(leer)'} ist diesem Auftrag nicht "
+                f"angehaengt. Angehaengt sind: {attached}."
+            )
+        store = getattr(deps.run_service, "run_store", None)
+        if store is None:
+            return "Recherche-Berichte sind in dieser Instanz nicht lesbar."
+        try:
+            summary = store.get(wanted, visible_to=deps.visible_to)
+            payload = store.result(wanted, visible_to=deps.visible_to)
+        except Exception as exc:  # noqa: BLE001 — a visible tool error
+            log.warning(
+                "read_research_report fehlgeschlagen (run=%s, error_type=%s).",
+                deps.run_id,
+                type(exc).__name__,
+            )
+            return f"Bericht {wanted} ist nicht lesbar: {type(exc).__name__}."
+        status = str(summary.get("status") or "")
+        if status != "completed":
+            return (
+                f"Bericht {wanted} ist noch nicht fertig (Status: "
+                f"{status or 'unbekannt'}) und hat keinen Text."
+            )
+        body = str(payload.get("answer") or "").strip()
+        if not body:
+            return f"Bericht {wanted} enthaelt keinen Text."
+        references = [
+            dict(ref) for ref in (payload.get("references") or [])
+        ]
+        # The SAME merge the child-run path uses: register the report's
+        # references in this run's ledger and translate the labels in the
+        # text. The model is never handed a mapping — a verbatim-copied
+        # [E3] would be invisible to the citation check, and a copied
+        # [W3] would silently resolve to a DIFFERENT source.
+        body, rename_note, source_lines = _merge_child_evidence(
+            body, references
+        )
+        # A report has no title of its own (no H1 anywhere in the corpus):
+        # the run's question is what the UI shows, so it is the name here.
+        title = str(summary.get("question") or wanted).strip()
+        fenced = _untrusted_fence(body, "recherche-bericht")
+        text = (
+            f"Recherche-Bericht {wanted}\nTitel: {title}\n"
+            f"Quellen im Bericht: {len(references)}\n\n"
+            f"{fenced}{rename_note}"
+            + (f"\n\nBelege:\n{source_lines}" if source_lines else "")
+        )
+        return _offload_bulky_result(
+            text, tool="read_research_report", reference_lines=source_lines
         )
 
     @tool
@@ -916,6 +1211,166 @@ def build_kernel_tools() -> list[Any]:
             f"{record.content_markdown}\n\nBelege:\n{ref_lines}"
         )
 
+    def _editor_target_block(document_id: str) -> str | None:
+        """Visible refusal when the run targets a DIFFERENT document."""
+        deps = kernel_deps()
+        target = deps.target_document_id
+        if target and document_id != target:
+            return (
+                f"Werkzeug-Fehler (editor.wrong_target): Dieser Auftrag "
+                f"zielt auf das Editor-Dokument {target} — arbeite nur "
+                f"mit diesem Dokument, nicht mit {document_id}."
+            )
+        return None
+
+    @tool
+    def read_editor_document(document_id: str) -> str:
+        """Lies ein Editor-Dokument des Nutzers vollstaendig.
+
+        Pflicht VOR jedem propose_editor_patch: erst lesen, dann
+        vorschlagen — ein Vorschlag ohne vorheriges Lesen wird
+        abgelehnt. Die Ausgabe nennt die aktuelle Revision; sie wird
+        beim Vorschlagen serverseitig gegen den dann aktuellen Stand
+        geprueft. Inhalte ueber 20000 Zeichen werden sichtbar gekuerzt
+        — nutze search_editor_document fuer exakte Ankerstellen.
+
+        Args:
+            document_id: Das Editor-Dokument.
+
+        Returns:
+            Titel, Revision, Inhalt (als Daten abgegrenzt) und offene
+            Kommentare des Dokuments.
+        """
+        blocked = _require_allowed("read_editor_document")
+        if blocked:
+            return blocked
+        blocked = _editor_target_block(document_id)
+        if blocked:
+            return blocked
+        output = _invoke_capability(
+            "editor.document.read", {"document_id": document_id}
+        )
+        if isinstance(output, str):
+            return output
+        deps = kernel_deps()
+        deps.editor_read_receipts[output.id] = int(output.revision)
+        marker = EDITOR_READ_MARKER.format(
+            document_id=output.id, revision=output.revision
+        )
+        text = output.content_markdown
+        if len(text) > _DOCUMENT_TEXT_LIMIT:
+            text = (
+                text[:_DOCUMENT_TEXT_LIMIT]
+                + "\n\n[... Dokument fuer die Anzeige gekuerzt — nutze "
+                "search_editor_document fuer exakte Stellen ...]"
+            )
+        open_comments = [
+            comment
+            for comment in output.comments
+            if getattr(comment, "status", "") == "open"
+        ]
+        comment_lines = "\n".join(
+            f"- [{comment.kind}] {comment.comment_markdown}"
+            for comment in open_comments
+        )
+        comment_block = (
+            "\n\nOffene Kommentare:\n"
+            + _untrusted_fence(comment_lines, "editor")
+            if comment_lines
+            else ""
+        )
+        # Editor content is FENCED (unlike read_canvas): a shared or
+        # collaborative document can carry other people's insertions —
+        # data, never instructions.
+        return (
+            f"{marker}\n"
+            f"Editor-Dokument: {output.title}\n"
+            f"document_id: {output.id}\n"
+            f"revision: {output.revision}\n\n"
+            f"{_untrusted_fence(text, 'editor')}"
+            f"{comment_block}"
+        )
+
+    @tool
+    def search_editor_document(document_id: str, query: str) -> str:
+        """Finde exakte Ankerstellen in einem Editor-Dokument.
+
+        Die Suche ist whitespace-tolerant (Zeilenumbrueche und
+        Mehrfach-Leerzeichen im Suchtext sind egal), liefert aber je
+        Treffer den BYTE-GENAUEN Original-Markdown-Ausschnitt als
+        ``find``-Kandidaten plus Original-Kontext als quote_before/
+        quote_after-Kandidaten — uebernimm diese Werte unveraendert in
+        propose_editor_patch, dann verankert der Server exakt. Grenzen:
+        Suchtext maximal 300 Zeichen; hoechstens 5 Treffer werden
+        gezeigt, weitere werden gezaehlt genannt.
+
+        Args:
+            document_id: Das Editor-Dokument.
+            query: Der zu findende Text (2 bis 300 Zeichen).
+
+        Returns:
+            Trefferliste mit exakten find-/quote-Kandidaten und der
+            aktuellen Revision.
+        """
+        blocked = _require_allowed("search_editor_document")
+        if blocked:
+            return blocked
+        blocked = _editor_target_block(document_id)
+        if blocked:
+            return blocked
+        query = str(query or "")
+        if len(query.strip()) < 2:
+            return (
+                "Werkzeug-Fehler (editor.search_query_invalid): Der "
+                "Suchtext braucht mindestens 2 Zeichen."
+            )
+        if len(query) > _EDITOR_SEARCH_QUERY_MAX:
+            return (
+                "Werkzeug-Fehler (editor.search_query_invalid): Der "
+                f"Suchtext ist auf {_EDITOR_SEARCH_QUERY_MAX} Zeichen "
+                "begrenzt."
+            )
+        output = _invoke_capability(
+            "editor.document.read", {"document_id": document_id}
+        )
+        if isinstance(output, str):
+            return output
+        deps = kernel_deps()
+        deps.editor_read_receipts[output.id] = int(output.revision)
+        marker = EDITOR_READ_MARKER.format(
+            document_id=output.id, revision=output.revision
+        )
+        matches, total = _editor_search_matches(
+            output.content_markdown, query
+        )
+        if not matches:
+            return (
+                f"{marker}\n"
+                f"Keine Treffer fuer den Suchtext in Dokument "
+                f"{output.id} (Revision {output.revision})."
+            )
+        rendered = []
+        for index, match in enumerate(matches, start=1):
+            rendered.append(
+                f"Treffer {index} (Offset {match['offset']}):\n"
+                f"find: {match['find']!r}\n"
+                f"quote_before: {match['quote_before']!r}\n"
+                f"quote_after: {match['quote_after']!r}"
+            )
+        more = (
+            f"\n\n{total - len(matches)} weitere Treffer nicht gezeigt "
+            "— praezisiere den Suchtext."
+            if total > len(matches)
+            else ""
+        )
+        return (
+            f"{marker}\n"
+            f"{total} Treffer in Dokument {output.id} "
+            f"(Revision {output.revision}):\n\n"
+            + _untrusted_fence("\n\n".join(rendered), "editor")
+            + more
+        )
+
     @tool
     def propose_editor_patch(
         document_id: str,
@@ -925,11 +1380,16 @@ def build_kernel_tools() -> list[Any]:
         """Schlage Aenderungen an einem Editor-Dokument des Nutzers vor.
 
         Der Vorschlag wird NIE direkt angewendet — der Nutzer prueft ihn
-        als nachverfolgbare Aenderung im Editor. Jede Aenderung ist ein
-        verankertes Edit-Objekt mit den Feldern: position (replace |
-        before | after | append), find (zu ersetzender/ankernder Text),
-        text (neuer Text), optional quote_before/quote_after (Anker-
-        Kontext) und note (Begruendung).
+        als nachverfolgbare Aenderung im Editor. Voraussetzung: du hast
+        das Dokument in DIESEM Lauf mit read_editor_document oder
+        search_editor_document gelesen — ungelesene Ziele werden
+        abgelehnt, und bei zwischenzeitlicher Aenderung des Dokuments
+        wird der Vorschlag mit einem Revisionskonflikt zurueckgewiesen
+        (dann erneut lesen). Jede Aenderung ist ein verankertes
+        Edit-Objekt mit den Feldern: position (replace | before | after
+        | append), find (zu ersetzender/ankernder Text, exakt wie im
+        Dokument), text (neuer Text), optional quote_before/quote_after
+        (Anker-Kontext) und note (Begruendung).
 
         Args:
             document_id: Das Ziel-Dokument im Editor.
@@ -942,12 +1402,27 @@ def build_kernel_tools() -> list[Any]:
         blocked = _require_allowed("propose_editor_patch")
         if blocked:
             return blocked
+        blocked = _editor_target_block(document_id)
+        if blocked:
+            return blocked
+        deps = kernel_deps()
+        receipt = deps.editor_read_receipts.get(document_id)
+        if receipt is None:
+            # Read-before-propose is ENFORCED, not a prompt rule: a
+            # patch anchored against unseen text is a guess.
+            return (
+                "Werkzeug-Fehler (editor.read_required): Lies das "
+                f"Dokument {document_id} zuerst mit read_editor_document "
+                "oder search_editor_document — erst lesen, dann "
+                "vorschlagen."
+            )
         output = _invoke_capability(
             "editor.patch.propose",
             {
                 "document_id": document_id,
                 "edits": edits,
                 "summary": summary,
+                "expected_revision": receipt,
             },
         )
         if isinstance(output, str):
@@ -1007,6 +1482,18 @@ def build_kernel_tools() -> list[Any]:
                 # on the default stack's models/search.
                 resolve_payload["stack"] = deps.stack_name
             resolved_child = deps.resolver.resolve(resolve_payload)
+            # Children inherit the parent's PINNED knowledge boundary,
+            # exactly as they inherit its provider stack above.
+            resolved_child.knowledge_filters.update(
+                inherited_knowledge_filters(
+                    getattr(
+                        deps.capability_context,
+                        "knowledge_collection_ids",
+                        None,
+                    ),
+                    explicit=deps.knowledge_scope_explicit,
+                )
+            )
             try:
                 child = deps.run_service.submit(
                     question=question,
@@ -1098,6 +1585,75 @@ def build_kernel_tools() -> list[Any]:
         )
         return answer, rename_note, source_lines
 
+    def _broken_off_child_report(
+        child_id: str, *, mode: str, reason: str
+    ) -> str:
+        """What a subtask that stopped early still hands up.
+
+        A child that broke off may already have produced evidence — web
+        searches it ran, sources it read, a partial draft. That work
+        belongs to the parent: it was paid for, and the parent is about
+        to answer without it. Returning the error text alone threw it
+        away, and worse, left every one of those sources uncitable,
+        because their labels were never registered in the parent's
+        ledger.
+
+        The parent's own limit path already does this right: it keeps
+        the evidence and says plainly that the synthesis is incomplete.
+        This is the same contract one level down. The break-off is
+        stated FIRST and unconditionally — a partial result must never
+        read like a finished one.
+        """
+        deps = kernel_deps()
+        store = deps.run_service.run_store
+        notice = f"Der Unterauftrag ({mode}) ist fehlgeschlagen: {reason}."
+        try:
+            stored_result = store.result(child_id, visible_to=deps.visible_to)
+        except Exception as exc:  # noqa: BLE001 — absence is a normal end
+            log.info(
+                "Kind-Run %s hat kein abrufbares Teilergebnis "
+                "(error_type=%s).",
+                child_id,
+                type(exc).__name__,
+            )
+            return (
+                f"{notice} Es liegt kein Teilergebnis vor. Beruecksichtige "
+                "die Luecke in der Antwort."
+            )
+
+        raw_ledger = stored_result.get("web_search_ledger")
+        if isinstance(raw_ledger, dict):
+            deps.register_web_search_ledger(raw_ledger)
+        text = str(stored_result.get("answer", "") or "").strip()
+        references = [
+            dict(reference)
+            for reference in stored_result.get("references", []) or []
+            if isinstance(reference, dict)
+        ]
+        if isinstance(raw_ledger, dict) and references:
+            from inqtrix.evidence import attach_web_search_lineage
+
+            references = attach_web_search_lineage(references, raw_ledger)
+        if not text and not references:
+            return broken_off_child_body(notice, text="", source_lines="")
+
+        # Same evidence pipeline as a completed child: the labels are
+        # translated in the tool, so the parent can cite these sources
+        # like any other.
+        text, rename_note, source_lines = _merge_child_evidence(
+            text, references
+        )
+        return _offload_bulky_result(
+            broken_off_child_body(
+                notice,
+                text=_untrusted_fence(text, "unterauftrag") if text else "",
+                source_lines=source_lines,
+                rename_note=rename_note,
+            ),
+            tool=mode,
+            reference_lines=source_lines,
+        )
+
     def _child_report(
         child: dict[str, Any], *, mode: str, condensed: bool
     ) -> str:
@@ -1119,9 +1675,8 @@ def build_kernel_tools() -> list[Any]:
                 child_id,
                 child["status"],
             )
-            return (
-                f"Der Unterauftrag ({mode}) ist fehlgeschlagen: {reason}. "
-                "Beruecksichtige die Luecke in der Antwort."
+            return _broken_off_child_report(
+                child_id, mode=mode, reason=reason
             )
         stored_result = store.result(child_id, visible_to=deps.visible_to)
         raw_ledger = stored_result.get("web_search_ledger")
@@ -1554,7 +2109,10 @@ def build_kernel_tools() -> list[Any]:
         read_project_document,
         web_instant,
         read_canvas,
+        read_research_report,
         write_canvas,
+        read_editor_document,
+        search_editor_document,
         propose_editor_patch,
         run_web_research,
         run_deep_mission,

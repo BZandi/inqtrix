@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react'
-import { motion, useReducedMotion } from 'motion/react'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { AlertTriangle, Check, Info } from '@/components/icons'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
@@ -18,25 +18,27 @@ import {
  * the source panel's "Schritte" tab (after-the-fact review). One renderer so
  * the live run and the retained steps look identical (no redundancy).
  *
- * `animateIn` staggers each line on first paint (used live); the review tab
- * passes it false for a static list.
+ * Entry animation is presence-driven, not a prop: `AnimatePresence
+ * initial={false}` means the steps already present when this list first
+ * renders appear in place (a card mounting with history — opening the desk,
+ * or a reload where the server replays a run's steps), while a step that
+ * arrives later rises on its own. There is no stagger: a stagger only ever
+ * looked right for a burst, and a burst is exactly the case that should not
+ * animate at all.
  */
 export function KnowledgeStepList({
   steps,
   collectionCount,
   failed = false,
-  animateIn = true,
   variant = 'default',
 }: {
   steps: readonly KnowledgeRunStepRecord[]
   collectionCount: number
   failed?: boolean
-  animateIn?: boolean
   variant?: KnowledgeStepListVariant
 }) {
   const { t } = useLocale()
   const reduceMotion = Boolean(useReducedMotion())
-  const stagger = animateIn && !reduceMotion
   const isLive = variant === 'live'
   const motionTransition = reduceMotion ? { duration: 0 } : appMotion.list
   const viewport = knowledgeStepViewportState({ failed, steps, variant })
@@ -105,13 +107,14 @@ export function KnowledgeStepList({
           {isLive && steps.length > 1 && (
             <span aria-hidden="true" className="inqtrix-step-spine" />
           )}
-          {steps.map((step, index) => {
+          <AnimatePresence initial={false}>
+          {steps.map((step) => {
             const line = knowledgeStepLine(step, { collectionCount, t: t.knowledge })
             const glyphState = knowledgeStepGlyphState({ failed, status: line.status, variant })
             const isRunning = glyphState === 'running'
-            const rowInitial = stagger
-              ? { opacity: 0, y: isLive ? 2 : 4 }
-              : false
+            const rowInitial = reduceMotion
+              ? false
+              : { opacity: 0, y: isLive ? 2 : 4 }
             return (
               <motion.li
                 animate={{ opacity: 1, y: 0 }}
@@ -134,10 +137,7 @@ export function KnowledgeStepList({
                     rowRefs.current.delete(line.id)
                   }
                 }}
-                transition={{
-                  ...motionTransition,
-                  delay: stagger ? isLive ? 0.08 : index * 0.03 : 0,
-                }}
+                transition={motionTransition}
               >
                 <span className="relative z-10 flex h-5 items-center justify-center">
                   {isRunning ? (
@@ -215,6 +215,7 @@ export function KnowledgeStepList({
               </motion.li>
             )
           })}
+          </AnimatePresence>
           {isLive && (
             <li aria-hidden="true" className="inqtrix-step-tail list-none" />
           )}

@@ -21,6 +21,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Callable
 
+from inqtrix.agents.artifact_lines import count_line_changes
 from inqtrix.agents.control_ports import (
     TERMINAL_APPROVAL_SETTLE_NOTE,
     APPROVAL_STATUS_BY_DECISION,
@@ -476,7 +477,18 @@ class MemoryAgentControlStore:
                     created_at=now,
                 )
             )
-            return stored
+            # P9 read parity with Postgres: only the RETURNED record
+            # carries the line delta — the stored row stays None so
+            # later reads never re-serve a stale count.
+            counted = count_line_changes(
+                existing.content_markdown if existing is not None else "",
+                content_markdown,
+            )
+            if counted is None:
+                return stored
+            return replace(
+                stored, lines_added=counted[0], lines_removed=counted[1]
+            )
 
     def _find_upsert_target_locked(
         self,
@@ -541,6 +553,30 @@ class MemoryAgentControlStore:
                         created_at=now,
                     )
                 )
+                return stored
+
+        return await authorize(_write)
+
+    async def rename_artifact(
+        self,
+        *,
+        run_id: str,
+        artifact_id: str,
+        title: str,
+        authorize: Any,
+    ) -> ArtifactRecord:
+        def _write(_transaction: Any, _cancel_child: Any) -> ArtifactRecord:
+            with self._lock:
+                artifact = self._artifacts.get(artifact_id)
+                if artifact is None or artifact.run_id != run_id:
+                    raise ArtifactNotFound(artifact_id)
+                if artifact.status == "writing":
+                    raise ArtifactLocked(artifact_id)
+                # Metadata-only (P9): no revision bump, no revision row.
+                stored = replace(
+                    artifact, title=title, updated_at=time.time()
+                )
+                self._artifacts[artifact_id] = stored
                 return stored
 
         return await authorize(_write)
@@ -624,7 +660,18 @@ class MemoryAgentControlStore:
                         created_at=now,
                     )
                 )
-                stored_rows.append(stored)
+                counted = count_line_changes(
+                    artifact.content_markdown, item.content_markdown
+                )
+                stored_rows.append(
+                    stored
+                    if counted is None
+                    else replace(
+                        stored,
+                        lines_added=counted[0],
+                        lines_removed=counted[1],
+                    )
+                )
             return stored_rows
 
     async def list_session_artifacts(

@@ -43,6 +43,7 @@ from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import KnowledgeProviderContext
 from inqtrix.providers.embeddings import LiteLLMEmbeddings
 from inqtrix.research.web_research import DirectLlmAlgorithm, WebResearchAlgorithm
+from inqtrix.server.execution import ExecutionLanes
 from inqtrix.server.runs import RunStore
 from inqtrix.services.agent_context import AgentContextResolver
 from inqtrix.services.chat_service import ChatService
@@ -536,7 +537,6 @@ def build_upload_store(settings: Settings, *, asset_store: Any) -> Any:
         ),
         app_role=settings.storage.app_role,
         queue=queue,
-        max_concurrent=settings.server.max_concurrent,
         worker_id=f"api-{socket.gethostname()}-{os.getpid()}",
     )
 
@@ -1208,6 +1208,15 @@ class AppContainer:
             behind :class:`~inqtrix.runs.ports.RunStorePort`.
         semaphore_factory: Lazy provider of the shared concurrency
             limiter (the event loop may not exist at wiring time).
+        agent_checkpointer: Handle for the workspace agent's checkpoint
+            store, or ``None`` when the agent is not registered. Carried
+            here because it owns a pool on its own driver: no engine
+            disposal reaches it, so whoever ends the container's life has
+            to close it explicitly.
+        execution_lanes: Named thread pools for blocking work, built
+            from *settings* here, so a long AI call cannot leave an
+            event stream or a short read without a thread. The caller
+            that owns the container's lifetime closes them.
         knowledge_service: Knowledge collection/document/search service;
             ``None`` when the knowledge engine is disabled (no
             knowledge routes, no ``knowledge`` algorithm).
@@ -1230,6 +1239,8 @@ class AppContainer:
     health_service: HealthService
     run_store: "RunStorePort"
     semaphore_factory: Callable[[], Any]
+    execution_lanes: "ExecutionLanes"
+    agent_checkpointer: Any = None
     knowledge_service: KnowledgeService | None = None
     file_service: FileService | None = None
     knowledge_ceiling: "KnowledgeStageCeiling | None" = None
@@ -2260,6 +2271,9 @@ def build_container(
         # The ONE E5 gate, so an edited plan's rag tasks are visibility-
         # checked at approval time (plan §4), not only at task-run time.
         knowledge=knowledge_service,
+        # Library rules attached at a plan gate resolve against the
+        # DECIDING caller's own catalog (never against client text).
+        prompt_templates=prompt_template_service,
         durable=settings.storage.backend == "postgres",
         max_plan_tasks=settings.agent_platform.max_plan_tasks,
     )
@@ -2403,6 +2417,15 @@ def build_container(
         ),
         run_store=active_run_store,
         semaphore_factory=semaphore_factory,
+        agent_checkpointer=agent_checkpointer,
+        # Twice the admission ceiling: admission bounds how many AI calls
+        # may start, not how many are still running. A disconnected stream
+        # releases its slot while its thread finishes, and without headroom
+        # those orphans would displace freshly admitted work.
+        execution_lanes=ExecutionLanes(
+            ai_workers=settings.server.max_concurrent * 2,
+            stream_workers=settings.server.stream_reader_workers,
+        ),
         knowledge_service=knowledge_service,
         file_service=active_file_service,
         knowledge_ceiling=knowledge_ceiling,

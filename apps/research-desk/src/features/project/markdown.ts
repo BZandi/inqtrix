@@ -111,6 +111,9 @@ export function serializeProjectManifest(
   }
   const frontmatter = {
     chat_group_order: state.chatThreadGroupOrder,
+    // Manual sort mode froze an explicit thread order — persist it, or a
+    // reload would show 'Manuell' with an order the user never arranged.
+    chat_thread_order: state.chatThreadOrder,
     chat_groups: state.chatThreadGroupOrder.flatMap((groupId) => {
       const group = state.chatThreadGroups[groupId]
       return group ? [group] : []
@@ -125,7 +128,13 @@ export function serializeProjectManifest(
       const folder = state.editorFolders[folderId]
       return folder ? [folder] : []
     }),
-    editor_document_order: state.editorDocumentOrder,
+    // Die Ordnung beschreibt DIESEN Export, nicht den Zustand: der Exportplan
+    // ueberspringt Fremdfreigaben und nicht exportfaehige Eintraege, also
+    // darf das Manifest sie auch nicht auffuehren. Sonst verweist es auf
+    // Dateien, die im Archiv fehlen.
+    editor_document_order: exportPlan.editorDocuments.map(
+      (descriptor) => descriptor.id,
+    ),
     editor_ui: state.editorUi,
     file_asset_order: state.fileAssetOrder,
     file_group_order: state.fileGroupOrder,
@@ -143,7 +152,7 @@ export function serializeProjectManifest(
       const index = state.vectorIndexes[indexId]
       return index ? [index] : []
     }),
-    rule_order: state.chatRuleOrder,
+    rule_order: exportPlan.chatRules.map((descriptor) => descriptor.id),
     schema_version: PROJECT_SCHEMA_VERSION,
     // The server-persistence opt-in (M6): survives a reload so a re-opened
     // server project re-hydrates instead of reverting to local-first.

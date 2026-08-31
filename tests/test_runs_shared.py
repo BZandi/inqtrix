@@ -170,3 +170,43 @@ def test_postgres_store_uses_durable_retention_not_replay_ttl():
 def test_run_durable_retention_defaults_to_ninety_days():
     """The out-of-the-box durable retention is 90 days (operators can extend)."""
     assert ServerSettings().run_durable_retention_seconds == 90 * 86_400
+
+
+def test_a_dispatching_store_carries_its_own_slot_count():
+    """The base declares the attribute; each dispatching store must fill it.
+
+    ``_max_concurrent`` is not only the dispatch ceiling: the queue-full
+    admission check reads it as ``running >= self._max_concurrent``. A store
+    that inherited a default of zero would not "dispatch nothing" -- it would
+    read as permanently at capacity and reject work that should have been
+    admitted, silently and only once the queue filled.
+    """
+    from inqtrix.runs.postgres_store import PostgresRunStore
+
+    settings = Settings(
+        server=ServerSettings(run_max_concurrent=7),
+        storage=StorageSettings(
+            backend="postgres",
+            database_url="postgresql+asyncpg://x:y@127.0.0.1:1/inqtrix",
+        ),
+    )
+    store = build_run_store(settings)
+    assert isinstance(store, PostgresRunStore)
+    assert store._max_concurrent == 7, (
+        "the run store must size itself from the operator's run cap; an "
+        "inherited default would read as permanently at capacity"
+    )
+
+
+def test_the_base_offers_no_silent_slot_default():
+    """A forgotten assignment must raise, not read as zero.
+
+    Zero is the worst possible fallback here: it is indistinguishable from
+    'at capacity' to every caller that compares against it.
+    """
+    from inqtrix.runs.durable_store import DurableJobStoreBase
+
+    assert not hasattr(DurableJobStoreBase, "_max_concurrent"), (
+        "a class-level default turns a missing assignment into a silent "
+        "rejection instead of a loud failure"
+    )

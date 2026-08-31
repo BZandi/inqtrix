@@ -16,6 +16,16 @@ precedence: config > extraConfig > derived).
 {{- end }}
 {{- end }}
 {{- end }}
+{{- /* INQTRIX_REPLICA_COUNT is fully chart-derived below. A user-supplied
+       value can only be redundant or wrong: too LOW is caught by the render
+       guard on the chart's own count, but too HIGH passes the chart and then
+       fails every api pod at startup (the app-side local-store guard) -- a
+       spurious crash loop pointing away from its cause. Refuse the render. */}}
+{{- range $key := list "INQTRIX_REPLICA_COUNT" }}
+{{- if or (hasKey $.Values.config $key) (hasKey $.Values.extraConfig $key) }}
+{{- fail (printf "%s is derived by the chart from api.replicaCount/autoscaling and worker.replicaCount; do not also set config/extraConfig.%s" $key $key) }}
+{{- end }}
+{{- end }}
 {{- /* Effective replica count: static replicaCount, or the autoscaler ceiling
        when enabled; a worker pod counts as one more sharer of the object store. */}}
 {{- $apiReplicas := int .Values.api.replicaCount }}
@@ -24,7 +34,10 @@ precedence: config > extraConfig > derived).
 {{- end }}
 {{- $storeSharers := $apiReplicas }}
 {{- if .Values.worker.enabled }}
-{{- $storeSharers = add $storeSharers 1 }}
+{{- /* Count the ACTUAL worker replicas, not a flat 1: with
+       worker.replicaCount > 1 the flat count understated the sharers and
+       fed the app a wrong INQTRIX_REPLICA_COUNT. */}}
+{{- $storeSharers = add $storeSharers (max 1 (int .Values.worker.replicaCount)) }}
 {{- end }}
 {{- /* Fail fast: the local object store is per-pod disk. More than one sharer
        (api replicas and/or a worker) silently 404s every blob on the pods that

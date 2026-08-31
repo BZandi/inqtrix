@@ -103,6 +103,7 @@ describe('markdown block PNG export metrics', () => {
       style: {
         boxSizing: 'border-box',
         height: '348px',
+        margin: '0',
         maxWidth: 'none',
         overflow: 'visible',
         padding: '24px',
@@ -110,6 +111,18 @@ describe('markdown block PNG export metrics', () => {
       },
       width: 1328,
     })
+  })
+
+  it('neutralizes the centring margin the capture would otherwise inherit', () => {
+    // A centred block computes `margin: 0px 404px` inside a wide column;
+    // carried into a capture frame of the block's own width, that offset
+    // moves every drawn pixel outside the image.
+    expect(markdownBlockPngOptions({
+      clientHeight: 121,
+      clientWidth: 88,
+      scrollHeight: 121,
+      scrollWidth: 88,
+    }, '#ffffff').style.margin).toBe('0')
   })
 
   it('passes the effective PNG contract to html-to-image and downloads the returned Blob', async () => {

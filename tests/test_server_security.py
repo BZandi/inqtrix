@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from inqtrix.providers.base import ProviderContext

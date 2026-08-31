@@ -8,15 +8,12 @@ import os
 import pytest
 
 from inqtrix.logging_config import _WEB_LOGGER_NAMES
-from inqtrix.providers.base import ProviderContext
 from inqtrix.search_result import GroundedSearchResult
 from inqtrix.settings import Settings
 from inqtrix.strategies import (
     DefaultClaimConsolidator,
     DefaultSourceTiering,
     KeywordRiskScorer,
-    MultiSignalStopCriteria,
-    StrategyContext,
 )
 
 

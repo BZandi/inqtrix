@@ -395,6 +395,18 @@ export type InqtrixCapabilities = {
     max_parallel_children: number
     discovery_max_tool_calls: number
     max_plan_tasks: number
+    /** Result requirement limits (S6): published == enforced, so the
+     * composer and the plan gate render the server's own numbers instead
+     * of a second copy that can drift out of agreement with it. Absent
+     * on older servers -> the shared fallback constants. */
+    report_requirement?: {
+      max_chars: number
+      max_rules: number
+    }
+    /** How many research reports one run may carry (published ==
+     * enforced, so the composer disables the next chip rather than the
+     * server refusing the submission afterwards). */
+    attached_reports?: { max_reports: number }
     /** Server-enforced Agent Desk boundaries. Values are descriptive facts,
      * never client-authored budget inputs. */
     limits?: AgentLimitCapabilities
@@ -491,7 +503,6 @@ export type AgentTierCapability = {
   rag_default_profile: string
   verify: string
   response_form: 'auto' | 'chat' | 'canvas'
-  latency_hint: string
 }
 
 export type AgentOverrides = {
@@ -545,6 +556,24 @@ export type CreateResearchRunRequest = {
   sourcePolicy?: import('@/features/agent/executionPolicy').AgentSourcePolicy
   /** One-message route selected through a direct slash command. */
   executionDirective?: import('@/features/agent/executionPolicy').AgentExecutionDirective
+  /** Canvas attachment (P4): open document + queued selection comments.
+   * A DEDICATED field — never serialized into `question`. Kernel only. */
+  canvasContext?: import('@/features/agent/canvas/commentQueue').AgentCanvasSubmitContext
+  /** Result requirement set BEFORE the run (S6): how the result has to
+   * look. The plan gate is the other entry point, but three mission
+   * paths never reach one (autonomous, the speed tier, delegated
+   * children) and the kernel has no plan gate at all. Agent modes only. */
+  reportGuidance?: string
+  /** Prompt-library rules attached as the reusable half of that same
+   * requirement. IDS ONLY: the server resolves label, revision and text
+   * from the caller's own catalog, so a client can never put unchecked
+   * text into the writing prompts. */
+  reportRuleIds?: string[]
+  /** Research-Desk reports attached as INPUT (P14). Ids only — the
+   * server resolves name and visibility, and the kernel fetches each
+   * body on demand with `read_research_report`. A real report has a
+   * median of ~54k characters, so nothing is inlined here. */
+  reportIds?: string[]
 }
 
 export type ResearchRunStatus =
@@ -579,6 +608,8 @@ export type ResearchRunSnapshot = {
   done?: boolean
   progress_estimate?: number
   last_message?: string
+  /** A delegated MISSION reports its phase here; research runs do not. */
+  phase?: string
   /** Effective Agent Desk route metadata. Older runs omit this block. */
   execution?: {
     execution_directive?: 'quick_web' | 'knowledge_only' | null

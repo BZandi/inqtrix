@@ -50,7 +50,6 @@ export const DEMO_AGENT_TIERS: AgentTierCapability[] = [
     rag_default_profile: 'schnell',
     verify: 'labels',
     response_form: 'chat',
-    latency_hint: 'schnellste Stufe · unter ~3 min',
   },
   {
     id: 'gruendlich',
@@ -62,7 +61,6 @@ export const DEMO_AGENT_TIERS: AgentTierCapability[] = [
     rag_default_profile: 'standard',
     verify: 'standard',
     response_form: 'auto',
-    latency_hint: '1-3 min',
   },
   {
     id: 'tief',
@@ -74,7 +72,6 @@ export const DEMO_AGENT_TIERS: AgentTierCapability[] = [
     rag_default_profile: 'gruendlich',
     verify: 'escalating',
     response_form: 'canvas',
-    latency_hint: '5-15 min',
   },
 ]
 
@@ -532,6 +529,49 @@ function memoMeta(
   }
 }
 
+/** Demo K-citation passages. They are VERBATIM lines of the demo
+ * knowledge documents (`knowledge/demo.ts`) so the evidence reader
+ * highlights a real match instead of opening on nothing — the demo
+ * has to exercise the same path the live desk does. A parity test
+ * pins both the document ids and these excerpts. */
+const DEMO_K1_PASSAGE = 'Ein KI-System gilt als Hochrisiko-KI-System, wenn es als Sicherheitsbauteil eines unter die Harmonisierungsrechtsvorschriften fallenden Produkts verwendet wird oder selbst ein solches Produkt ist.'
+const DEMO_K2_PASSAGE = 'Fuer Hochrisiko-Anwendungen empfiehlt das BSI eine dokumentierte Risikoanalyse je Lebenszyklusphase sowie kontinuierliches Monitoring im Betrieb.'
+
+/** The demo's knowledge citations, in ONE place: three artifacts cited
+ * the same passages as separate literals, so a retarget had to be made
+ * three times (and was missed once). The parity test asserts these
+ * against the knowledge demo corpus. */
+export const agentDemoKnowledgeRefs = [
+  {
+    chunkIndex: 0,
+    documentId: 'kdoc-ai-act-volltext',
+    label: 'K1',
+    sourceText: DEMO_K1_PASSAGE,
+    title: 'EU-AI-Act-Volltext.pdf',
+  },
+  {
+    chunkIndex: 0,
+    documentId: 'kdoc-bsi-kriterien',
+    label: 'K2',
+    sourceText: DEMO_K2_PASSAGE,
+    title: 'BSI-Kriterienkatalog-KI.pdf',
+  },
+] as const
+
+const demoKnowledgeRefWire = (label: 'K1' | 'K2') => {
+  const reference = agentDemoKnowledgeRefs.find(
+    (candidate) => candidate.label === label,
+  )
+  if (!reference) throw new Error(`unknown demo reference ${label}`)
+  return {
+    chunk_index: reference.chunkIndex,
+    document_id: reference.documentId,
+    label: reference.label,
+    source_text: reference.sourceText,
+    title: reference.title,
+  }
+}
+
 const ANSWER_MARKDOWN = `Kurzantwort: Der EU AI Act trifft den KI-Mittelstand ab August 2026 mit voller Wirkung [K1]. Die wichtigsten Punkte im Vergleich:
 
 | Aspekt | Einschätzung | Beleg |
@@ -582,8 +622,8 @@ function answerDetailAction(
       ...answerMeta(runId, revision, status),
       content_markdown: ANSWER_MARKDOWN,
       refs: [
-        { label: 'K1', document_id: 'doc-demo-1', chunk_index: 0, title: 'EU AI Act Umsetzungsleitfaden' },
-        { label: 'K2', document_id: 'doc-demo-2', chunk_index: 3, title: 'Interne Aufwandsanalyse KI-Compliance' },
+        demoKnowledgeRefWire('K1'),
+        demoKnowledgeRefWire('K2'),
         { label: 'W1', url: 'https://example.com/markt-konsolidierung', title: 'Marktbericht Konsolidierung' },
         { label: 'W2', url: 'https://example.com/zertifizierung', title: 'Zertifizierungs-Angebote 2026' },
       ],
@@ -639,7 +679,7 @@ function deliverableDetailAction(
       ...deliverableMeta(runId, revision, status),
       content_markdown: DELIVERABLE_MARKDOWN,
       refs: [
-        { label: 'K1', document_id: 'doc-demo-1', chunk_index: 0, title: 'EU AI Act Umsetzungsleitfaden' },
+        demoKnowledgeRefWire('K1'),
         { label: 'W1', url: 'https://example.com/markt-konsolidierung', title: 'Marktbericht Konsolidierung' },
       ],
       revisions: Array.from({ length: revision }, (_, index) => ({
@@ -664,8 +704,8 @@ function memoDetailAction(
       ...memoMeta(runId, revision, status),
       content_markdown: MEMO_SECTIONS.slice(0, sections).join(''),
       refs: [
-        { label: 'K1', document_id: 'doc-demo-1', chunk_index: 0, title: 'EU AI Act Umsetzungsleitfaden' },
-        { label: 'K2', document_id: 'doc-demo-2', chunk_index: 3, title: 'Interne Aufwandsanalyse KI-Compliance' },
+        demoKnowledgeRefWire('K1'),
+        demoKnowledgeRefWire('K2'),
         { label: 'W1', url: 'https://example.com/markt-konsolidierung', title: 'Marktbericht Konsolidierung' },
         { label: 'W2', url: 'https://example.com/zertifizierung', title: 'Zertifizierungs-Angebote 2026' },
         { label: 'W3', url: 'https://example.com/kritik', title: 'Kommentar Compliance-Kosten' },
@@ -1166,6 +1206,13 @@ export function createAgentDemo(
           approval_id: approvalId,
           status: approved ? 'approved' : 'rejected',
           decision: decision.decision,
+          // The decided requirement rides the payload just as it does
+          // live — without it the demo would show the gate but never
+          // what the user asked the report to look like.
+          decision_payload:
+            'report_guidance' in decision
+              ? { report_guidance: decision.report_guidance ?? '' }
+              : {},
           decided_at: Date.now() / 1000,
         },
       ],

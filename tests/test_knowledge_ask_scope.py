@@ -111,6 +111,10 @@ def make_ask_world() -> tuple[TestClient, KnowledgeStubLLM, MemoryKnowledgeStore
     app.include_router(runs.build_router(container))
     app.include_router(chat.build_router(container))
     app.include_router(build_shares_router(container))
+    # The run store is the only place a submitted request's resolved
+    # filters stay observable; the routers close over the container, so
+    # tests reach it through the app instead of a wider return tuple.
+    app.state.container = container
     return TestClient(app), llm, store
 
 
@@ -195,6 +199,59 @@ def run_knowledge_ask(
     result = client.get(f"/v1/runs/{run_id}/result", headers=as_user(sub))
     assert result.status_code == 200
     return result.json()
+
+
+def _submitted_filters(client: TestClient, *, sub: uuid.UUID, body: dict) -> dict:
+    """Submit a run and read back its PERSISTED knowledge filters."""
+    created = client.post("/v1/runs", json=body, headers=as_user(sub))
+    assert created.status_code == 202, created.text
+    run_id = created.json()["run_id"]
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        summary = client.get(f"/v1/runs/{run_id}", headers=as_user(sub)).json()
+        if summary.get("status") == "completed":
+            break
+        time.sleep(0.01)
+    # The persisted re-execution payload is what a resume replays, so it
+    # is the honest place to read the admitted scope from.
+    store = client.app.state.container.run_store
+    record = store._records[run_id]
+    payload = record.request_payload or {}
+    return (payload.get("body") or {}).get("knowledge_filters") or {}
+
+
+@pytest.mark.parametrize("filters", UNSCOPED_FILTERS)
+def test_submission_records_whether_the_scope_was_the_users_pick(filters):
+    """P10-K2: the pin resolves both cases to a concrete id list, so the
+    list alone cannot say whose choice it was. The admission records the
+    provenance explicitly — the balanced knowledge gate asks about
+    exactly that difference."""
+    client, _llm, _store = make_ask_world()
+    with client:
+        cid = make_collection(client, sub=RECIPIENT, name="Meins")
+        add_doc(client, cid, sub=RECIPIENT, text=RECIPIENT_TEXT)
+
+        body: dict = {"question": "Wie lange ist die Frist?", "mode": "knowledge"}
+        if filters is not None:
+            body["knowledge_filters"] = filters
+        auto = _submitted_filters(client, sub=RECIPIENT, body=body)
+
+        picked = _submitted_filters(
+            client,
+            sub=RECIPIENT,
+            body={
+                "question": "Wie lange ist die Frist?",
+                "mode": "knowledge",
+                "knowledge_filters": {"collection_ids": [cid]},
+            },
+        )
+
+    # Both end up pinned to the same visible set ...
+    assert auto.get("collection_ids") == [cid]
+    assert picked.get("collection_ids") == [cid]
+    # ... and only the provenance tells them apart.
+    assert auto.get("explicit") is False
+    assert picked.get("explicit") is True
 
 
 @pytest.mark.parametrize("filters", UNSCOPED_FILTERS)

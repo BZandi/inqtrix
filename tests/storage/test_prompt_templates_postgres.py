@@ -168,3 +168,58 @@ async def test_precondition_on_missing_row_is_not_found_not_conflict(repository)
             expected_revision=1,
             actor_user_id=OWNER_ID,
         )
+
+
+@pytest.mark.asyncio
+async def test_seed_claims_once_and_respects_a_grown_library(repository):
+    """P12: the marker+insert transaction seeds at most once per user."""
+    engine = build_engine(TEST_DATABASE_URL)
+    factory = build_session_factory(engine)
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                text("DELETE FROM prompt_template_seed_markers")
+            )
+    await engine.dispose()
+
+    first = [record(), record(title="Zweite", label="zweite")]
+    assert await repository.seed_default_templates(
+        first, tenant_id="default", user_id=OWNER_ID
+    ) is True
+    listed = await repository.list_for_tenant(tenant_id="default")
+    assert {item.id for item in listed} == {item.id for item in first}
+
+    # Second call: marker already claimed — nothing inserted.
+    assert await repository.seed_default_templates(
+        [record()], tenant_id="default", user_id=OWNER_ID
+    ) is False
+    assert len(await repository.list_for_tenant(tenant_id="default")) == 2
+
+    # Deleting a seeded row must not reopen the claim.
+    await repository.delete(
+        first[0].id, tenant_id="default", actor_user_id=OWNER_ID
+    )
+    assert await repository.seed_default_templates(
+        [record()], tenant_id="default", user_id=OWNER_ID
+    ) is False
+    assert len(await repository.list_for_tenant(tenant_id="default")) == 1
+
+
+@pytest.mark.asyncio
+async def test_seed_marks_without_rows_when_the_user_already_owns(repository):
+    """A library grown before the first listing is never injected into."""
+    engine = build_engine(TEST_DATABASE_URL)
+    factory = build_session_factory(engine)
+    async with factory() as session:
+        async with session.begin():
+            await session.execute(
+                text("DELETE FROM prompt_template_seed_markers")
+            )
+    await engine.dispose()
+
+    existing = await repository.create(record(title="Eigen", label="eigen"))
+    assert await repository.seed_default_templates(
+        [record()], tenant_id="default", user_id=OWNER_ID
+    ) is False
+    listed = await repository.list_for_tenant(tenant_id="default")
+    assert [item.id for item in listed] == [existing.id]

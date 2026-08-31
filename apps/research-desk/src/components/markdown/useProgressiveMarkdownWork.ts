@@ -5,6 +5,8 @@ import { scheduleIdle } from '@/lib/idle'
 const MARKDOWN_WARMUP_MARGIN_PX = 1200
 
 type ProgressiveMarkdownWorkOptions = {
+  /** Run immediately when a concealed surface is waiting on this work. */
+  eager?: boolean
   isReady: boolean
   run: () => void
   targetRef: RefObject<HTMLElement | null>
@@ -12,6 +14,7 @@ type ProgressiveMarkdownWorkOptions = {
 }
 
 export function useProgressiveMarkdownWork({
+  eager = false,
   isReady,
   run,
   targetRef,
@@ -19,6 +22,11 @@ export function useProgressiveMarkdownWork({
 }: ProgressiveMarkdownWorkOptions): void {
   useEffect(() => {
     if (isReady) return undefined
+
+    if (eager) {
+      run()
+      return undefined
+    }
 
     const target = targetRef.current
     if (!target || typeof IntersectionObserver === 'undefined') {
@@ -67,5 +75,5 @@ export function useProgressiveMarkdownWork({
       visibleObserver.disconnect()
       nearObserver.disconnect()
     }
-  }, [isReady, run, targetRef, workKey])
+  }, [eager, isReady, run, targetRef, workKey])
 }

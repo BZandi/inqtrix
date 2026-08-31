@@ -71,6 +71,10 @@ def _configured_runtime_container():
         parser=object(),
     )
     return SimpleNamespace(
+        # Deliberately DIVERGENT from the settings default (4): the
+        # payload must publish the handle's EFFECTIVE value, never the
+        # configured knob -- a disabled/volatile deployment has no pool.
+        agent_checkpointer=SimpleNamespace(max_connections=7, durable=True),
         file_service=object(),
         knowledge_service=knowledge_service,
         object_store_backend="s3",
@@ -101,6 +105,10 @@ def test_runtime_payload_reports_configured_backends_without_secrets():
     payload = system_runtime_payload(_configured_runtime_container())
 
     assert payload["storage"] == {"backend": "postgres", "durable": True}
+    # One source, three displays: the payload reads the HANDLE (7),
+    # not the configured knob (settings default 4) -- effective over
+    # configured, exactly like the startup budget line.
+    assert payload["agents"] == {"checkpointer_pool_size": 7}
     assert payload["runs"] == {
         "execution": "worker_dispatch",
         "queue": "valkey",
@@ -109,6 +117,10 @@ def test_runtime_payload_reports_configured_backends_without_secrets():
         "queue_depth": None,
         "store": "postgres",
         "worker_dispatch": True,
+        # Admission limits of this api process; execution capacity belongs
+        # to the worker fleet in worker_dispatch mode and is not claimed.
+        "admission_max_concurrent": 100,
+        "queue_max_size": 100,
     }
     assert payload["files"]["object_store"] == "s3"
     assert payload["files"]["blob_storage"] == "s3"
@@ -127,6 +139,10 @@ def test_runtime_payload_reports_configured_backends_without_secrets():
     assert payload["knowledge"]["sparse_multilingual"] is False
     assert payload["knowledge"]["cross_lingual_recommendation"] == "reranker"
     assert payload["api"]["openapi"] is False
+    # Effective values from this process's settings -- the admin panel's
+    # source for "what is actually enforced here".
+    assert payload["api"]["chat_max_concurrent"] == 100
+    assert payload["api"]["stream_reader_workers"] == 128
     # Tracing block: mode off ⇒ inactive, no retention, no deep link;
     # never any endpoint or credential. content_capture follows the
     # ambient OBSERVABILITY_PROFILE (env-driven in this fixture), so it
@@ -340,3 +356,20 @@ def test_runtime_payload_carries_probed_queue_consumer_visibility():
     )
     assert degraded["runs"]["queue_consumers"] is None
     assert degraded["runs"]["queue_depth"] is None
+
+
+def test_agents_block_hides_the_pool_without_a_durable_checkpointer():
+    """No durable handle (disabled agent, missing extra, volatile mode):
+    the payload must publish None so the panel row hides, instead of
+    naming a psycopg pool that can never open."""
+    container = _configured_runtime_container()
+    container.agent_checkpointer = None
+    assert system_runtime_payload(container)["agents"] == {
+        "checkpointer_pool_size": None
+    }
+    container.agent_checkpointer = SimpleNamespace(
+        max_connections=0, durable=False
+    )
+    assert system_runtime_payload(container)["agents"] == {
+        "checkpointer_pool_size": None
+    }

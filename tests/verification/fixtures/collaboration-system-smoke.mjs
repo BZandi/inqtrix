@@ -62,6 +62,8 @@ export function buildGeneratedSystemSmokeFixture({
   const remotePresence = requireDocument(documents?.remotePresence, 'remotePresence')
   const revocation = requireDocument(documents?.revocation, 'revocation')
   const sourceReadonly = requireDocument(documents?.sourceReadonly, 'sourceReadonly')
+  const staysConnected = requireDocument(documents?.staysConnected, 'staysConnected')
+  const aiSuggestion = requireDocument(documents?.aiSuggestion, 'aiSuggestion')
   const suggestion = requireDocument(documents?.suggestion, 'suggestion')
   const suggestionUndo = requireDocument(documents?.suggestionUndo, 'suggestionUndo')
   const documentIds = [
@@ -75,6 +77,8 @@ export function buildGeneratedSystemSmokeFixture({
     remotePresence,
     revocation,
     sourceReadonly,
+    staysConnected,
+    aiSuggestion,
     suggestion,
     suggestionUndo,
   ]
@@ -94,6 +98,8 @@ export function buildGeneratedSystemSmokeFixture({
       remotePresence,
       revocation,
       sourceReadonly,
+      staysConnected,
+      aiSuggestion,
       suggestion: {
         documentId: suggestion,
         expectedAuthorId: normalizedCollaborator.userId,

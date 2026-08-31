@@ -13,6 +13,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { OriginalFileTab } from '@/features/files/OriginalFileTab'
+import { useActiveMatchScroll } from '@/features/scroll/useActiveMatchScroll'
 import type { KnowledgeDocumentText } from '@/features/researchRuns/types'
 import {
   findFirstMatchingTarget,
@@ -94,9 +95,12 @@ export function DocumentViewer({
     setActiveMatch(0)
   }, [matches.length])
 
-  useEffect(() => {
-    activeMatchRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }, [activeMatch, documentState.kind, tab])
+  useActiveMatchScroll({
+    activeIndex: activeMatch,
+    contentKey: `${target.documentId}:${target.chunkIndex ?? 'none'}`,
+    enabled: tab === 'extracted' && documentState.kind === 'ready',
+    targetRef: activeMatchRef,
+  })
 
   const fileId = documentState.kind === 'ready'
     ? stringOrNull(documentState.document.metadata.file_id)

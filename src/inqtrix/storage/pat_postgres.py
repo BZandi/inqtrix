@@ -17,6 +17,9 @@ from typing import TYPE_CHECKING
 from sqlalchemy import or_, select, update
 
 from inqtrix.auth.pat import PersonalAccessToken
+from inqtrix.storage.authorization_generation import (
+    bump_authorization_generation,
+)
 from inqtrix.storage.db import tenant_session
 from inqtrix.storage.pat_orm import personal_access_tokens as pats
 from inqtrix.storage.resource_access import append_audit_row
@@ -152,6 +155,13 @@ class PostgresPatStore:
             ).one_or_none()
             if row is None:
                 return False
+            # Same transaction: a revoked PAT must drop its live streams
+            # within a frame, not only at the gate's time ceiling.
+            await bump_authorization_generation(
+                db,
+                tenant_id=row.tenant_id,
+                target_user_ids=(row.owner_user_id,),
+            )
             await append_audit_row(
                 db,
                 tenant_id=row.tenant_id,
@@ -211,4 +221,10 @@ class PostgresPatStore:
                 )
                 .values(revoked_at=now)
             )
+            if int(result.rowcount or 0) > 0:
+                await bump_authorization_generation(
+                    db,
+                    tenant_id=tenant_id,
+                    target_user_ids=(owner_user_id,),
+                )
         return int(result.rowcount or 0)

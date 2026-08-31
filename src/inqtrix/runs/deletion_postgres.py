@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
+from inqtrix.storage.migration_contract import (
+    assert_schema_head,
+)
 from inqtrix.auth.permissions import SharePermission
 from inqtrix.execution_failures import classify_execution_failure
 from inqtrix.knowledge.source_cleanup import empty_source_cleanup_plan
@@ -145,9 +148,9 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
             app_role=app_role,
             worker_id=worker_id,
             queue=queue,
-            max_concurrent=max_concurrent,
             recover_orphans=recover_orphans,
         )
+        self._max_concurrent = max_concurrent
         self._completed_ttl_seconds = completed_ttl_seconds
         self._restrict_to_workspace_members = restrict_to_workspace_members
         self._sharing_enabled = sharing_enabled
@@ -2103,6 +2106,13 @@ class PostgresDeletionOperationStore(DurableJobStoreBase):
         self, operation_id: str, tenant_id: str, *, allow_takeover: bool
     ) -> ClaimedDeletionOperation | None:
         async with self._session(tenant_id) as session:
+            # Cutover fence, FIRST statement of the claim transaction: a
+            # worker whose image predates a completed migration must not
+            # take a durable claim -- nor run this transaction's other
+            # writes -- against a schema its code no longer matches. Rides
+            # in the same transaction, so a mismatch rolls everything back
+            # and the queue entry stays unacked for an upgraded worker.
+            await assert_schema_head(session)
             allowed = [DeletionOperationStatus.QUEUED.value]
             if allow_takeover:
                 allowed.append(DeletionOperationStatus.RUNNING.value)

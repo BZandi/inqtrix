@@ -60,6 +60,7 @@ def run_critic(
     reasoning_effort: str | None,
     timeout: float,
     user_guidance: str = "",
+    skills_block: str = "",
 ) -> StructuredOutcome:
     """The fast-tier critic call; value is an AgentCriticReport."""
     return structured_call(
@@ -69,6 +70,7 @@ def run_critic(
             success_criteria,
             facts,
             user_guidance=user_guidance,
+            skills_block=skills_block,
         ),
         model_cls=AgentCriticReport,
         node="agent_critic",

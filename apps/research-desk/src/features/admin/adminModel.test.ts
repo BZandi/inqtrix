@@ -112,7 +112,7 @@ describe('deriveFeatureRows', () => {
 
   it('folds runtime availability into infrastructure-backed feature rows', () => {
     const runtime: AdminSystemRuntime = {
-      api: { openapi: true },
+      api: { openapi: true, chat_max_concurrent: 100, stream_reader_workers: 128 },
       files: {
         blob_storage: 's3',
         enabled: true,
@@ -137,6 +137,8 @@ describe('deriveFeatureRows', () => {
         execution: 'worker_dispatch',
         queue: 'valkey',
         queue_available: false,
+        admission_max_concurrent: 100,
+        queue_max_size: 100,
         queue_consumers: null,
         queue_depth: null,
         store: 'postgres',

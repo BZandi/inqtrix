@@ -308,6 +308,8 @@ export function seedAdminSystemRuntime(): AdminSystemRuntime {
   return {
     api: {
       openapi: true,
+      chat_max_concurrent: 100,
+      stream_reader_workers: 128,
     },
     files: {
       blob_storage: 'volume',
@@ -337,6 +339,11 @@ export function seedAdminSystemRuntime(): AdminSystemRuntime {
       queue_depth: null,
       store: 'postgres',
       worker_dispatch: false,
+      admission_max_concurrent: 100,
+      queue_max_size: 100,
+    },
+    agents: {
+      checkpointer_pool_size: 4,
     },
     storage: {
       backend: 'postgres',

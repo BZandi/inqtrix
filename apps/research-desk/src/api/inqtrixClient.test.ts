@@ -408,7 +408,7 @@ describe('cookie-session CSRF recovery', () => {
         include_in_autocomplete: true,
         label: 'one',
         title: 'One',
-        visibility: { chat: true, editor: false },
+        visibility: { agent: false, chat: true, editor: false },
       },
       { baseUrl: 'http://api.test' },
     )
@@ -453,7 +453,7 @@ describe('cookie-session CSRF recovery', () => {
         include_in_autocomplete: true,
         label: 'one',
         title: 'One',
-        visibility: { chat: true, editor: false },
+        visibility: { agent: false, chat: true, editor: false },
       },
       { baseUrl: 'http://api.test' },
     )).rejects.toMatchObject({ name: 'authorization_error', status: 403 })
@@ -493,7 +493,7 @@ describe('cookie-session CSRF recovery', () => {
         include_in_autocomplete: true,
         label: 'one',
         title: 'One',
-        visibility: { chat: true, editor: false },
+        visibility: { agent: false, chat: true, editor: false },
       },
       { baseUrl: 'http://api.test' },
     )).rejects.toMatchObject({ name: 'authorization_error', status: 403 })
@@ -539,7 +539,7 @@ describe('cookie-session CSRF recovery', () => {
         include_in_autocomplete: true,
         label: 'one',
         title: 'One',
-        visibility: { chat: true, editor: false },
+        visibility: { agent: false, chat: true, editor: false },
       },
       { baseUrl: 'http://api.test' },
     )).rejects.toMatchObject({ name: 'authorization_error', status: 403 })
@@ -589,7 +589,7 @@ describe('cookie-session CSRF recovery', () => {
           include_in_autocomplete: true,
           label: 'one',
           title: 'One',
-          visibility: { chat: true, editor: false },
+          visibility: { agent: false, chat: true, editor: false },
         },
         { baseUrl: 'http://api.test' },
       ),
@@ -602,7 +602,7 @@ describe('cookie-session CSRF recovery', () => {
           include_in_autocomplete: true,
           label: 'two',
           title: 'Two',
-          visibility: { chat: true, editor: false },
+          visibility: { agent: false, chat: true, editor: false },
         },
         { baseUrl: 'http://api.test' },
       ),
@@ -651,7 +651,7 @@ describe('cookie-session CSRF recovery', () => {
         include_in_autocomplete: true,
         label: 'one',
         title: 'One',
-        visibility: { chat: true, editor: false },
+        visibility: { agent: false, chat: true, editor: false },
       },
       { baseUrl: 'http://api.test' },
     )).rejects.toMatchObject({ name: 'csrf_error', status: 403 })
@@ -676,7 +676,7 @@ describe('cookie-session CSRF recovery', () => {
         include_in_autocomplete: true,
         label: 'one',
         title: 'One',
-        visibility: { chat: true, editor: false },
+        visibility: { agent: false, chat: true, editor: false },
       },
       { apiKey: 'pat', baseUrl: 'http://api.test' },
     )).rejects.toMatchObject({ name: 'authorization_error', status: 403 })
@@ -1348,7 +1348,7 @@ describe('shared content optimistic-concurrency contract', () => {
       include_in_autocomplete: true,
       label: 'summary',
       title: 'Summary',
-      visibility: { chat: true, editor: false },
+      visibility: { agent: false, chat: true, editor: false },
     }, options)
     await updateSkill('sk 1', {
       allowed_tools: [],
@@ -1465,3 +1465,50 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
   })
 }
+
+describe('attaching research reports to an agent run', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  async function bodyOf(request: Parameters<typeof createResearchRun>[0]) {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ run_id: 'run_x', status: 'queued' }, 202))
+    vi.stubGlobal('fetch', fetchMock)
+    await createResearchRun(request, { baseUrl: 'http://api.test' })
+    const call = fetchMock.mock.calls.at(0) as unknown as [
+      string,
+      { body?: string },
+    ]
+    return JSON.parse(String(call[1]?.body)) as Record<string, unknown>
+  }
+
+  it('sends ids only — never the report text', async () => {
+    // A real report has a median of ~54k characters. The server resolves
+    // name and visibility; the kernel fetches the body on demand.
+    const body = await bodyOf({
+      mode: 'agent_kernel',
+      question: 'Schreibe einen Sprechzettel.',
+      reportIds: ['run_a', 'run_b'],
+    })
+    expect(body.report_ids).toEqual(['run_a', 'run_b'])
+    expect(JSON.stringify(body)).not.toContain('markdown')
+  })
+
+  it('says nothing when no report is attached', async () => {
+    const body = await bodyOf({
+      mode: 'agent_kernel',
+      question: 'Ohne Anhang.',
+    })
+    expect('report_ids' in body).toBe(false)
+  })
+
+  it('treats an empty list as no attachment', async () => {
+    const body = await bodyOf({
+      mode: 'agent_kernel',
+      question: 'Leere Liste.',
+      reportIds: [],
+    })
+    expect(body.report_ids).toBeUndefined()
+  })
+})

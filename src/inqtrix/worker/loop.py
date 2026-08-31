@@ -43,6 +43,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
+from inqtrix.storage.migration_contract import SchemaHeadMismatch
 from inqtrix.auth.log_redaction import stable_pseudonym
 from inqtrix.auth.principal import Principal
 from inqtrix.core.results import RunRequest
@@ -281,6 +282,20 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 self._stop.wait(exc.retry_after_seconds)
             except WorkerClaimGuardError:
                 raise
+            except SchemaHeadMismatch as exc:
+                # The in-transaction fence fired: the claim rolled back and
+                # the queue entry stays unacked for an upgraded worker.
+                # Latch the shared guard so every loop of this process
+                # stops claiming immediately -- detection in one domain is
+                # a verdict about the process, not about the job.
+                self._latch_claim_guard(str(exc))
+                log.error(
+                    "Worker %s: Schema-Kopf hat sich unter dem Prozess "
+                    "bewegt — keine weiteren Claims. %s",
+                    self._store.worker_id,
+                    exc,
+                )
+                raise WorkerClaimGuardError(str(exc)) from exc
             except Exception:  # noqa: BLE001 — survive transient outages
                 log.warning(
                     "Worker %s: Claim-Schleife stolpert ueber einen "
@@ -332,21 +347,39 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             self._last_reconcile = now
             self._reconcile()
         with self._lock:
-            has_capacity = len(self._active) < self._concurrency
-        if not has_capacity:
+            free_slots = self._concurrency - len(self._active)
+        if free_slots < 1:
             time.sleep(0.5)
             return
-        for job in self._queue.claim_new(block_ms=_CLAIM_BLOCK_MS):
+        # Claim as many as this worker can actually run, not one per tick.
+        # Every claim costs a queue round trip plus a durable claim write, so
+        # filling N free slots one at a time takes N of them in sequence: a
+        # worker sized for a hundred runs needed most of a minute to reach
+        # that number while the work sat queued. The count is bounded by free
+        # capacity, so a worker still never holds an entry it cannot start,
+        # and other workers keep whatever they have room for.
+        for job in self._queue.claim_new(
+            block_ms=_CLAIM_BLOCK_MS, count=free_slots
+        ):
             self._start(job, takeover=job.delivery_count > 1)
+
+    def _latch_claim_guard(self, message: str) -> None:
+        """Stick the shared guard shut after an in-transaction fence hit."""
+        guard = self._claim_guard
+        latch = getattr(guard, "latch_failure", None)
+        if callable(latch):
+            latch(message)
 
     def _verify_claim_contract(self, *, immediate: bool = False) -> None:
         """Fail closed before pending, reclaim, reconcile, or new claims.
 
-        The periodic call keeps idle loops inexpensive. The production guard
-        additionally exposes ``verify_now`` so a queue read that blocked near
-        the polling interval cannot cross the durable PostgreSQL claim boundary
-        using a stale successful result. Plain callable guards remain supported
-        for tests and embedders.
+        The coalesced call surfaces an already-latched failure and re-probes
+        when the interval is due; the hard per-claim protection is the
+        in-transaction schema fence (``assert_schema_head``) inside every
+        durable-claim transaction. ``immediate=True`` (an uncoalesced probe
+        via ``verify_now``) remains only for the startup waits, where no
+        claim transaction exists yet to carry the fence. Plain callable
+        guards remain supported for tests and embedders.
         """
         guard = self._claim_guard
         if guard is None:
@@ -430,10 +463,11 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                 self._entity_id(job),
             )
             return
-        # Queue reads can block for the full contract polling interval. Recheck
-        # at the durable claim boundary and leave the stream item unacknowledged
-        # when an upgrade made this worker stale in the meantime.
-        self._verify_claim_contract(immediate=True)
+        # The durable claim boundary carries its own in-transaction fence
+        # (assert_schema_head inside every _claim_db), so no forced probe is
+        # needed here any more -- the coalesced check below only surfaces an
+        # already-latched failure cheaply.
+        self._verify_claim_contract()
         if self._stop.is_set():
             log.info(
                 "Worker %s: Dispatch fuer Job %s waehrend der "
@@ -616,7 +650,10 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
                     entity_id,
                 )
                 return
-            self._verify_claim_contract(immediate=True)
+            # Successor claims carry the same in-transaction fence as every
+            # other durable claim; the coalesced check only surfaces an
+            # already-latched failure before spending work.
+            self._verify_claim_contract()
             if self._stop.is_set():
                 with self._lock:
                     if self._active.get(entity_id) is placeholder:
@@ -663,6 +700,23 @@ class BaseWorkerLoop(Generic[TJob, TClaimed]):
             with self._lock:
                 if self._active.get(entity_id) is placeholder:
                     placeholder.future = future
+        except SchemaHeadMismatch as exc:
+            with self._lock:
+                if self._active.get(entity_id) is placeholder:
+                    self._active.pop(entity_id, None)
+            # The in-transaction fence fired on the successor claim. This
+            # path runs on an executor-finally thread, so raising would be
+            # unobserved -- latching the shared guard is what stops every
+            # loop of this process, exactly as the _tick path does.
+            self._latch_claim_guard(str(exc))
+            log.error(
+                "Worker %s: Schema-Kopf hat sich unter dem Prozess "
+                "bewegt — keine weiteren Claims (Folge-Dispatch fuer "
+                "Job %s bleibt unbestaetigt). %s",
+                self._store.worker_id,
+                entity_id,
+                exc,
+            )
         except BaseException:
             with self._lock:
                 if self._active.get(entity_id) is placeholder:
@@ -989,6 +1043,14 @@ class WorkerLoop(BaseWorkerLoop["QueuedJob", "ClaimedRun"]):
                     web_recency=body.get("web_recency") or None,
                     execution_directive=str(
                         body.get("execution_directive", "") or ""
+                    ),
+                    canvas_context=body.get("canvas_context") or None,
+                    report_requirement=str(
+                        body.get("report_requirement", "") or ""
+                    ),
+                    attached_reports=tuple(
+                        dict(item)
+                        for item in (body.get("attached_reports") or [])
                     ),
                 )
                 # Reconstruct quota attribution from the persisted effective

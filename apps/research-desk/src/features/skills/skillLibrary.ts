@@ -65,6 +65,8 @@ export const SKILL_ALLOWED_TOOL_OPTIONS = [
   'run_web_research',
   'run_deep_mission',
   'write_canvas',
+  'read_editor_document',
+  'search_editor_document',
   'propose_editor_patch',
 ] as const
 

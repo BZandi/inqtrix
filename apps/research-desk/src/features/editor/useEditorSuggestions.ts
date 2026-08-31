@@ -14,9 +14,15 @@ import { ySyncPluginKey } from '@tiptap/y-tiptap'
 import type { Editor } from '@tiptap/react'
 import type * as Y from 'yjs'
 import {
+  applyEditorPatch,
+  deleteEditorComment,
   deleteEditorCommentSuggestionDraft,
+  getEditorDocument,
+  getEditorPatch,
   hasHttpStatus,
+  listEditorDocumentPatches,
   publishEditorCollaborationSuggestion,
+  rejectEditorPatch,
   saveEditorComments,
   saveEditorCommentSuggestionDraft,
   type ClientOptions,
@@ -24,6 +30,7 @@ import {
   type EditorSuggestionDraftCreateWire,
   type EditorSuggestionDraftRevisionRequestWire,
 } from '@/api/inqtrixClient'
+import type { AgentPatchWire } from '@/features/agent/types'
 import type { ChatModelTier, InqtrixCapabilities } from '@/features/researchRuns/types'
 import { deriveEditorAbortMs } from '@/features/researchRuns/clientTimeouts'
 import type {
@@ -86,6 +93,7 @@ import {
 import {
   beginCollaborationAuthorityGuard,
   collaborationAuthorityDisabledReason,
+  CollaborationAuthorityError,
   type CollaborationAuthorityGuard,
   type CollaborationAuthorityRequirement,
 } from './collaborationAuthority'
@@ -500,6 +508,143 @@ export function useEditorSuggestions({
     }
   }
 
+  /** Die Traegerzeilen des VORIGEN Anweisungslaufs abraeumen.
+   *
+   * Der Reducer setzt die Vorschlaege eines abgeloesten Laufs nur lokal auf
+   * verworfen -- er ist synchron und kann den Server nicht rufen. Ohne diesen
+   * Schritt blieben Traegerzeile und Entwurf dauerhaft liegen: sichtbare
+   * Kommentar-Markierungen im Fliesstext, die zu keiner Notiz gehoeren und
+   * die niemand entfernen kann, und eine Veroeffentlichungs-Autorisierung,
+   * die einen laengst verworfenen Vorschlag nach dem Neuladen zurueckholt.
+   *
+   * Der Entwurf zuerst, dann die Zeile: der Loeschpfad des Entwurfs prueft
+   * `patch_id` und Revision und ist damit die eigentliche Ruecknahme der
+   * Autorisierung. Ein Fehlschlag hier darf den neuen Lauf nicht verhindern
+   * -- er wird gemeldet, nicht verschluckt. */
+  async function retirePreviousInstructionCarriers(
+    authorityGuard: CollaborationAuthorityGuard | null,
+  ): Promise<void> {
+    if (!activeDocument) return
+    const veraltet = documentSuggestions.filter((suggestion) =>
+      suggestion.origin.kind === 'assistant_edit'
+      && (suggestion.status === 'pending' || suggestion.status === 'stale'))
+    for (const suggestion of veraltet) {
+      const commentId = suggestion.origin.commentId
+      if (!commentId) continue
+      try {
+        authorityGuard?.assertCurrent()
+        if (suggestion.privateDraft) {
+          await deleteEditorCommentSuggestionDraft(
+            activeDocument.id,
+            commentId,
+            {
+              expected_revision: suggestion.privateDraft.revision,
+              patch_id: suggestion.privateDraft.patchId,
+            },
+            { apiKey, workspaceId: state.workspaceId },
+          )
+        }
+        authorityGuard?.assertCurrent()
+        await deleteEditorComment(
+          activeDocument.id,
+          commentId,
+          { apiKey, workspaceId: state.workspaceId },
+        )
+        dispatch({ commentId, type: 'deleteEditorComment' })
+      } catch (error) {
+        if (error instanceof CollaborationAuthorityError) throw error
+        // Eine liegengebliebene Zeile ist ein Schoenheitsfehler, ein
+        // abgebrochener Lauf waere ein Funktionsverlust. Sichtbar bleibt es
+        // trotzdem: die Konsole nennt Dokument und Zeile.
+        console.warn('assistant_edit carrier cleanup failed', {
+          commentId,
+          documentId: activeDocument.id,
+          reason: messageFromError(error),
+        })
+      }
+    }
+  }
+
+  /** Jedem Assistenten-Edit seine Vorautorisierung geben.
+   *
+   * Der Serverwaechter laesst eine Veroeffentlichung mit `actor_kind:
+   * 'assistant'` nur zu, wenn ein creator-privater Entwurf genau dieses
+   * `patch_id`/`command_id` vorher autorisiert hat, und ein Entwurf kann nur
+   * an einer Kommentarzeile haengen. Ein Assistentenlauf hat keinen Kommentar
+   * des Nutzers, also legt er je Edit eine eigene Traegerzeile an.
+   *
+   * Die Reihenfolge ist zwingend: erst die Zeile, dann der Entwurf -- der
+   * Server heftet einen Entwurf nur an einen Kommentar, den der Aufrufer
+   * selbst erstellt hat. Scheitert ein Edit, scheitert nur dieser: die
+   * bereits autorisierten bleiben gueltig, statt den ganzen Lauf zu
+   * verwerfen. Was nicht autorisiert werden konnte, wird gar nicht erst als
+   * Vorschlag angezeigt -- ein Knopf, der sicher 409 liefert, ist schlimmer
+   * als ein Vorschlag, den es nicht gibt. */
+  async function persistInstructionCarriers(
+    suggestions: readonly EditorSuggestionRecord[],
+    instruction: string,
+    now: string,
+    authorityGuard: CollaborationAuthorityGuard | null,
+  ): Promise<EditorSuggestionRecord[]> {
+    if (!activeDocument) return []
+    await retirePreviousInstructionCarriers(authorityGuard)
+    const authorized: EditorSuggestionRecord[] = []
+    for (const suggestion of suggestions) {
+      const carrier: EditorCommentThreadRecord = {
+        anchor: suggestion.anchor,
+        commentMarkdown: instruction,
+        createdAt: now,
+        documentId: activeDocument.id,
+        id: createLocalId('editor-comment'),
+        kind: 'assistant_edit',
+        status: 'open',
+        updatedAt: now,
+      }
+      try {
+        authorityGuard?.assertCurrent()
+        await saveEditorComments(
+          activeDocument.id,
+          [serverCommentPayload(carrier)],
+          { apiKey, workspaceId: state.workspaceId },
+        )
+        const privateSuggestion = preparePrivateSuggestionRecord(
+          suggestion,
+          undefined,
+          locale,
+        )
+        const draft = await persistPrivateCommentSuggestion(
+          carrier,
+          privateSuggestion,
+          authorityGuard,
+        )
+        // Der Traeger muss in den Zustand: "Verfeinern" und "Bearbeiten"
+        // schlagen ihren Kommentar ueber origin.commentId nach und wuerfen
+        // sonst eine irrefuehrende "Text hat sich geaendert"-Meldung.
+        dispatch({ comment: carrier, type: 'adoptEditorCarrierComment' })
+        authorized.push({
+          ...privateSuggestion,
+          origin: { commentId: carrier.id, kind: 'assistant_edit' },
+          privateDraft: {
+            patchId: draft.patchId,
+            publicationCommandId: draft.publicationCommandId,
+            revision: draft.revision,
+          },
+        })
+      } catch (error) {
+        // Ein Abbruch der Sitzung ist kein Teilfehler eines Edits.
+        if (error instanceof CollaborationAuthorityError) throw error
+        // Sonst gilt: dieser eine Edit konnte nicht autorisiert werden,
+        // die uebrigen bleiben gueltig. Er wird gar nicht erst als
+        // Vorschlag angezeigt -- ein Knopf, der sicher 409 liefert, ist
+        // schlimmer als ein Vorschlag, den es nicht gibt. Wie viele
+        // ausgefallen sind, sagt der Lauf dem Nutzer ausdruecklich --
+        // gezaehlt wird das beim Aufrufer als Differenz zur Zahl der
+        // vorgeschlagenen Edits.
+      }
+    }
+    return authorized
+  }
+
   useEffect(() => {
     selectedModelTierRef.current = selectedModelTier
     selectedModelRef.current = state.ui.selectedChatModel
@@ -523,6 +668,86 @@ export function useEditorSuggestions({
     () => Object.values(state.editorSuggestions).filter((suggestion) => suggestion.documentId === activeDocument?.id),
     [activeDocument?.id, state.editorSuggestions],
   )
+  const documentSuggestionsRef = useRef(documentSuggestions)
+  useEffect(() => {
+    documentSuggestionsRef.current = documentSuggestions
+  }, [documentSuggestions])
+
+  // P7: pending AGENT patches of the open markdown document become
+  // tracked-change suggestions on open/reload — the server rows were
+  // previously invisible after the tool approval. Collaboration
+  // documents keep their own shared-changes review surface. Fetched
+  // once per document focus; already-mirrored patch ids (any status,
+  // this session) are skipped so re-opening never duplicates groups.
+  useEffect(() => {
+    const document = activeDocument
+    if (!document || document.contentMode === 'collaboration' || !activeEditor) {
+      return
+    }
+    let cancelled = false
+    const options = { apiKey, workspaceId: state.workspaceId }
+    void (async () => {
+      let pendingRows: Array<{ patch_id: string; source: string }>
+      try {
+        pendingRows = (
+          await listEditorDocumentPatches(document.id, 'pending', options)
+        ).data
+      } catch (error) {
+        // 404 = deployment without the editor-patch service (router is
+        // conditional) — nothing to mirror. Anything else: warn loudly;
+        // the rows stay pending server-side and reload on the next open,
+        // so no decision is lost.
+        if (!hasHttpStatus(error, 404)) {
+          console.warn('Editor-Patch-Abruf fehlgeschlagen:', error)
+        }
+        return
+      }
+      const known = new Set(
+        documentSuggestionsRef.current.flatMap((item) =>
+          item.serverPatch ? [item.serverPatch.patchId] : [],
+        ),
+      )
+      for (const row of pendingRows) {
+        if (row.source !== 'agent' || known.has(row.patch_id)) continue
+        let patch: AgentPatchWire
+        try {
+          patch = await getEditorPatch(row.patch_id, options)
+        } catch (error) {
+          console.warn('Editor-Patch-Detail fehlgeschlagen:', error)
+          continue
+        }
+        if (cancelled || patch.status !== 'pending') continue
+        const now = new Date().toISOString()
+        const groupId = createLocalId('editor-suggestion-group')
+        const records = createAgentPatchSuggestionRecords({
+          activeEditor: mountedRef.current ? activeEditor : null,
+          document,
+          groupId,
+          locale,
+          now,
+          patch,
+        })
+        if (cancelled || records.length === 0) continue
+        dispatch({
+          group: {
+            assistantMessage: patch.summary,
+            createdAt: now,
+            documentId: document.id,
+            id: groupId,
+            origin: { kind: 'global_run' },
+            warnings: patch.warnings.length ? patch.warnings : undefined,
+          },
+          suggestions: records,
+          type: 'createEditorSuggestionGroup',
+        })
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // Deliberately narrow deps: fetch once per document focus;
+    // suggestion state is read through the ref above.
+  }, [activeDocument?.id, activeDocument?.contentMode, activeEditor])
   const aiReadOnlyReason = editorCollaborationActionDisabledReason(
     activeDocument,
     collaboration,
@@ -673,11 +898,85 @@ export function useEditorSuggestions({
   }
 
   async function handleAcceptSuggestion(suggestion: EditorSuggestionRecord) {
+    if (suggestion.serverPatch) {
+      // P7: a server-side agent patch is ONE unit — accepting any of its
+      // edits applies the whole patch through the official endpoint
+      // (audit-true status, CAS against the current revision), never the
+      // client-side edit path.
+      await decideServerPatch(suggestion, 'accept')
+      return
+    }
     if (activeDocument?.contentMode === 'collaboration') {
       await publishCollaborationSuggestionBatch([suggestion])
       return
     }
     acceptLegacySuggestion(suggestion)
+  }
+
+  async function decideServerPatch(
+    suggestion: EditorSuggestionRecord,
+    decision: 'accept' | 'reject',
+  ): Promise<void> {
+    const patchId = suggestion.serverPatch?.patchId
+    const document = activeDocument
+    if (!patchId || !document) return
+    const siblings = documentSuggestions.filter(
+      (item) =>
+        item.serverPatch?.patchId === patchId && item.status === 'pending',
+    )
+    const siblingIds = siblings.map((item) => item.id)
+    if (siblingIds.length === 0) return
+    setSuggestionRuns((map) => {
+      let next = map
+      for (const id of siblingIds) next = markRunning(next, id)
+      return next
+    })
+    try {
+      if (decision === 'accept') {
+        const contentBefore = document.contentMarkdown
+        await applyEditorPatch(patchId, document.revision, {
+          apiKey,
+          workspaceId: state.workspaceId,
+        })
+        const server = await getEditorDocument(document.id, {
+          apiKey,
+          workspaceId: state.workspaceId,
+        })
+        // Adopt the server-applied body via the SAME rebase the autosave
+        // 409 path uses: keystrokes typed during the window win locally
+        // and re-push as base+1 — nothing is silently discarded.
+        dispatch({
+          contentMarkdown: server.content_markdown ?? '',
+          documentId: document.id,
+          pushedContentMarkdown: contentBefore,
+          revision: server.revision,
+          type: 'rebaseServerEditorDocument',
+        })
+        for (const id of siblingIds) {
+          dispatch({ suggestionId: id, type: 'acceptEditorSuggestion' })
+        }
+      } else {
+        await rejectEditorPatch(patchId, '', {
+          apiKey,
+          workspaceId: state.workspaceId,
+        })
+        for (const id of siblingIds) {
+          dispatch({ suggestionId: id, type: 'rejectEditorSuggestion' })
+        }
+      }
+    } catch (error) {
+      // Visible on every card of the patch (revision conflict, network):
+      // the rows stay pending server-side, the user can retry.
+      const message = messageFromError(error)
+      setSuggestionRuns((map) => {
+        let next = map
+        for (const id of siblingIds) next = markError(next, id, message)
+        return next
+      })
+      return
+    } finally {
+      setSuggestionRuns((map) => clearRunning(map, siblingIds))
+    }
   }
 
   async function handleAcceptSuggestionGroup(groupId: string) {
@@ -702,7 +1001,7 @@ export function useEditorSuggestions({
   }
 
   function acceptLegacySuggestion(suggestion: EditorSuggestionRecord): void {
-    if (!applySuggestionToEditor(suggestion)) {
+    if (!activeEditor || !applySuggestionToEditor(activeEditor, suggestion)) {
       dispatch({ suggestionId: suggestion.id, type: 'markEditorSuggestionStale' })
       return
     }
@@ -839,6 +1138,10 @@ export function useEditorSuggestions({
   async function handleRejectSuggestion(suggestionId: string) {
     const suggestion = documentSuggestions.find((item) => item.id === suggestionId)
     if (!suggestion || suggestion.status !== 'pending') return
+    if (suggestion.serverPatch) {
+      await decideServerPatch(suggestion, 'reject')
+      return
+    }
     if (activeDocument?.contentMode === 'collaboration') {
       let authorityGuard: CollaborationAuthorityGuard | null
       try {
@@ -1078,26 +1381,6 @@ export function useEditorSuggestions({
     setInstructionFeedback(null)
   }
 
-  function applySuggestionToEditor(suggestion: EditorSuggestionRecord): boolean {
-    if (!activeEditor) return false
-    const { target } = resolveSuggestionTarget(activeEditor, suggestion)
-    if (!target) return false
-    const content = normalizeEditorMarkdownForTiptap(suggestion.proposedText)
-    if (target.kind === 'replace') {
-      activeEditor.chain().focus().insertContentAt(
-        target.range,
-        content,
-        { contentType: 'markdown' },
-      ).run()
-      return true
-    }
-    activeEditor.chain().focus().insertContentAt(
-      target.at,
-      content,
-      { contentType: 'markdown' },
-    ).run()
-    return true
-  }
 
   async function handleGlobalRun(globalInstruction: string) {
     if (!activeDocument || isGlobalRunning) return
@@ -1466,7 +1749,25 @@ export function useEditorSuggestions({
         now,
         proposal,
       })
-      if (suggestions.length > 0) {
+      // Im Kollaborationsmodus braucht JEDER Vorschlag eine vorherige
+      // Autorisierung durch einen creator-privaten Entwurf -- sonst weist
+      // der Serverwaechter die spaetere Veroeffentlichung mit
+      // "patch_not_found" ab. Der Entwurf kann nur an einer Kommentarzeile
+      // haengen, also legt der Lauf je Edit eine Traegerzeile an. Sie ist
+      // vom Typ 'assistant_edit' und taucht in der Notizliste nicht auf.
+      const authorized = activeDocument.contentMode === 'collaboration'
+        ? await persistInstructionCarriers(
+            suggestions,
+            draftInstruction,
+            now,
+            authorityGuard,
+          )
+        : suggestions
+      // EINE Zahl fuer beide Ursachen: ein Edit, dessen Anker nicht
+      // aufloesbar war, und einer, dessen Autorisierung scheiterte, sind
+      // fuer den Nutzer dasselbe -- er sieht ihn nicht.
+      const unauthorized = proposal.edits.length - authorized.length
+      if (authorized.length > 0) {
         authorityGuard?.assertCurrent()
         dispatch({
           group: {
@@ -1477,7 +1778,7 @@ export function useEditorSuggestions({
             origin: { kind: 'global_run' },
             warnings: proposal.warnings,
           },
-          suggestions,
+          suggestions: authorized,
           type: 'createEditorSuggestionGroup',
         })
       }
@@ -1485,11 +1786,16 @@ export function useEditorSuggestions({
       dispatch({ draft: '', type: 'setEditorAssistantDraft' })
       authorityGuard?.assertCurrent()
       onGlobalSuccess()
+      // Ein Edit, der nicht autorisiert werden konnte, wird nicht angezeigt.
+      // Das darf der Nutzer nicht erst durch Nachzaehlen merken.
+      const warnings = unauthorized > 0
+        ? [...(proposal.warnings ?? []), unauthorizedEditsWarning(locale, unauthorized)]
+        : proposal.warnings
       setInstructionFeedback({
-        editCount: suggestions.length,
-        message: proposal.assistantMessage || defaultInstructionResultMessage(locale, suggestions.length),
+        editCount: authorized.length,
+        message: proposal.assistantMessage || defaultInstructionResultMessage(locale, authorized.length),
         state: 'result',
-        warnings: proposal.warnings,
+        warnings,
       })
     } catch (error) {
       if (controller.signal.aborted) return
@@ -1550,9 +1856,16 @@ export function privateSuggestionDraftCreatePayload(
   if (!suggestion.privateDraft) {
     throw new Error('Private suggestion draft identity is missing.')
   }
+  // Ankerstelle und Einfuegeart reisen NUR bei der Erstanlage mit: sie
+  // gehoeren zur Identitaet des Vorschlags. Ohne sie baut der
+  // Uebernahmepfad nach einem Neuladen jede Einfuegung als Ersetzung neu
+  // auf -- aus "nach dem Anker einfuegen" wird "den Anker ersetzen".
+  const anchorText = suggestion.anchorText ?? suggestion.originalText
   return {
+    ...(anchorText ? { anchor_text: anchorText } : {}),
     anchor_version: 1,
     change_summary: suggestion.changeSummary ?? [],
+    ...(suggestion.editPosition ? { edit_position: suggestion.editPosition } : {}),
     evidence: suggestion.evidence ?? null,
     group_id: suggestion.groupId,
     patch_id: suggestion.privateDraft.patchId,
@@ -1578,23 +1891,35 @@ export function privateSuggestionDraftRevisionPayload(
   }
 }
 
+/** Die Kennungen, unter denen dieser Vorschlag veroeffentlicht wird.
+ *
+ * Sie stammen IMMER aus dem gespeicherten Entwurf. Frueher wurden sie hier
+ * frisch gewuerfelt, wenn keiner vorlag -- eine erfundene Identitaet, zu der
+ * es per Konstruktion keine Autorisierung geben konnte. Der Server wies sie
+ * mit "patch_not_found" ab, und der Nutzer las eine Konfliktmeldung fuer
+ * etwas, das nie eine Chance hatte.
+ *
+ * Fehlt der Entwurf, ist das ein Programmfehler weiter oben und wird als
+ * solcher benannt, statt eine Veroeffentlichung zu versuchen, die sicher
+ * scheitert. */
 export function privateSuggestionPublicationIdentity(
   suggestion: EditorSuggestionRecord,
   locale: 'de' | 'en',
 ): { commandId: string; patchId: string } {
-  return suggestion.privateDraft
-    ? {
-        commandId: suggestion.privateDraft.publicationCommandId,
-        patchId: suggestion.privateDraft.patchId,
-      }
-    : {
-        commandId: requiredRandomUuid(locale),
-        patchId: requiredRandomUuid(locale),
-      }
+  if (!suggestion.privateDraft) {
+    throw new Error(missingPrivateDraftMessage(locale))
+  }
+  return {
+    commandId: suggestion.privateDraft.publicationCommandId,
+    patchId: suggestion.privateDraft.patchId,
+  }
 }
 
 type InstructionRecordArgs = {
   activeEditor: Editor | null
+  /** Vorbelegt aus dem Editor, wie bei `materializePrivateSuggestionComment`.
+   *  Der echte Adapter haengt an einer lebenden Yjs-Bindung. */
+  anchorAdapter?: EditorRelativePositionAdapter | null
   document: EditorDocumentRecord
   groupId: string
   locale: 'de' | 'en'
@@ -1664,8 +1989,60 @@ function preparePrivateSuggestionRecord(
   }
 }
 
-function createInstructionSuggestionRecords({
+/** Mirror one server-side AGENT patch as suggestion records (P7).
+
+    Reuses the instruction converter (the wire edit shape is field-
+    identical) ONE EDIT AT A TIME, so the edit↔record pairing survives
+    the converter's legitimate skips (an empty insert is skipped here
+    AND by the server apply). Every record carries the server patch
+    identity — the accept/reject handlers route those through the
+    official patch endpoints instead of the client-side edit path. */
+export function createAgentPatchSuggestionRecords({
   activeEditor,
+  document,
+  groupId,
+  locale,
+  now,
+  patch,
+}: {
+  activeEditor: Editor | null
+  document: EditorDocumentRecord
+  groupId: string
+  locale: 'de' | 'en'
+  now: string
+  patch: AgentPatchWire
+}): EditorSuggestionRecord[] {
+  const records: EditorSuggestionRecord[] = []
+  for (const edit of patch.edits) {
+    const converted = createInstructionSuggestionRecords({
+      activeEditor,
+      document,
+      groupId,
+      locale,
+      now,
+      proposal: {
+        assistantMessage: patch.summary,
+        edits: [edit],
+        warnings: patch.warnings.length ? patch.warnings : undefined,
+      },
+    })
+    for (const record of converted) {
+      records.push({
+        ...record,
+        serverPatch: {
+          editId: edit.id,
+          patchId: patch.patch_id,
+        },
+      })
+    }
+  }
+  return records
+}
+
+
+export function createInstructionSuggestionRecords({
+  activeEditor,
+  anchorAdapter = activeEditor ? privateSuggestionAnchorAdapter(activeEditor) : null,
   document,
   groupId,
   locale,
@@ -1673,9 +2050,6 @@ function createInstructionSuggestionRecords({
   proposal,
 }: InstructionRecordArgs): EditorSuggestionRecord[] {
   const suggestions: EditorSuggestionRecord[] = []
-  const anchorAdapter = activeEditor
-    ? privateSuggestionAnchorAdapter(activeEditor)
-    : null
   proposal.edits.forEach((edit, index) => {
     const position = edit.position
     const anchorText = edit.find.trim()
@@ -1687,7 +2061,17 @@ function createInstructionSuggestionRecords({
       document.contentMode === 'collaboration' && position !== 'append',
     )
     if (serializedAnchor.status === 'failed') {
-      throw new Error(requiredRelativeAnchorMessage(locale))
+      // Ohne Adapter kann KEIN Edit dieses Laufs einen relativen Anker
+      // bekommen -- eine Aussage ueber den Lauf, also weiterhin ein Abbruch.
+      // Mit Adapter betrifft der Fehlschlag genau diesen Edit: ihn zu
+      // ueberspringen kostet den Nutzer eine Aenderung, ihn werfen zu lassen
+      // kostet ihn alle, samt bezahltem Modelllauf. Uebersprungene Edits
+      // bleiben nicht still -- sie gehen in die Differenz ein, aus der
+      // `unauthorizedEditsWarning` ihre Zahl zieht.
+      if (!anchorAdapter) {
+        throw new Error(requiredRelativeAnchorMessage(locale))
+      }
+      return
     }
     const anchor = serializedAnchor.anchor
     const originalText = position === 'replace' ? anchorText : ''
@@ -1722,8 +2106,14 @@ function createInstructionAnchor(
 ): EditorCommentAnchorRecord {
   const anchorText = edit.find.trim()
   if (activeEditor && anchorText) {
+    // P7-E2: model-authored edits resolve STRICTLY (server semantics:
+    // hard quote disqualification, abstain on ties) — an ambiguous
+    // anchor degrades visibly to the end-of-document record below
+    // instead of guessing an occurrence the server would skip. The
+    // hint is inert in strict mode.
     const range = resolveAnchorRange(activeEditor, {
       hint: 1,
+      mode: 'strict',
       quoteAfter: edit.quote_after,
       quoteBefore: edit.quote_before,
       text: anchorText,
@@ -1742,7 +2132,7 @@ function createInstructionAnchor(
   }
 }
 
-function resolveSuggestionTarget(
+export function resolveSuggestionTarget(
   editor: Editor,
   suggestion: EditorSuggestionRecord,
   adapter = privateSuggestionAnchorAdapter(editor),
@@ -1940,7 +2330,7 @@ export function buildCollaborationSuggestionTargetMarkdown(
       const applied = target.kind === 'replace'
         ? editor.commands.insertContentAt(
             target.range,
-            collaborationReplacementContent(editor, target.range, content),
+            suggestionReplacementContent(editor, target.range, content),
             { contentType: 'markdown' },
           )
         : editor.commands.insertContentAt(
@@ -1956,7 +2346,40 @@ export function buildCollaborationSuggestionTargetMarkdown(
   }
 }
 
-function collaborationReplacementContent(
+/** Einen angenommenen Vorschlag ins Dokument einsetzen.
+ *
+ * Frei statt in der Hook-Closure, damit der lokale Pfad ueberhaupt
+ * pruefbar ist: die Testbahn laeuft ohne DOM, ein Hook waere dort nicht
+ * zu rendern. Beide Einsetzstellen — hier und der Kollaborationspfad —
+ * benutzen DIESELBE Inline-Entscheidung; sie existierte vorher nur im
+ * Kollaborationszweig, weshalb lokal aus einem Satz drei Absaetze wurden. */
+export function applySuggestionToEditor(
+  editor: Editor,
+  suggestion: EditorSuggestionRecord,
+): boolean {
+  const { target } = resolveSuggestionTarget(editor, suggestion)
+  if (!target) return false
+  const content = normalizeEditorMarkdownForTiptap(suggestion.proposedText)
+  if (target.kind === 'replace') {
+    editor.chain().focus().insertContentAt(
+      target.range,
+      suggestionReplacementContent(editor, target.range, content),
+      { contentType: 'markdown' },
+    ).run()
+    return true
+  }
+  editor.chain().focus().insertContentAt(
+    target.at,
+    content,
+    { contentType: 'markdown' },
+  ).run()
+  return true
+}
+
+/** Ein Ein-Absatz-Vorschlag in einem Inline-Bereich wird als Inline-Inhalt
+ * eingesetzt, alles andere unveraendert als Markdown. Reine Editor-Semantik,
+ * kein Kollaborationsbelang — deshalb ohne den frueheren Praefix. */
+function suggestionReplacementContent(
   editor: Editor,
   range: EditorTextRange,
   markdown: string,
@@ -2041,6 +2464,18 @@ function staleAnchorMessage(locale: 'de' | 'en'): string {
   return locale === 'de'
     ? 'Textstelle hat sich geändert. Bitte markieren Sie den Text neu.'
     : 'The referenced text changed. Please select the passage again.'
+}
+
+function unauthorizedEditsWarning(locale: 'de' | 'en', count: number): string {
+  return locale === 'de'
+    ? `${count} ${count === 1 ? 'Aenderung konnte' : 'Aenderungen konnten'} nicht vorbereitet werden und ${count === 1 ? 'wird' : 'werden'} nicht angezeigt.`
+    : `${count} ${count === 1 ? 'change' : 'changes'} could not be prepared and ${count === 1 ? 'is' : 'are'} not shown.`
+}
+
+function missingPrivateDraftMessage(locale: 'de' | 'en'): string {
+  return locale === 'de'
+    ? 'Dieser Vorschlag hat keine gespeicherte Autorisierung und kann nicht veroeffentlicht werden. Bitte erzeugen Sie ihn neu.'
+    : 'This suggestion has no stored authorisation and cannot be published. Please generate it again.'
 }
 
 function requiredRelativeAnchorMessage(locale: 'de' | 'en'): string {

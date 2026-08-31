@@ -19,6 +19,8 @@ export type GeneratedSystemSmokeDocuments = {
   remotePresence: string | { id: string }
   revocation: string | { id: string }
   sourceReadonly: string | { id: string }
+  staysConnected: string | { id: string }
+  aiSuggestion: string | { id: string }
   suggestion: string | { id: string }
   suggestionUndo: string | { id: string }
 }
@@ -43,6 +45,8 @@ export function buildGeneratedSystemSmokeFixture(options: {
     remotePresence: string
     revocation: string
     sourceReadonly: string
+    staysConnected: string
+    aiSuggestion: string
     suggestion: {
       documentId: string
       expectedAuthorId: string

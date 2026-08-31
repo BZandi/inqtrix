@@ -4,7 +4,7 @@
 
 ## Scope
 
-This page is the single source of truth for environment variables: it lists **every** variable the code reads. `Settings` is a Pydantic `BaseSettings` container with fourteen groups — Models, Providers, Agent, Server, Auth, Storage, Queue, Knowledge, Quota, Sharing, Editor guest links, Collaboration, Agent platform, Observability — each loaded from process environment variables and optionally a local `.env` file. The groups are the only env-coupled surface: the providers and stores they configure receive every value via constructor arguments (Constructor-First). Two further categories sit outside `Settings` and are documented at the end of this page: [process-level variables](#process-level-variables-outside-settings) read by the server/worker bootstrap, and [development and test-only variables](#development-and-test-only-variables) read by scripts, the eval harness, and the test suite.
+This page is the single source of truth for environment variables: it lists **every** variable the code reads. `Settings` is a Pydantic `BaseSettings` container with fourteen groups — Models, Providers, Agent, Server, Auth, Storage, Queue, Knowledge, Quota, Sharing, Editor guest links, Collaboration, Agent platform, Observability — each loaded from process environment variables and optionally a local `.env` file. The groups are the only env-coupled surface: the providers and stores they configure receive every value via constructor arguments (Constructor-First). Further categories sit outside `Settings` and are documented on this page: [process-level variables](#process-level-variables-outside-settings) read by the server/worker bootstrap (including the Helm maintenance job's `INQTRIX_K8S_*` group), [Compose-only variables](#compose-only-variables) read by the container stack rather than the app, and [development and test-only variables](#development-and-test-only-variables) read by scripts, the eval harness, and the test suite. Which PROCESS reads a variable — and how to set it in a deployment that does not use the shipped templates — is mapped in [Who reads a variable](#who-reads-a-variable--and-how-to-set-it-yourself).
 
 Deep-dive pages (provider recipes, auth modes, logging, knowledge profiles) cover usage and walkthroughs; when they name a variable they link back here for the authoritative definition. The committed `.env.example` and `deploy/.env.stack.example` templates are practical starting points, not the reference — this page is.
 
@@ -15,6 +15,53 @@ Deep-dive pages (provider recipes, auth modes, logging, knowledge profiles) cove
 3. Built-in defaults for non-sensitive values.
 
 When the same variable exists in both process env and `.env`, the process environment wins. Do not commit `.env` and do not rely on checked-in config files for production credentials.
+
+### Who reads a variable — and how to set it yourself
+
+A variable that never reaches its reader looks like a setting and is not
+one. Inqtrix has **six** reader surfaces, and setting a value requires a
+different mechanism per surface. This matters most when a deployment writes
+its own manifests or its own `values.yaml` instead of using the shipped
+templates:
+
+| Reader | What reads it | How to set it in your own deployment |
+| --- | --- | --- |
+| **api + worker** (the `Settings` groups on this page) | Both processes load the identical `Settings` object; whether a knob does anything is a property of which code runs in that process, not of the variable name. | Helm: a `config:`/`extraConfig:` entry — the ConfigMap is mounted into api **and** worker via `envFrom`. Raw manifests: set the env var on both pods. |
+| **web gateway** (`src/inqtrix_web_gateway/`) | Raw `os.getenv`, no pydantic. `INQTRIX_MAX_UPSTREAM_CONNECTIONS`, `RESEARCH_DESK_*`, `INQTRIX_BACKEND_URL`, … | Helm: the web pod has **no `envFrom`** — `config:` never reaches it. Use the typed value where one exists (`web.maxUpstreamConnections`) or `web.extraEnv`. Raw manifests: env var on the web pod. |
+| **collaboration server** (`apps/collaboration-server/`) | Its own config parser; several `INQTRIX_COLLABORATION_*` names have no `Settings` counterpart. | Helm: via `config:` — the chart re-emits the relevant keys onto the collaboration container explicitly. Raw manifests: env vars on that pod. |
+| **process bootstrap** (outside `Settings`) | `INQTRIX_LOG_*`, `INQTRIX_SERVER_HOST/PORT`, `OTEL_*`, and the Helm-job-only `INQTRIX_K8S_*` group ([below](#process-level-variables-outside-settings)). | Same as api/worker; the `INQTRIX_K8S_*` group is set only on the chart's maintenance job. |
+| **Compose interpolation** | `${VAR}` in `deploy/compose/*.yaml` — configures containers, never the app. `INQTRIX_BUNDLED_POSTGRES_MAX_CONNECTIONS`, `INQTRIX_WEB_PORT`, `INQTRIX_PG_*`, … | Shell/env-file at `podman compose` invocation time. **These names do nothing on Kubernetes** — see the per-variable notes. |
+| **Helm values without an env-var form** | `postgres.maxConnections` renders a container **argument**; `api.replicaCount` renders `spec.replicas`. | Only via `values.yaml`. Putting the Compose-era name into `config:` creates a ConfigMap entry nothing reads. |
+
+Two hazards deserve names:
+
+- **Chart-derived variables.** The chart computes up to 20 ConfigMap keys
+  itself (three always — `INQTRIX_OBJECT_STORE_BACKEND`,
+  `INQTRIX_REPLICA_COUNT`, `INQTRIX_DATABASE_RUNTIME_LOGIN_POLICY` — plus
+  up to 15 more from the `qdrant`/`s3`/`valkey`/`metrics`/`collaboration`
+  profiles, and 2 further keys — `INQTRIX_PUBLIC_BASE_URL`,
+  `INQTRIX_TRUSTED_PROXY_HOPS` — derived from the chart-owned
+  ingress/Route rather than from any profile). A deployment that bypasses the chart must set
+  these itself; the full list with conditions is in
+  [Kubernetes deployment](../deployment/kubernetes.md). They are not
+  homogeneous: `INQTRIX_PUBLIC_BASE_URL` may be overridden explicitly,
+  while `INQTRIX_REPLICA_COUNT` may not — the chart refuses to render when
+  it appears in `config:`/`extraConfig:`, because a too-low value is
+  caught at render time but a too-HIGH value would pass the chart and then
+  crash-loop every api pod at startup via the app's local-store guard.
+- **Process asymmetry.** Because api and worker share one ConfigMap, every
+  shared key is always set on both pods — and some govern only one:
+  `INQTRIX_WORKER_CONCURRENCY` and `INQTRIX_UPLOAD_MAX_CONCURRENT` act in
+  the worker; `INQTRIX_STREAM_READER_WORKERS` acts in the api;
+  `MAX_CONCURRENT`/`RUN_MAX_CONCURRENT` act in both but differently
+  (admission in the api; in the worker they bound agent child-run
+  submission through the same store). The per-variable tables note this
+  where it bites.
+
+The **effective** values of the concurrency limits are visible at runtime
+in Settings → Admin → System (`/v1/admin/system/runtime`, instance-admin
+only) — published there and not on the unauthenticated `/v1/capabilities`,
+because capacity ceilings have no browser consumer.
 
 Minimal env-only LiteLLM setup:
 
@@ -148,10 +195,11 @@ Configures the FastAPI surface started by `python -m inqtrix`: the upstream LLM 
 | `LITELLM_BASE_URL` | `http://litellm-proxy:4000/v1` | OpenAI-compatible gateway for the auto-created `LiteLLM` provider. Must include `/v1`. |
 | `LITELLM_API_KEY` | `sk-placeholder` | Bearer key for the gateway. The obvious placeholder makes misconfiguration fail loudly on the first upstream call. |
 | `PERPLEXITY_API_KEY` | *(empty)* | Key for the auto-created `PerplexitySearch` provider (its own endpoint, not the gateway). |
-| `MAX_CONCURRENT` | `6` | Concurrent `/v1/chat/completions` requests. Native runs reuse this unless `RUN_MAX_CONCURRENT` is set. Each active run holds one thread (the research graph is synchronous), so this also bounds the in-process thread pool; the real ceiling is the provider rate limit + host CPU/RAM. |
-| `RUN_MAX_CONCURRENT` | *(unset)* | Optional separate active-job cap for native `/v1/runs`. |
+| `MAX_CONCURRENT` | `100` | Concurrent `/v1/chat/completions` requests. Native runs reuse this unless `RUN_MAX_CONCURRENT` is set. Each active run holds one thread (the research graph is synchronous), and this value sizes the dedicated AI thread lane — with headroom, because a disconnected stream frees its admission slot while its thread runs on. The real ceiling is the provider rate limit + host CPU/RAM. |
+| `INQTRIX_STREAM_READER_WORKERS` | `128` | Threads reserved for event-stream readers, kept apart from the AI thread lane so a busy chat cannot stall event delivery. Drawn on by every open run stream, every open indexing stream, and every streamed chat completion. Sized above the run cap so a hundred runs with a viewer each still get their own reader. Past this many readers they are served in rotation — events are delayed, never dropped. A waiting thread costs a few kilobytes and does not hold the interpreter lock. |
+| `RUN_MAX_CONCURRENT` | `100` | Active-job cap for native `/v1/runs`, set explicitly so runs and chat have independent ceilings. Clearing the environment variable yields this default, NOT the historical fallback to `MAX_CONCURRENT`, and an EMPTY value (`RUN_MAX_CONCURRENT=`) fails startup validation rather than meaning "unset". The `None` fallback survives only for callers that build settings programmatically. |
 | `RUN_MAX_CONCURRENT_PER_USER` | *(unset)* | Optional per-user fairness bound under the global run cap: a single subject's QUEUED+RUNNING native runs. Parked (waiting) agent runs are excluded; agent child runs count against the parent's user (size it above one agent tree). Unset = admission stays purely global (single-tenant unchanged); the monthly quota still bounds each user's spend. A rejected submit answers HTTP 429 with `reason=per_user_limit`. |
-| `RUN_QUEUE_MAX_SIZE` | `50` | Waiting native runs; a full queue returns HTTP 429 on `POST /v1/runs` (with `reason=queue_full`). |
+| `RUN_QUEUE_MAX_SIZE` | `100` | Waiting native runs; a full queue returns HTTP 429 on `POST /v1/runs` (with `reason=queue_full`). |
 | `INQTRIX_SERVER_API_KEY` | *(empty)* | Static Bearer gate on chat, text-improvement, test-run, and native run routes (`hmac.compare_digest`). `/health` and `/v1/models` stay public. Also drives auth-mode inference (see Auth). |
 | `INQTRIX_METRICS_ENABLED` | `false` | Mount the Prometheus `/metrics` endpoint (run-queue gauges, admission rejections by reason, per-route request latency, plus the shared call metrics: LLM request/duration/token series, search, retrieval steps, run durations, queue wait, worker jobs, indexed documents; bounded cardinality, no run-id/subject/session labels). Needs the image built with the `metrics` extra (the stack image bakes it in); the flag alone otherwise logs a WARNING and stays off. Bearer-gated with the API key when one is set, else keep it cluster-internal. Worker processes get their own exporter via `INQTRIX_WORKER_METRICS_PORT` (Queue section). See [Metrics](../observability/metrics.md). |
 | `INQTRIX_SERVER_CORS_ORIGINS` | *(empty)* | Comma-list of allowed origins; installs `CORSMiddleware` with credentials. `*` is accepted but WARNs (browsers reject wildcard with credentials). |
@@ -159,7 +207,7 @@ Configures the FastAPI surface started by `python -m inqtrix`: the upstream LLM 
 | `INQTRIX_PUBLIC_BASE_URL` | *(empty)* | Externally reachable base URL. It anchors collaboration same-origin checks behind TLS proxies, OIDC callback derivation, and clickable `/v1/sources/...` citations. Empty keeps internal `inqtrix://` citations and forwarded headers cannot authorize a collaboration origin. Helm derives it from an enabled Ingress (or an explicit-host Route); explicit config wins. |
 | `INQTRIX_MAX_TOTAL_INPUT_TOKENS` | `500000` | Approximate-token DoS cap on `question` + `messages[]` (estimated `len(text) // 4`). |
 
-Further tuning: `RUN_COMPLETED_TTL_SECONDS` (300 — how long finished native runs stay queryable in memory), `RUN_EVENT_BUFFER_SIZE` (200 — replay buffer for late SSE subscribers), `INQTRIX_DELETION_MAX_CONCURRENT` (2 — aggregate deletion workers admitted in one process; the distributed worker ceiling still applies), `INQTRIX_DELETION_DISPATCH_TIMEOUT_SECONDS` (240 — after this long unclaimed in `queued`, a deletion operation fails with `dispatch_timeout` so it stops being a dead end and becomes retryable; keep it above the worker reconciler's re-dispatch window of 120 s plus its 60 s tick, and lower it to about 60 s only without the Valkey queue, where no reconciler exists), `INQTRIX_DELETION_RECEIPT_RETENTION_SECONDS` (2592000 — 30-day retention for terminal technical deletion receipts without source content), `MAX_MESSAGES_HISTORY` (20), `INQTRIX_MAX_MESSAGE_COUNT` (200 — HTTP 413 above), `PERPLEXITY_BASE_URL`, `INQTRIX_SERVER_TLS_KEYFILE` / `INQTRIX_SERVER_TLS_CERTFILE` (both or neither; partial setup raises `RuntimeError`). See [Security hardening](../deployment/security-hardening.md).
+Further tuning: `RUN_COMPLETED_TTL_SECONDS` (300 — how long finished native runs stay queryable in memory), `RUN_EVENT_BUFFER_SIZE` (200 — replay buffer for late SSE subscribers), `INQTRIX_DELETION_MAX_CONCURRENT` (2 — aggregate deletion workers admitted in one process; the distributed worker ceiling still applies), `INQTRIX_UPLOAD_MAX_CONCURRENT` (6 — uploads executed at once by a WORKER process; unlike `INQTRIX_DELETION_MAX_CONCURRENT` beside it, this one has no effect in the API process, where uploads are reconciled one at a time on a path that is not configurable. A research run spends its thread waiting on a provider, but an upload extracts text from the file itself and spends real CPU, so it is capped independently of `INQTRIX_WORKER_CONCURRENCY`, which remains an additional upper bound), `INQTRIX_DELETION_DISPATCH_TIMEOUT_SECONDS` (240 — after this long unclaimed in `queued`, a deletion operation fails with `dispatch_timeout` so it stops being a dead end and becomes retryable; keep it above the worker reconciler's re-dispatch window of 120 s plus its 60 s tick, and lower it to about 60 s only without the Valkey queue, where no reconciler exists), `INQTRIX_DELETION_RECEIPT_RETENTION_SECONDS` (2592000 — 30-day retention for terminal technical deletion receipts without source content), `MAX_MESSAGES_HISTORY` (20), `INQTRIX_MAX_MESSAGE_COUNT` (200 — HTTP 413 above), `PERPLEXITY_BASE_URL`, `INQTRIX_SERVER_TLS_KEYFILE` / `INQTRIX_SERVER_TLS_CERTFILE` (both or neither; partial setup raises `RuntimeError`). See [Security hardening](../deployment/security-hardening.md).
 
 **Interactions.** `INQTRIX_SERVER_API_KEY` is the inference input for `INQTRIX_AUTH_MODE=infer`. `INQTRIX_PUBLIC_BASE_URL` feeds knowledge citation links, the derived OIDC callback URL, and the trusted external collaboration origin. `LITELLM_BASE_URL`/`LITELLM_API_KEY` are reused as the default embedding endpoint by the Knowledge block.
 
@@ -240,15 +288,16 @@ Moves native-run execution out of the API process. Two orthogonal upgrades keep 
 |----------|---------|--------|
 | `INQTRIX_QUEUE_BACKEND` | `memory` | `memory` executes runs in-process; `valkey` dispatches to workers and requires `INQTRIX_STORAGE_BACKEND=postgres` plus a non-empty `INQTRIX_VALKEY_URL`. |
 | `INQTRIX_VALKEY_URL` | *(empty)* | Connection URL (`redis://` scheme, e.g. `redis://127.0.0.1:6379/0`). Required for `valkey`; ignored otherwise. |
-| `INQTRIX_WORKER_CONCURRENCY` | `2` | Runs one worker process executes concurrently. Each run blocks one thread for its full duration (the research graph is synchronous). |
+| `INQTRIX_WORKER_CONCURRENCY` | `100` | Process-wide execution ceiling for one worker replica. It sizes the research loop directly and caps every other loop: indexing also by `INQTRIX_REINDEX_MAX_CONCURRENT`, upload by `INQTRIX_UPLOAD_MAX_CONCURRENT`, deletion by `INQTRIX_DELETION_MAX_CONCURRENT` — each runs at the LOWER of the two, and a ceiling that binds is named in the worker's startup log. That split is why the default is high: a research run blocks its thread waiting on a provider, while an upload extracts text and spends real CPU. |
 | `INQTRIX_WORKER_METRICS_PORT` | `0` | Worker-process Prometheus port. `0` (default) keeps the worker without an exporter; a port >0 serves that worker's own registry on `http://0.0.0.0:<port>/metrics` (one target per worker process, no pushgateway, **no bearer gate** — keep it cluster-internal). Requires `INQTRIX_METRICS_ENABLED=true` and the `metrics` extra — otherwise one WARNING and the exporter stays off. |
 
 Agent Desk instant tasks execute inside their parent run's six-wide local wave,
 so they do not consume six worker slots. Delegated `web_research` tasks are
 separate child runs: to execute six such children physically at once, provision
-at least six worker slots across replicas (for example one worker with
-`INQTRIX_WORKER_CONCURRENCY=6` or three replicas at the default `2`). The
-planner/Agent width never silently rewrites the worker setting.
+at least six worker slots across replicas. The shipped
+`INQTRIX_WORKER_CONCURRENCY` of `100` already covers a wave; a deployment that
+lowered it below the Agent width serialises the wave rather than starving it.
+The planner/Agent width never silently rewrites the worker setting.
 | `INQTRIX_WORKER_MAX_ATTEMPTS` | `3` | Delivery attempts before a run is dead-lettered and marked failed. Redelivery of finished runs is a no-op. |
 
 Further tuning: `INQTRIX_WORKER_HEARTBEAT_SECONDS` (15.0 — workers re-claim their in-flight stream entries so long runs are not stolen), `INQTRIX_WORKER_CLAIM_IDLE_SECONDS` (90.0 — idle threshold for reclaiming entries from crashed workers; sized to heartbeat loss, not run duration).
@@ -279,7 +328,7 @@ The internal document-retrieval engine: collections, document ingestion, hybrid 
 
 Further tuning: `INQTRIX_RERANK_CANDIDATE_DEPTH` (40 — pool retrieved before rerank reduces to top_k), `INQTRIX_KNOWLEDGE_TOP_K` (8; per-request override via `knowledge_filters.top_k`), `INQTRIX_EMBEDDING_PROVIDER` (`openai_compatible` or `azure`; `azure` reads `INQTRIX_EMBEDDING_AZURE_ENDPOINT` / `INQTRIX_EMBEDDING_AZURE_API_KEY` / `INQTRIX_EMBEDDING_AZURE_API_VERSION` (`2024-10-21`) with fallbacks to the established `AZURE_AI_PROJECT_ENDPOINT` / `AZURE_AI_PROJECT_API_KEY` / `AZURE_OPENAI_API_KEY` variables), `INQTRIX_EMBEDDING_BASE_URL` / `INQTRIX_EMBEDDING_API_KEY` (empty reuses `LITELLM_BASE_URL` / `LITELLM_API_KEY`), `INQTRIX_SELECTABLE_EMBEDDING_MODELS` (empty hides the collection-creation picker), `INQTRIX_KNOWLEDGE_CHUNK_MAX_CHARS` (2000), `INQTRIX_KNOWLEDGE_MAX_DOCUMENT_CHARS` (2000000).
 
-Background indexing tuning: `INQTRIX_REINDEX_MAX_CONCURRENT` (6 — how many DIFFERENT collection-generation or document-revision jobs are admitted concurrently; a collection generation is serialized per collection while normal document revisions use their own CAS identity; in worker mode `INQTRIX_WORKER_CONCURRENCY` remains the execution ceiling), `INQTRIX_REINDEX_QUEUE_MAX_SIZE` (50 — waiting indexing jobs; full → 429), `INQTRIX_REINDEX_COMPLETED_TTL_SECONDS` (3600 — retention of terminal records only, in memory and PostgreSQL), `INQTRIX_REINDEX_HISTORY_LIMIT` (10 — terminal records kept per collection), `INQTRIX_REINDEX_EVENT_BUFFER_SIZE` (200 — recent events retained for late SSE subscribers in the memory tier), and `INQTRIX_GENERATION_ROLLBACK_RETENTION_SECONDS` (604800 — rollback window for the prior validated generation). No setting or built-in age limit expires queued, running, cancelling, `paused_dependency`, or `paused_validation` work. Queue-backed delivery uses reconcile/reclaim plus attempt fencing after worker loss; a no-queue restart reconstructs paused work from the canonical operation identity before changing it to queued. If that identity is incomplete, the API returns the typed `resume_unavailable` conflict and leaves the checkpoint paused. Rebuilds validate document/revision identity, exact source spans and chunk/point counts, and embedding dimension before switching the Postgres pointer. Expired generations leave `rollback_available` before vector deletion starts; the existing worker reconciliation cadence resumes `deleting`/`cleanup_failed` work idempotently, so an interrupted cleanup is visible and never masquerades as a usable rollback generation.
+Background indexing tuning: `INQTRIX_REINDEX_MAX_CONCURRENT` (6 — how many DIFFERENT collection-generation or document-revision jobs are admitted concurrently; a collection generation is serialized per collection while normal document revisions use their own CAS identity; in worker mode the indexing loop runs at the LOWER of this and `INQTRIX_WORKER_CONCURRENCY`, so this value bounds execution as well as admission), `INQTRIX_REINDEX_QUEUE_MAX_SIZE` (50 — waiting indexing jobs; full → 429), `INQTRIX_REINDEX_COMPLETED_TTL_SECONDS` (3600 — retention of terminal records only, in memory and PostgreSQL), `INQTRIX_REINDEX_HISTORY_LIMIT` (10 — terminal records kept per collection), `INQTRIX_REINDEX_EVENT_BUFFER_SIZE` (200 — recent events retained for late SSE subscribers in the memory tier), and `INQTRIX_GENERATION_ROLLBACK_RETENTION_SECONDS` (604800 — rollback window for the prior validated generation). No setting or built-in age limit expires queued, running, cancelling, `paused_dependency`, or `paused_validation` work. Queue-backed delivery uses reconcile/reclaim plus attempt fencing after worker loss; a no-queue restart reconstructs paused work from the canonical operation identity before changing it to queued. If that identity is incomplete, the API returns the typed `resume_unavailable` conflict and leaves the checkpoint paused. Rebuilds validate document/revision identity, exact source spans and chunk/point counts, and embedding dimension before switching the Postgres pointer. Expired generations leave `rollback_available` before vector deletion starts; the existing worker reconciliation cadence resumes `deleting`/`cleanup_failed` work idempotently, so an interrupted cleanup is visible and never masquerades as a usable rollback generation.
 
 **Interactions.** The embedding endpoint defaults to the Server block's LiteLLM gateway, so a standard proxy deployment needs no extra embedding configuration. The sparse branch (`INQTRIX_KNOWLEDGE_SPARSE=bm25_german`) requires a Qdrant server >= 1.15.3 (server-side BM25 inference): an EXTERNAL Qdrant older than that fails fast at startup with an actionable error naming both remedies (upgrade the server or set `INQTRIX_KNOWLEDGE_SPARSE=off`); when the server is unreachable at startup, the requirement is logged as a warning and re-checked on the next start — the bundled compose/Helm Qdrant (1.19.0) always satisfies it. `INQTRIX_RERANKER_PROVIDER=llm` runs through the deployment's own LLM provider (fast tier) — no rerank API contract needed, but roughly an order of magnitude costlier and slower than a cross-encoder, hard-capped at 20 candidates per query with a visible log line. `INQTRIX_PUBLIC_BASE_URL` (Server) turns knowledge citations into clickable `/v1/sources/...` links. The dev compose stack provides Qdrant. Combining an `http://` `INQTRIX_QDRANT_URL` with `INQTRIX_QDRANT_API_KEY` makes qdrant-client emit its insecure-connection `UserWarning` at startup — by design, because the key crosses the wire unencrypted. In-cluster plain HTTP constrained by a NetworkPolicy is an accepted posture (the warning is informational); for TLS set `INQTRIX_QDRANT_URL=https://…`. There is no Qdrant-specific CA-bundle setting, so a private-CA certificate must be trusted by the container's system trust store.
 
@@ -446,6 +495,7 @@ Workspace-agent limits (`mode=workspace_agent`), enforced server-side:
 | `INQTRIX_AGENT_DEFAULT_MODE` | `agent_kernel` | Which algorithm the Agent Desk submits by default (`workspace_agent` or `agent_kernel`); capabilities publish the EFFECTIVE value and fall back to `workspace_agent` while the independent kernel registration gate fails. |
 | `INQTRIX_AGENT_DEFAULT_AUTONOMY` | `balanced` | Permission mode when a request names none: `strict` / `balanced` / `autonomous`. |
 | `INQTRIX_AGENT_MAX_PARALLEL_CHILDREN` | `6` | Width of one independent Agent Desk task wave and maximum child-research submissions per wave. Provider-specific gates remain the final concurrency ceiling. |
+| `INQTRIX_AGENT_CHECKPOINTER_POOL_SIZE` | `4` | Server connections the agent checkpointer's own psycopg pool may hold, process-wide, shared by every concurrent agent run. One source, three displays: the pool, the startup connection-budget line, and the admin runtime endpoint all read this value. Read by api and worker (`config:`/`extraConfig:` on Kubernetes). Raise only when a measurement shows pool-wait under agent target load — this pool adds to the engine budget, it never replaces it. |
 | `INQTRIX_AGENT_DISCOVERY_MAX_TOOL_CALLS` | `15` | Hard probe budget of the read-only discovery phase. |
 | `INQTRIX_AGENT_MAX_PLAN_TASKS` | `8` | Task ceiling the plan validator enforces (agent plans AND user edits). |
 | `INQTRIX_AGENT_MAX_REPLAN_ROUNDS` | `2` | Additive replan rounds before the run proceeds as-is. |
@@ -612,9 +662,70 @@ A few variables are read by the process bootstrap rather than the Pydantic group
 
 Full logging behaviour, file paths, and forensic-event interaction with `OBSERVABILITY_PROFILE`: [Logging](../observability/logging.md).
 
+The Helm chart's schema-maintenance job (`job-owner-maintenance.yaml`) reads
+its own group, set only on that one-shot pod and never on api/worker
+(`src/inqtrix/deployment/kubernetes_maintenance.py`):
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `INQTRIX_K8S_NAMESPACE` | *(required)* | Namespace whose workloads the maintenance job quiesces. |
+| `INQTRIX_K8S_RELEASE` | *(required)* | Helm release name used to select the workloads. |
+| `INQTRIX_K8S_WORKLOAD_PREFIX` | *(required)* | Name prefix of the Deployments the job scales to zero: api, worker, collaboration, and pgbouncer. |
+| `INQTRIX_K8S_QUIESCE_TIMEOUT_SECONDS` | `300` | How long the job waits for pods to drain before failing. |
+| `INQTRIX_K8S_MAINTENANCE_ROLE_BINDING` | `<prefix>-schema-maintenance` | RoleBinding whose presence authorizes the scale operation. |
+
 ## The two-level rule
 
 Knowledge env switches are the OPERATOR CEILING; the per-request retrieval profile (`schnell` | `standard` | `gruendlich` | `tief` | `auto`) selects within it. `INQTRIX_KNOWLEDGE_GATE=off`, `INQTRIX_KNOWLEDGE_GROUNDING=off`, `INQTRIX_RERANKER_PROVIDER=none`, and `INQTRIX_KNOWLEDGE_GATE_MAX_ROUNDS` clamp every profile, and every clamp is visible (`degraded_stages` in events, result state, and `/v1/capabilities`). Full matrix and stage notes in [Retrieval profiles](knowledge-profiles.md).
+
+## Compose-only variables
+
+These names are read by `deploy/compose/*.yaml` interpolation — they
+configure **containers**, never the Inqtrix application, and they were
+previously buried in the development section although several are
+production controls of the Compose stack. **None of them does anything on
+Kubernetes**; the per-entry notes name the Helm equivalent where one
+exists. Set them in the invoking shell or the paired env files at
+`podman compose` time.
+
+Production-relevant:
+
+- `INQTRIX_WEB_BIND_ADDRESS` (`127.0.0.1`; set `0.0.0.0` only for an
+  explicit trusted-LAN test) and `INQTRIX_WEB_PORT` (`8080`) publish the
+  single selected `web` adapter — Python by default or nginx with the
+  explicit override; internal API and data-service ports remain private.
+- `INQTRIX_BUNDLED_POSTGRES_MAX_CONNECTIONS` (`300`) is the server ceiling
+  on concurrent connections for the **bundled** PostgreSQL, rendered as
+  `-c max_connections=...`. The image default of 100 does not cover the
+  shipped run cap: run threads open a connection per database operation,
+  and an API plus a worker each add their own pooled budget, both reported
+  at startup. The 300 carries headroom for that sum; it is an engineering
+  estimate, not a figure measured at the run cap. Every connection costs
+  memory, so raise the `postgres` service's memory limit alongside it. An
+  external database ignores this entirely — its ceiling belongs to whoever
+  runs it. **Helm equivalent: `postgres.maxConnections`** (a values key
+  rendering a container argument, not an env var — putting this name into
+  `config:` creates a ConfigMap entry nothing reads).
+- `INQTRIX_MIGRATION_ENV_FILE` selects an optional separate migration env
+  file; API and worker never load it.
+
+Development conveniences:
+
+- `INQTRIX_WEB_NGINX_IMAGE` (`inqtrix-web-nginx:local`) changes only the
+  image name/tag used by `compose.web-nginx.yaml`; the override still
+  selects nginx.
+- `INQTRIX_LLDAP_WEB_PORT` (`17170`) changes the loopback-only LLDAP setup
+  UI port when the `ldap` profile is active.
+- `compose.dev-ports.yaml` accepts `INQTRIX_PG_PORT` (`5432`),
+  `INQTRIX_API_PORT` (`5100`), `INQTRIX_QDRANT_PORT` (`6333`),
+  `INQTRIX_QDRANT_GRPC_PORT` (`6334`), `INQTRIX_VALKEY_PORT` (`6379`),
+  `INQTRIX_S3_PORT` (`8333`), `INQTRIX_COLLABORATION_PORT` (`1234`), and
+  `INQTRIX_LDAP_PORT` (`3890`). They change host ports only; every bind
+  remains on `127.0.0.1`.
+
+The bundled Langfuse profile has its own Compose-only set, documented next
+to the observability group:
+[Compose-only variables for the bundled Langfuse profile](#compose-only-variables-for-the-bundled-langfuse-profile).
 
 ## Development and test-only variables
 
@@ -655,25 +766,6 @@ collaboration frame limits. `WEB_CONCURRENCY` is deliberately not a second
 worker control: when it conflicts with `RESEARCH_DESK_WORKERS`, the gateway
 ignores it and emits a warning. The full table with defaults lives in
 [React UI: gateway environment variables](../deployment/react-ui.md#gateway-environment-variables).
-
-Compose-only web ingress: `INQTRIX_WEB_BIND_ADDRESS` (`127.0.0.1`; set
-`0.0.0.0` only for an explicit trusted-LAN test) and `INQTRIX_WEB_PORT`
-(`8080`). These values publish the single selected `web` adapter—Python by
-default or nginx with the explicit override; internal API and data-service
-ports remain private.
-
-Other Compose-only controls are:
-
-- `INQTRIX_WEB_NGINX_IMAGE` (`inqtrix-web-nginx:local`) changes only the image
-  name/tag used by `compose.web-nginx.yaml`; the override still selects nginx.
-- `INQTRIX_LLDAP_WEB_PORT` (`17170`) changes the loopback-only LLDAP setup UI
-  port when the `ldap` profile is active.
-- `compose.dev-ports.yaml` accepts `INQTRIX_PG_PORT` (`5432`),
-  `INQTRIX_API_PORT` (`5100`), `INQTRIX_QDRANT_PORT` (`6333`),
-  `INQTRIX_QDRANT_GRPC_PORT` (`6334`), `INQTRIX_VALKEY_PORT` (`6379`),
-  `INQTRIX_S3_PORT` (`8333`), `INQTRIX_COLLABORATION_PORT` (`1234`), and
-  `INQTRIX_LDAP_PORT` (`3890`). They change host ports only; every bind remains
-  on `127.0.0.1`.
 
 Optional deployment CLI (`python -m inqtrix.deploy` / `inqtrix-deploy`):
 `INQTRIX_DEPLOY_ENGINE` selects the default Compose engine only when

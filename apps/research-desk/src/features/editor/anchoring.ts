@@ -8,6 +8,15 @@ export type AnchorLocator = {
   quoteAfter?: string
   quoteBefore?: string
   text: string
+  /** Ambiguity policy (P7-E2). `'nearest'` (default, the legacy
+   * behavior) scores quotes softly and falls back to hint distance —
+   * right for re-anchoring records that carry a REAL position hint.
+   * `'strict'` mirrors the server resolver (`_resolve_anchor`): a set
+   * quote must match or the candidate is disqualified, summed distance
+   * decides, and a tie or quoteless ambiguity ABSTAINS (null) instead
+   * of guessing — right for model-authored edits, where the server
+   * would silently skip whatever the client guessed. */
+  mode?: 'strict' | 'nearest'
 }
 
 export type EditorTextRange = {
@@ -98,18 +107,24 @@ export function materializeCommentThread(
 export function resolveAnchorRange(editor: Editor, locator: AnchorLocator): EditorTextRange | null {
   const index = buildDocumentTextIndex(editor)
   for (const needle of searchNeedlesForText(locator.text)) {
-    const candidates: EditorTextRange[] = []
+    const candidates: IndexedCandidate[] = []
     let matchIndex = index.text.indexOf(needle)
     while (matchIndex >= 0) {
       const range = rangeFromIndexedMatch(index.positions, matchIndex, needle.length)
-      if (range) candidates.push(range)
+      if (range) candidates.push({ length: needle.length, range, start: matchIndex })
       matchIndex = index.text.indexOf(needle, matchIndex + 1)
     }
     if (candidates.length <= 1) {
-      if (candidates[0]) return candidates[0]
+      if (candidates[0]) return candidates[0].range
       continue
     }
-    const picked = pickAnchorCandidate(editor, candidates, locator)
+    if (locator.mode === 'strict') {
+      // The first needle form that matches at all DECIDES: an ambiguous
+      // outcome abstains instead of retrying a shorter (even more
+      // ambiguous) form — skipping beats guessing, like the server.
+      return pickStrictCandidate(index.text, candidates, locator)
+    }
+    const picked = pickAnchorCandidate(editor, candidates.map((c) => c.range), locator)
     if (picked) return picked
   }
   return null
@@ -222,6 +237,35 @@ function normalizeSearchText(value: string): string {
   return value.replace(/\s+/g, ' ').trim()
 }
 
+/** Die Zeichen zurueckgewinnen, die der Serialisierer maskiert hat.
+ *
+ * Am echten Serialisierer gemessen: aus `Der Wert snake_case und <FIX> sowie
+ * [Marke] & Co.` wird `Der Wert snake\_case und &lt;FIX&gt; sowie \[Marke\]
+ * &amp; Co.` -- er maskiert also auf ZWEI Wegen, mit Entitaeten UND mit
+ * Backslash. Wer nur einen davon aufloest, laesst die Haelfte der Faelle
+ * weiterhin am Anker scheitern.
+ *
+ * `&amp;` wird ZULETZT aufgeloest: sonst wuerde aus dem maskierten Text
+ * `&amp;lt;` (also woertlich "&lt;") faelschlich `<`. */
+function decodeMarkdownEntities(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0*39;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
+/** Backslash-Maskierung aufloesen -- NACH den Markdown-Blockregeln.
+ *
+ * Die Reihenfolge ist tragend: ein maskiertes `\>` ist Text, kein Zitat. Loeste
+ * man es vor der Blockregel auf, fraesse `^\s{0,3}>\s?` es als Zitatpraefix
+ * weg und der Suchtext verlore sein erstes Zeichen. Dasselbe gilt fuer `\-`
+ * und `\#` am Zeilenanfang. */
+function decodeMarkdownEscapes(value: string): string {
+  return value.replace(/\\([\\`*_{}[\]()#+\-.!>|~])/g, '$1')
+}
+
 export function markdownToPlainTextForEditor(value: string): string {
   return normalizeSearchText(value
     .replace(/```[\s\S]*?```/g, (block) => block.replace(/```[^\n]*\n?|```/g, ' '))
@@ -238,11 +282,142 @@ export function markdownToPlainTextForEditor(value: string): string {
     .replace(/\|/g, ' '))
 }
 
+/** Der Text, wie der Nutzer ihn im Editor SIEHT.
+ *
+ * Die Suchtexte eines KI-Laufs sind Markdown: das Modell bekommt die
+ * Markdown-Projektion des Dokuments und antwortet in derselben Sprache. Der
+ * Anker wird aber im Editor-Text gesucht, wo das Zeichen bereits aufgeloest
+ * ist. Am echten Serialisierer gemessen wird dabei auf ZWEI Wegen maskiert:
+ * aus `<FIX>` wird `&lt;FIX&gt;`, aus `[Marke]` wird `\[Marke\]`. Beides muss
+ * zurueckgenommen werden, sonst findet der Lauf seinen eigenen Anker nicht --
+ * und weil der Wurf in der Edit-Schleife steht, riss ein einziger nicht
+ * auffindbarer Edit den GANZEN Lauf ab.
+ *
+ * Bewusst OHNE die Markdown-Blockregeln: die stecken in
+ * :func:`markdownToPlainTextForEditor` und bleiben unveraendert. Ein
+ * maskiertes `\>` ist Text und darf nicht als Zitatpraefix weggefressen
+ * werden -- was genau passierte, haette man die Aufloesung in jene Kette
+ * gelegt. */
+export function literalTextFromMarkdown(value: string): string {
+  return normalizeSearchText(decodeMarkdownEscapes(decodeMarkdownEntities(value)))
+}
+
 function searchNeedlesForText(value: string): string[] {
-  const candidates = [normalizeSearchText(value), markdownToPlainTextForEditor(value)]
+  const candidates = [
+    normalizeSearchText(value),
+    markdownToPlainTextForEditor(value),
+    literalTextFromMarkdown(value),
+  ]
   return [...new Set(candidates)]
     .filter(Boolean)
     .sort((a, b) => b.length - a.length)
+}
+
+export type IndexedCandidate = {
+  /** Start offset of the match in the normalized document text. */
+  start: number
+  /** Needle length in normalized characters. */
+  length: number
+  range: EditorTextRange
+}
+
+/**
+ * Server-faithful ambiguity policy (P7-E2), the structural twin of
+ * `_resolve_anchor` in editor_patch_service.py applied to the
+ * normalized editor text: a set quote that does not appear on its side
+ * of an occurrence DISQUALIFIES that occurrence; the summed distance
+ * between occurrence and its nearest matching quotes decides; a tie or
+ * a quoteless multi-match returns null (abstention). No hint, no
+ * partial-quote points, no context window.
+ */
+export function pickStrictCandidate(
+  text: string,
+  candidates: IndexedCandidate[],
+  locator: AnchorLocator,
+): EditorTextRange | null {
+  const before = markdownToPlainTextForEditor(locator.quoteBefore ?? '')
+  const after = markdownToPlainTextForEditor(locator.quoteAfter ?? '')
+  if (!before && !after) return null
+  let best: EditorTextRange | null = null
+  let bestScore: number | null = null
+  let tied = false
+  for (const candidate of candidates) {
+    let score = 0
+    if (before) {
+      // Python: content.rfind(quote_before, 0, index) — the quote must
+      // END at or before the occurrence start.
+      const pos = text.slice(0, candidate.start).lastIndexOf(before)
+      if (pos < 0) continue
+      score += candidate.start - (pos + before.length)
+    }
+    if (after) {
+      const pos = text.indexOf(after, candidate.start + candidate.length)
+      if (pos < 0) continue
+      score += pos - (candidate.start + candidate.length)
+    }
+    if (bestScore === null || score < bestScore) {
+      best = candidate.range
+      bestScore = score
+      tied = false
+    } else if (score === bestScore) {
+      tied = true
+    }
+  }
+  return tied ? null : best
+}
+
+/**
+ * Byte-literal port of the server anchor resolver (`_resolve_anchor`,
+ * editor_patch_service.py) over the ORIGINAL markdown — no
+ * normalization, hard quote disqualification, summed distance,
+ * tie/quoteless-ambiguity abstention. The cross-language parity
+ * fixture pins this function and the Python original against the same
+ * cases; it also answers "would the server apply this edit?" before a
+ * proposal is rendered.
+ */
+export function resolveAnchorInMarkdown(
+  content: string,
+  edit: { find: string; quoteBefore?: string; quoteAfter?: string },
+): number | null {
+  const find = edit.find
+  if (!find) return null
+  const quoteBefore = edit.quoteBefore ?? ''
+  const quoteAfter = edit.quoteAfter ?? ''
+  const occurrences: number[] = []
+  let start = 0
+  while (true) {
+    const index = content.indexOf(find, start)
+    if (index < 0) break
+    occurrences.push(index)
+    start = index + 1
+  }
+  if (occurrences.length === 0) return null
+  if (occurrences.length === 1) return occurrences[0]
+  if (!quoteBefore && !quoteAfter) return null
+  let best: number | null = null
+  let bestScore: number | null = null
+  let tied = false
+  for (const index of occurrences) {
+    let score = 0
+    if (quoteBefore) {
+      const beforePos = content.slice(0, index).lastIndexOf(quoteBefore)
+      if (beforePos < 0) continue
+      score += index - (beforePos + quoteBefore.length)
+    }
+    if (quoteAfter) {
+      const afterPos = content.indexOf(quoteAfter, index + find.length)
+      if (afterPos < 0) continue
+      score += afterPos - (index + find.length)
+    }
+    if (bestScore === null || score < bestScore) {
+      best = index
+      bestScore = score
+      tied = false
+    } else if (score === bestScore) {
+      tied = true
+    }
+  }
+  return tied ? null : best
 }
 
 function pickAnchorCandidate(

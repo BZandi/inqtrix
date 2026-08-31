@@ -327,3 +327,53 @@ def test_instant_search_without_urls_keeps_provider_answer_as_evidence() -> None
     assert search["provider_answer"] == provider_answer
     assert search["citations"] == []
     assert artifact.refs[0]["reference_id"] == reference["reference_id"]
+
+
+def test_a_canvas_update_adds_sources_instead_of_replacing_them():
+    """Betreiber-Entscheid 2026-08-30 (A): a model that fact-checks one
+    paragraph and passes only the newly found source used to DELETE every
+    source the document already carried — silently, because the write
+    itself succeeds. An update merges now."""
+    from inqtrix.agents.kernel.tools import _merged_refs
+
+    existing = [
+        {"reference_id": "ref_a", "label": "W1", "url": "https://a.example"},
+        {"reference_id": "ref_b", "label": "W2", "url": "https://b.example"},
+    ]
+    added = [
+        {"reference_id": "ref_c", "label": "W3", "url": "https://c.example"}
+    ]
+    merged = _merged_refs(existing, added)
+    assert [ref["reference_id"] for ref in merged] == [
+        "ref_a",
+        "ref_b",
+        "ref_c",
+    ]
+
+
+def test_the_same_source_twice_stays_one_entry_with_its_first_row():
+    """Identity is the reference_id — the content hash of the citation.
+    A re-read that produced a THINNER row must not overwrite the richer
+    one the document already has, or a source silently loses its
+    excerpt while keeping its label."""
+    from inqtrix.agents.kernel.tools import _merged_refs
+
+    rich = {
+        "reference_id": "ref_a",
+        "label": "W1",
+        "url": "https://a.example",
+        "excerpt": "Der belegende Satz.",
+    }
+    thin = {"reference_id": "ref_a", "label": "W1", "url": "https://a.example"}
+    merged = _merged_refs([rich], [thin])
+    assert len(merged) == 1
+    assert merged[0]["excerpt"] == "Der belegende Satz."
+
+
+def test_a_reference_without_an_id_is_never_silently_swallowed():
+    """A row the ledger could not key must still reach the document:
+    dropping it would remove a source the model explicitly attached."""
+    from inqtrix.agents.kernel.tools import _merged_refs
+
+    merged = _merged_refs([{"label": "W1"}], [{"label": "W2"}])
+    assert len(merged) == 2

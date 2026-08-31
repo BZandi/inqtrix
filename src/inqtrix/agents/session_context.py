@@ -20,6 +20,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
+from inqtrix.agents.artifact_names import (
+    NAMED_ARTIFACT_KINDS,
+    assign_artifact_file_names,
+)
 from inqtrix.agents.clarification import round_qa_lines
 
 if TYPE_CHECKING:
@@ -136,6 +140,14 @@ def _build(
             session_id,
             exc_info=True,
         )
+    # P9 (K1): file names derive from the titles in created order (the
+    # listing is oldest first) — same algorithm as the frontend, pinned
+    # by the shared parity fixture.
+    file_names = assign_artifact_file_names(
+        (artifact.artifact_id, artifact.title)
+        for artifact in artifacts
+        if artifact.kind in NAMED_ARTIFACT_KINDS
+    )
     registry = tuple(
         {
             "artifact_id": artifact.artifact_id,
@@ -143,6 +155,11 @@ def _build(
             "title": artifact.title,
             "revision": artifact.revision,
             "updated_by": artifact.updated_by,
+            **(
+                {"name": file_names[artifact.artifact_id]}
+                if artifact.artifact_id in file_names
+                else {}
+            ),
         }
         for artifact in artifacts
     )

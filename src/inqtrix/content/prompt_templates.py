@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -104,6 +104,19 @@ class PromptTemplateRepository(Protocol):
         actor_user_id: uuid.UUID | None,
     ) -> None: ...
 
+    async def seed_default_templates(
+        self,
+        records: Sequence[PromptTemplateRecord],
+        *,
+        tenant_id: str,
+        user_id: uuid.UUID,
+    ) -> bool: ...
+    """Claim the per-user seed marker and, when the user owns no
+    template yet, insert *records* — both in ONE atomic step. Returns
+    whether records were inserted. The marker is claimed either way, so
+    seeding runs at most once per user forever (a deleted default stays
+    deleted; an already-grown library is never injected into)."""
+
 
 def new_template_id() -> str:
     """Mint one ``pt_``-prefixed identifier."""
@@ -115,6 +128,10 @@ class MemoryPromptTemplateRepository:
 
     def __init__(self) -> None:
         self._records: dict[str, PromptTemplateRecord] = {}
+        # Volatile like the records themselves: after a restart the
+        # defaults reseed together with the store being empty again —
+        # consistent memory-backend semantics (nothing here is durable).
+        self._seed_markers: set[tuple[str, uuid.UUID]] = set()
         self._lock = threading.RLock()
         self._authority: MemoryAuthorityCoordinator | None = None
 
@@ -254,6 +271,29 @@ class MemoryPromptTemplateRepository:
                         scope="prompt_templates",
                     )
                 return stored
+
+    async def seed_default_templates(
+        self,
+        records: Sequence[PromptTemplateRecord],
+        *,
+        tenant_id: str,
+        user_id: uuid.UUID,
+    ) -> bool:
+        with self._lock:
+            key = (tenant_id, user_id)
+            if key in self._seed_markers:
+                return False
+            self._seed_markers.add(key)
+            owns_any = any(
+                record.tenant_id == tenant_id
+                and record.owner_user_id == user_id
+                for record in self._records.values()
+            )
+            if owns_any:
+                return False
+            for record in records:
+                self._records[record.id] = record
+            return True
 
     async def delete(
         self,

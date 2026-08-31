@@ -171,10 +171,25 @@ function boundedTextDifference(
   }
 }
 
+/** Ein kurzer, woertlicher Auszug des Nutzertextes fuer die Aenderungsanzeige.
+ *
+ * Woertlich ist hier die Zusage: `value` stammt aus `textBetween` und enthaelt
+ * darum nur Text, nie Auszeichnung. Frueher lief zusaetzlich ein Tag-Strip
+ * (`/<[^>]*>/g`) darueber. Der hat keine Auszeichnung entfernt, sondern
+ * echten Inhalt: aus `a<b>c` wurde `ac`, aus `Map<K,V>` wurde `Map`. Die
+ * Anzeige behauptete danach eine andere Aenderung, als der Nutzer gemacht hat.
+ *
+ * Gekuerzt wird an Codepoint-Grenzen. `slice` schneidet an UTF-16-Einheiten
+ * und kann ein Ersatzzeichenpaar zerreissen; das entstehende einzelne Surrogat
+ * ist kein gueltiges JSON, und Postgres lehnt es beim jsonb-Schreiben ab
+ * ("Unicode low surrogate must follow a high surrogate"). Ein Emoji an der
+ * 160-Zeichen-Grenze haette so denselben Schaden angerichtet wie die
+ * Winkelklammer: den Schreibvorgang und damit das Dokument. */
 function boundedExcerpt(value: string): string {
   const clean = value
-    .replace(/<[^>]*>/g, '')
     .replace(/\s+/g, ' ')
     .trim()
-  return clean.length <= 160 ? clean : `${clean.slice(0, 159)}…`
+  const codepoints = Array.from(clean)
+  if (codepoints.length <= 160) return clean
+  return `${codepoints.slice(0, 159).join('')}…`
 }

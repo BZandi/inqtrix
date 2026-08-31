@@ -1258,6 +1258,86 @@
     padding: 0;
   }
 
+  /* Code-block chrome (P5, kompakt): KEIN permanenter Balken — Sprach-
+     Pill und Copy-Icon schweben oben rechts und erscheinen erst bei
+     Hover/Fokus (Notion-Muster). Der Zeilenrhythmus folgt dem Fliesstext
+     (line-height 1.6 statt der geerbten 2.0 — gemessen 28px vs. 22.4px),
+     damit ein Block im Text "aus einem Guss" sitzt. */
+  .editor-prose .editor-code-block {
+    position: relative;
+    margin: 0.75rem 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+  }
+
+  .editor-prose .editor-code-block pre {
+    margin: 0;
+    border-radius: 0;
+    padding: 0.625rem 0.75rem;
+    line-height: 1.6;
+  }
+
+  .editor-prose .editor-code-block-controls {
+    position: absolute;
+    top: 0.3rem;
+    right: 0.3rem;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+  }
+
+  .editor-prose .editor-code-block:hover .editor-code-block-controls,
+  .editor-prose .editor-code-block:focus-within .editor-code-block-controls {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .editor-prose .editor-code-block-controls {
+      transition: none;
+    }
+  }
+
+  .editor-prose .editor-code-block-language {
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    background: var(--background);
+    padding: 0.06rem 0.3rem;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--muted-foreground);
+    cursor: pointer;
+  }
+
+  .editor-prose .editor-code-block-language:hover {
+    color: var(--foreground);
+  }
+
+  .editor-prose .editor-code-block-language:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  .editor-prose .editor-code-block-copy {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    background: var(--background);
+    padding: 0.2rem;
+    color: var(--muted-foreground);
+  }
+
+  .editor-prose .editor-code-block-copy:hover {
+    color: var(--foreground);
+  }
+
   .editor-prose a {
     color: var(--brand);
     position: relative;
@@ -2970,4 +3050,18 @@
   [role="tab"] {
     border-color: ButtonText;
   }
+}
+
+/* P9c: pending canvas-comment anchors stay visibly highlighted until
+   they travel with the next submission (Docs/Notion pending
+   convention). Painted via the CSS Custom Highlight API — browsers
+   without it simply show no highlight (visual enhancement only). */
+::highlight(inqtrix-canvas-comment) {
+  background-color: color-mix(in srgb, var(--brand) 26%, transparent);
+}
+
+/* P9d: the entry currently being edited stands out from its pending
+   siblings. */
+::highlight(inqtrix-canvas-comment-active) {
+  background-color: color-mix(in srgb, var(--brand) 45%, transparent);
 }

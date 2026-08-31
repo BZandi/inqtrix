@@ -82,6 +82,8 @@ type RawFixture = {
     remotePresence?: unknown
     revocation?: unknown
     sourceReadonly?: unknown
+    staysConnected?: unknown
+    aiSuggestion?: unknown
     suggestion?: RawSuggestionDocument
     suggestionUndo?: unknown
   }
@@ -153,6 +155,8 @@ export type CollaborationE2EStack = {
     remotePresence: string
     revocation: string
     sourceReadonly: string
+    staysConnected: string
+    aiSuggestion: string
     suggestion: {
       documentId: string
       expectedAuthorId: string
@@ -296,6 +300,8 @@ export function loadCollaborationE2EConfiguration(
     remotePresence: optionalCapabilityString(raw.documents?.remotePresence),
     revocation: requiredString(raw.documents?.revocation, 'fixture.documents.revocation', reasons),
     sourceReadonly: optionalCapabilityString(raw.documents?.sourceReadonly),
+    staysConnected: optionalCapabilityString(raw.documents?.staysConnected),
+    aiSuggestion: optionalCapabilityString(raw.documents?.aiSuggestion),
     suggestion: parseSuggestionDocument(raw.documents?.suggestion, reasons),
     suggestionUndo: optionalCapabilityString(raw.documents?.suggestionUndo),
   }
@@ -403,6 +409,14 @@ export function loadCollaborationE2EConfiguration(
         mobileDrawers: documents.mobileDrawers ?? documents.directEdit,
         remotePresence: documents.remotePresence ?? documents.directEdit,
         sourceReadonly: documents.sourceReadonly ?? documents.directEdit,
+        // Rueckfall bewusst auf concurrent, NICHT auf directEdit: dort
+        // laedt ein Szenario die Seite absichtlich neu, und der
+        // Stabilitaetstest liefe in den Deckel von fuenf gleichzeitigen
+        // Sitzungen je Nutzer und Dokument.
+        staysConnected: documents.staysConnected
+          ?? documents.concurrent
+          ?? documents.directEdit,
+        aiSuggestion: documents.aiSuggestion ?? documents.directEdit,
         suggestion,
         suggestionUndo: documents.suggestionUndo ?? documents.directEdit,
       },

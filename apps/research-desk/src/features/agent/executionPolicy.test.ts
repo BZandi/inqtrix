@@ -115,6 +115,7 @@ describe('normalizeAgentExecutionSnapshot', () => {
           reason: 'operator_ceiling_exactly_once_required',
         },
       },
+      toolGrants: [],
     })
   })
 
@@ -214,5 +215,44 @@ describe('resolveAgentExecutionDisplay', () => {
       selectedResponseForm: 'canvas',
       selectedDepth: 'deep',
     }).executionDirective).toBe('quick_web')
+  })
+})
+
+describe('toolGrants normalization (P6B)', () => {
+  it('reads run-wide grants and keeps only non-empty strings', () => {
+    const snapshot = normalizeAgentExecutionSnapshot({
+      execution: {
+        execution_directive: '',
+        effective_mode: 'agent_kernel',
+        response_form: 'chat',
+        depth: 'normal',
+        model: '',
+        reasoning_effort: '',
+        source_policy: { web: 'available', knowledge: 'available' },
+        consent_reason: '',
+        tool_use_counts: { web: 0, knowledge: 0 },
+        limits: {},
+        tool_grants: ['web_instant', '', 7, 'load_skill'],
+      },
+    })
+    expect(snapshot?.toolGrants).toEqual(['web_instant', 'load_skill'])
+  })
+
+  it('defaults to no grants on older servers without the key', () => {
+    const snapshot = normalizeAgentExecutionSnapshot({
+      execution: {
+        execution_directive: '',
+        effective_mode: 'agent_kernel',
+        response_form: 'chat',
+        depth: 'normal',
+        model: '',
+        reasoning_effort: '',
+        source_policy: { web: 'available', knowledge: 'available' },
+        consent_reason: '',
+        tool_use_counts: { web: 0, knowledge: 0 },
+        limits: {},
+      },
+    })
+    expect(snapshot?.toolGrants).toEqual([])
   })
 })

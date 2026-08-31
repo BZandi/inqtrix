@@ -359,3 +359,232 @@ def test_deep_mission_children_run_the_deep_wire_profile(monkeypatch):
         assert len(children) == 1
         assert children[0]["agent_overrides"]["report_profile"] == "deep"
         assert children[0]["status"] == "completed"
+
+
+def test_skill_instructions_reach_the_critic(monkeypatch):
+    """S1: a skill states the FORM the report must take, and the writing
+    prompts already call it binding ("Form und Ton folgen ihnen"). The
+    critic has to see that same instruction — otherwise a memo can
+    ignore an attached skill and still pass, which would make a skill a
+    suggestion while the plan-gate guidance field is a contract.
+    """
+    llm = ScriptedLLM(overrides={"SkillPointCheck": _point_check([])})
+    client = make_agent_client(monkeypatch, llm=llm)
+    with client:
+        skill_id = _create_skill(
+            client,
+            label="kritikform",
+            instructions_markdown="Gliedere als Sprechzettel fuer die GF.",
+            clarification_points=[],
+        )
+        run_id = _submit(client, skill_ids=[skill_id]).json()["run_id"]
+        wait_status(client, run_id, {"completed"})
+        critic_prompts = [
+            prompt
+            for name, prompt in client.llm.prompts
+            if name == "AgentCriticReport"
+        ]
+        assert critic_prompts, "critic never ran"
+        assert any(
+            "Ergebnisvorgabe" in prompt
+            and "[Skill 'kritikform'" in prompt
+            and "Sprechzettel fuer die GF" in prompt
+            for prompt in critic_prompts
+        )
+
+
+def _create_rule(client, *, label: str, content: str) -> str:
+    """One prompt-library rule, created the way the library route does."""
+    service = client.container.prompt_template_service
+    record = asyncio.run(
+        service.create(
+            {
+                "title": label.title(),
+                "label": label,
+                "category": "instruction",
+                "content_markdown": content,
+                "visibility": {"agent": True, "chat": True, "editor": True},
+            },
+            tenant_id="default",
+            owner_user_id=None,
+        )
+    )
+    return record.id
+
+
+def test_attached_library_rule_shapes_the_report(monkeypatch):
+    """S5: the reusable half of the requirement.
+
+    A rule the user attaches at the plan gate must reach the writing
+    prompts with an origin marker — the whole point is not having to
+    retype the same structure for every run, and the critic can only
+    name a broken requirement it can tell apart from the others.
+    """
+    llm = ScriptedLLM(overrides={"SkillPointCheck": _point_check([])})
+    client = make_agent_client(monkeypatch, llm=llm)
+    with client:
+        rule_id = _create_rule(
+            client,
+            label="sprechzettel",
+            content="Gliedere in genau fuenf Punkte.",
+        )
+        run_id = _submit(client).json()["run_id"]
+        wait_status(client, run_id, {"waiting_for_approval"})
+        pending = [
+            item
+            for item in client.get(f"/v1/runs/{run_id}/approvals").json()["data"]
+            if item["status"] == "pending"
+        ]
+        decided = client.post(
+            f"/v1/runs/{run_id}/approvals/{pending[0]['approval_id']}",
+            json={
+                "decision": "approve",
+                "report_guidance": "Zielgruppe: Laien.",
+                "report_rule_ids": [rule_id],
+            },
+        )
+        assert decided.status_code == 200, decided.text
+        wait_status(client, run_id, {"completed"})
+        writing = [
+            prompt
+            for name, prompt in client.llm.prompts
+            if name in ("ReportOutline", "SectionText", "AgentCriticReport")
+        ]
+        assert writing, "synthesis never ran"
+        assert any(
+            "[Regel: sprechzettel]" in prompt
+            and "Gliedere in genau fuenf Punkte." in prompt
+            and "[Freie Vorgabe]" in prompt
+            and "Zielgruppe: Laien." in prompt
+            for prompt in writing
+        )
+        # The decision keeps the parts, so the surface can show what the
+        # user chose instead of the composed prompt text.
+        approval = client.get(f"/v1/runs/{run_id}/approvals").json()["data"][0]
+        requirement = approval["decision_payload"]["report_requirement"]
+        assert requirement["free_text"] == "Zielgruppe: Laien."
+        assert requirement["rules"][0]["label"] == "sprechzettel"
+        assert requirement["rules"][0]["template_id"] == rule_id
+
+
+def test_unknown_rule_id_is_refused_not_dropped(monkeypatch):
+    """Approving under requirements that silently vanished would be the
+    worst outcome: the user believes a rule is in force and it is not."""
+    llm = ScriptedLLM(overrides={"SkillPointCheck": _point_check([])})
+    client = make_agent_client(monkeypatch, llm=llm)
+    with client:
+        run_id = _submit(client).json()["run_id"]
+        wait_status(client, run_id, {"waiting_for_approval"})
+        pending = [
+            item
+            for item in client.get(f"/v1/runs/{run_id}/approvals").json()["data"]
+            if item["status"] == "pending"
+        ]
+        response = client.post(
+            f"/v1/runs/{run_id}/approvals/{pending[0]['approval_id']}",
+            json={"decision": "approve", "report_rule_ids": ["gibt-es-nicht"]},
+        )
+        assert response.status_code == 400
+        assert "gibt-es-nicht" in response.text
+
+
+def test_a_pinned_email_format_reaches_the_prompt():
+    """S7: a skill author picks one of four deliverable values. Two of
+    them named a surface and were routed; the other two named a FORM and
+    changed nothing at all — folded to canvas without a word."""
+    from inqtrix.agents.skills_runtime import build_skills_block
+
+    def skill(deliverable: str):
+        return _record(
+            instructions_markdown="Fasse den Stand zusammen.",
+            clarification_points=[],
+            deliverable=deliverable,
+        )
+
+    email = build_skills_block([skill("email")])
+    assert "Zielformat: E-Mail" in email
+    points = build_skills_block([skill("talking_points")])
+    assert "Zielformat: Sprechzettel" in points
+    # A surface pin is enforced by routing; repeating it in the prompt
+    # would be noise, so it stays out.
+    assert "Zielformat" not in build_skills_block([skill("canvas")])
+    assert "Zielformat" not in build_skills_block([skill("chat")])
+    assert "Zielformat" not in build_skills_block([skill("")])
+
+
+def test_a_section_writer_is_not_told_to_write_a_whole_email():
+    """Review finding: the mission writes a memo section by section and
+    handed EVERY section prompt the whole-deliverable format line. A
+    four-section memo would have become four complete emails — four
+    subject lines, four salutations, four closings — assembled under the
+    memo's own headings."""
+    from inqtrix.agents.skills_runtime import build_skills_block
+
+    skill = _record(
+        instructions_markdown="Fasse den Stand zusammen.",
+        clarification_points=[],
+        deliverable="email",
+    )
+    whole = build_skills_block([skill])
+    part = build_skills_block([skill], scope="section")
+    # The whole deliverable carries the envelope...
+    assert "Betreffzeile" in whole
+    assert "Gruss" in whole
+    # ...one section carries the register and REFUSES the envelope.
+    assert "KEINE eigene Betreffzeile" in part
+    assert "E-Mail-Ton" in part
+
+
+def test_every_pinnable_deliverable_has_a_defined_effect():
+    """Published == enforced: a value the UI offers must change
+    something. This pins the pair — a fifth value added to the picker
+    without an effect fails here instead of quietly doing nothing."""
+    from inqtrix.agents.skills_runtime import (
+        SKILL_DELIVERABLE_FORMAT_LINES,
+        SKILL_DELIVERABLE_SECTION_LINES,
+    )
+    from inqtrix.content.skills import SKILL_DELIVERABLES
+
+    routed = {"", "chat", "canvas"}
+    for value in SKILL_DELIVERABLES:
+        assert value in routed or value in SKILL_DELIVERABLE_FORMAT_LINES, (
+            f"deliverable {value!r} is selectable but has no effect"
+        )
+        # A form without a section-scoped twin would reappear once per
+        # section in the assembled memo.
+        assert value in routed or value in SKILL_DELIVERABLE_SECTION_LINES, (
+            f"deliverable {value!r} has no section-scoped wording"
+        )
+
+
+def test_the_section_loop_really_uses_the_part_scoped_wording(monkeypatch):
+    """The wiring, not just the wording: a pinned email must reach the
+    per-section writer WITHOUT its envelope, while the outline (which
+    decides the whole deliverable) still gets the full form."""
+    llm = ScriptedLLM(overrides={"SkillPointCheck": _point_check([])})
+    client = make_agent_client(monkeypatch, llm=llm)
+    with client:
+        skill_id = _create_skill(
+            client,
+            label="mailentwurf",
+            instructions_markdown="Fasse den Stand zusammen.",
+            clarification_points=[],
+            deliverable="email",
+            requires_plan="never",
+        )
+        run_id = _submit(
+            client, skill_ids=[skill_id], autonomy="autonomous"
+        ).json()["run_id"]
+        wait_status(client, run_id, {"completed"})
+        by_name: dict[str, list[str]] = {}
+        for name, prompt in client.llm.prompts:
+            by_name.setdefault(name, []).append(prompt)
+        sections = by_name.get("SectionText") or []
+        outlines = by_name.get("ReportOutline") or []
+        assert sections, "no section was written — this proves nothing"
+        assert outlines, "no outline was written — this proves nothing"
+        for prompt in sections:
+            assert "KEINE eigene Betreffzeile" in prompt
+            assert "schreibe Betreffzeile, Anrede" not in prompt
+        for prompt in outlines:
+            assert "schreibe Betreffzeile, Anrede" in prompt

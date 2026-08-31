@@ -22,11 +22,20 @@ import logging
 import re
 import threading
 from dataclasses import replace as dataclass_replace
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.agents.checkpoint_guard import ensure_checkpoint_restart_safe
-from inqtrix.agents.control_ports import ApprovalNotFound, ApprovalRecord
+from inqtrix.agents.algorithm import (
+    ARTIFACT_UPDATED_EVENT,
+    CANVAS_CONTEXT_ATTACHED_EVENT,
+)
+from inqtrix.agents.control_ports import (
+    ApprovalNotFound,
+    ApprovalRecord,
+    artifact_event_payload,
+)
 from inqtrix.agents.kernel.chat_bridge import build_tool_chat_model
 from inqtrix.agents.kernel.deps import (
     KernelDeps,
@@ -52,6 +61,7 @@ from inqtrix.agents.limit_contract import (
     LimitChoice,
     create_or_get_limit_gate,
     effective_extended_limit,
+    effective_tool_grants,
     latest_terminal_limit_choice,
     next_extended_limit,
 )
@@ -82,6 +92,50 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("inqtrix")
 
+#: Tools whose approval card names the run's knowledge boundary (P10-K1).
+_KNOWLEDGE_SCOPED_TOOLS = frozenset(
+    {"search_project_knowledge", "read_project_document"}
+)
+
+
+def _knowledge_scope_names(
+    deps: KernelDeps,
+    actions: list[dict[str, Any]],
+) -> list[str] | None:
+    """Collection names the run's knowledge boundary admits (P10-K1).
+
+    Returns ``None`` when the gate has nothing to do with knowledge,
+    or when the catalog cannot be read — an unreadable catalog omits
+    the line rather than inventing a name.
+    """
+    if not any(
+        action.get("tool") in _KNOWLEDGE_SCOPED_TOOLS
+        for action in actions
+    ):
+        return None
+    registry = getattr(deps, "capability_registry", None)
+    if registry is None:
+        return None
+    try:
+        output = run_coro(
+            registry.invoke(
+                "knowledge.collections.list",
+                {},
+                deps.capability_context,
+            )
+        )
+    except Exception:  # noqa: BLE001 - catalog is advisory here
+        log.warning(
+            "Knowledge-Scope fuer die Freigabe nicht lesbar; "
+            "die Sammlungen werden in der Gate-Karte nicht genannt."
+        )
+        return None
+    return sorted(
+        str(collection.name)
+        for collection in getattr(output, "collections", [])
+    )
+
+
 _KERNEL_NODE = "agent_kernel"
 
 _WAITING_STATUS_BY_ORIGIN = {
@@ -96,8 +150,49 @@ TOOL_FINISHED_EVENT = "inqtrix.agent.tool.finished"
 TODO_UPDATED_EVENT = "inqtrix.agent.todo.updated"
 NARRATION_EVENT = "inqtrix.agent.narration"
 
+#: Character cap of a tool-args preview that is a raw JSON dump. Such a
+#: dump can carry a whole document body (``write_canvas`` takes the
+#: complete markdown), so it stays tight — the event log must not become
+#: a second copy of every artifact.
 _ARGS_PREVIEW_LIMIT = 200
-"""Character cap of the redacted tool-args preview in events."""
+
+#: Character cap of a preview that is PROSE. Prose is what a reader
+#: actually sees in the transcript, and 200 cut delegation assignments
+#: mid-sentence, so it gets more room. Nothing bulky reaches this lane:
+#: only the named intent arguments below do.
+_PROSE_PREVIEW_LIMIT = 400
+
+#: Argument names that carry the human-readable INTENT of a tool call,
+#: in the order a preview prefers them. Anything not named here previews
+#: as JSON.
+_PREVIEW_INTENT_ARGS = ("query", "assignment", "objective", "instruction")
+
+
+def _visible_clip(text: str, limit: int = _ARGS_PREVIEW_LIMIT) -> str:
+    """Bounded preview with a VISIBLE cut marker (no silent caps)."""
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _args_preview(args: dict[str, Any]) -> str:
+    """One readable line describing what a tool call was asked to do.
+
+    The preview is what the transcript SHOWS a user while a tool runs, so
+    it has to survive the length cap AS PROSE. Serialising first and
+    clipping afterwards produced a truncated JSON dump — unreadable for
+    the reader, and unparseable for the surface, which then rendered the
+    rubble verbatim. Only ``web_instant`` escaped it, because it alone
+    takes a single argument named ``query``.
+
+    So the intent argument is chosen BEFORE the cut: the clip lands on a
+    sentence, never on a serialization. Calls without such an argument
+    (id-only reads) still preview as JSON, but those are short enough to
+    stay intact.
+    """
+    for name in _PREVIEW_INTENT_ARGS:
+        value = args.get(name)
+        if isinstance(value, str) and value.strip():
+            return _visible_clip(value.strip(), _PROSE_PREVIEW_LIMIT)
+    return _visible_clip(json.dumps(args, ensure_ascii=False))
 
 def _tool_intent_narration(
     tool_calls: list[dict[str, Any]],
@@ -374,6 +469,11 @@ class KernelAgentAlgorithm:
             request.source_policy, request.execution_directive
         )
         deps.execution_directive = request.execution_directive
+        # P10-K2: the submitted scope's provenance rides the durable
+        # request, so a resumed segment reads the same intent.
+        deps.knowledge_scope_explicit = bool(
+            request.knowledge_filters.get("explicit")
+        )
         tier = getattr(context.agent_settings, "agent_tier", "") or ""
         research_policy = derive_web_research_policy(
             depth=depth,
@@ -446,6 +546,17 @@ class KernelAgentAlgorithm:
             ceiling=step_ceiling,
             run_async=run_coro,
         )
+        # Run-wide tool grants (P6B) fold like the limits above — durable
+        # decision rows re-read at every segment start. They take effect
+        # ONLY in the balanced mode table (strict stays per-call), so the
+        # snapshot never advertises a grant that has no gating effect.
+        deps.tool_grants = (
+            effective_tool_grants(
+                self._control, run_id=run_id, run_async=run_coro
+            )
+            if autonomy == "balanced"
+            else frozenset()
+        )
         graph = self._compiled_graph(
             autonomy,
             source_policy=deps.source_policy,
@@ -463,6 +574,8 @@ class KernelAgentAlgorithm:
         ) = _checkpointed_tool_event_ids(existing)
         deps.checkpointed_steps = _checkpointed_steps(existing)
         self._reactivate_loaded_skills(deps, existing)
+        _recover_clarified_answers(deps, existing)
+        _reactivate_editor_read_receipts(deps, existing)
 
         terminal_limit = latest_terminal_limit_choice(
             self._control, run_id=run_id, run_async=run_coro
@@ -502,18 +615,24 @@ class KernelAgentAlgorithm:
 
         from inqtrix.exceptions import AgentCancelled, AgentTokenBudgetExceeded
 
+        def execution_snapshot() -> dict[str, Any]:
+            # Built at EMISSION time so tool-boundary snapshots carry the
+            # counters as they stand after the boundary, not as they stood
+            # when the segment started.
+            return _asserted_execution_snapshot({
+                "current_node": _KERNEL_NODE,
+                "phase": "execution",
+                "execution": self._execution_payload(
+                    request, deps, consent_reason=_kernel_consent_reason(deps)
+                ),
+            })
+
         deps.emit(
             PHASE_CHANGED_EVENT,
             {
                 "phase": "execution",
                 "previous_phase": "",
-                "snapshot": {
-                    "current_node": _KERNEL_NODE,
-                    "phase": "execution",
-                    "execution": self._execution_payload(
-                        request, deps, consent_reason=_kernel_consent_reason(deps)
-                    ),
-                },
+                "snapshot": execution_snapshot(),
             },
         )
         set_kernel_deps(deps)
@@ -529,7 +648,7 @@ class KernelAgentAlgorithm:
                         graph_input, config=config, stream_mode="updates"
                     )
                     if isinstance(update, dict)
-                    for item in _observe_update(deps, update)
+                    for item in _observe_update(deps, update, execution_snapshot)
                 ]
         except AgentCancelled as exc:
             # Cancel/budget stop at the model boundary: the segment's
@@ -1017,6 +1136,7 @@ class KernelAgentAlgorithm:
             consent_reason=consent_reason,
             tool_use_counts=deps.tool_use_counts,
             limits=limits,
+            tool_grants=deps.tool_grants,
         )
 
     def _run_quick_web(
@@ -1163,7 +1283,10 @@ class KernelAgentAlgorithm:
             {
                 "tool": "web_instant",
                 "tool_call_id": "quick_web",
-                "args_preview": query[:_ARGS_PREVIEW_LIMIT],
+                # ONE preview form across both lanes: the quick-web lane
+                # holds the bare query, the model lane a full args dict,
+                # and both go through the same chooser.
+                "args_preview": _args_preview({"query": query}),
             },
         )
         payload: dict[str, Any] = {"query": query, "max_sources": 8}
@@ -1183,9 +1306,21 @@ class KernelAgentAlgorithm:
                 "tool": "web_instant",
                 "tool_call_id": "quick_web",
                 "status": "success",
-                "result_preview": normalize_agent_markdown(
-                    str(output.answer or "")
-                )[:_ARGS_PREVIEW_LIMIT],
+                "result_preview": _visible_clip(
+                    normalize_agent_markdown(str(output.answer or ""))
+                ),
+                # Same tool-boundary snapshot as the graph lane: the search
+                # just booked usage and a web tool-use, so the counters the
+                # desk shows advance here, not at the next phase change.
+                "snapshot": _asserted_execution_snapshot({
+                    "current_node": _KERNEL_NODE,
+                    "phase": "execution",
+                    "execution": self._execution_payload(
+                        request,
+                        deps,
+                        consent_reason=_kernel_consent_reason(deps),
+                    ),
+                }),
             },
         )
 
@@ -1217,9 +1352,11 @@ class KernelAgentAlgorithm:
         deps.check_abort()
         context_block = deps.session_history[-4000:]
         prompt = (
-            "Formuliere genau EINE eigenstaendige Web-Suchanfrage fuer die "
-            "aktuelle Nutzerfrage. Nutze den Verlauf nur zur Aufloesung von "
-            "Bezugnahmen. Setze recency auf day/week/month/year nur bei "
+            "Formuliere genau EINE eigenstaendige, natuerlich formulierte "
+            "Evidenzfrage fuer die aktuelle Nutzerfrage: Gegenstand, Region "
+            "(falls relevant), Zeitraum und gesuchte Evidenz in einer Frage "
+            "— keine Keyword-Kette. Nutze den Verlauf nur zur Aufloesung "
+            "von Bezugnahmen. Setze recency auf day/week/month/year nur bei "
             "einem ausdruecklich aktuellen Zeitbezug, sonst auf ''.\n\n"
             f"AKTUELLE FRAGE:\n{deps.question}\n\n"
             f"RELEVANTER VERLAUF:\n{context_block or '(kein Verlauf)'}"
@@ -1309,6 +1446,7 @@ class KernelAgentAlgorithm:
         ):
             from inqtrix.agents.prompts import (
                 _KERNEL_SECURITY,
+                quick_web_answer_rules,
                 untrusted_fence,
             )
 
@@ -1320,20 +1458,7 @@ class KernelAgentAlgorithm:
 
             response = deps.llm.complete_with_metadata(
                 (
-                    "Beantworte die Nutzerfrage knapp und direkt in ihrer "
-                    "Sprache. Verwende ausschliesslich das abgegrenzte "
-                    "Azure-Websuchergebnis und die von Azure gelieferten "
-                    "Quellen. Die Provider-Antwort ist das geerdete Ergebnis "
-                    "dieser Suche und darf einschließlich darin genannter "
-                    "Zahlen, Preise und Daten verwendet werden. Erfinde "
-                    "nichts hinzu. Verlinke Aussagen nur mit URLs, die im "
-                    "Suchergebnis vorkommen. Wenn Azure mehrere Links einem "
-                    "gemeinsamen Antwortabschnitt zuordnet, behaupte keine "
-                    "exklusive Eins-zu-eins-Herkunft. Benenne echte Lücken "
-                    "oder Widersprüche offen, aber entferne vorhandene "
-                    "Providerinformationen nicht allein wegen einer "
-                    "Quellenklassifikation. Leite aus fehlenden Treffern "
-                    "niemals Abwesenheit ab.\n\n"
+                    f"{quick_web_answer_rules()}\n\n"
                     f"NUTZERFRAGE:\n{deps.question}\n\n"
                     f"RELEVANTER VERLAUF:\n"
                     f"{deps.session_history[-4000:] or '(kein Verlauf)'}\n\n"
@@ -1371,12 +1496,9 @@ class KernelAgentAlgorithm:
                 "Hier ist das von Azure gelieferte Websuchergebnis:\n\n"
                 + provider_answer.strip()
             )
-        source_lines = "\n".join(
-            f"- [{item.get('title') or item['url']}]({item['url']})"
-            for item in references
-        )
-        if source_lines:
-            answer = f"{answer}\n\n### Quellen\n{source_lines}"
+        # F-P0-QUELLEN: no server-side source-section append — the
+        # curated reference list (W-chips) is THE one source surface;
+        # the answer text cites with labels only.
         return normalize_agent_markdown(answer)
 
     def _quick_web_result(
@@ -1796,7 +1918,7 @@ class KernelAgentAlgorithm:
             )
             return answer
         try:
-            run_coro(
+            revised_records = run_coro(
                 self._control.revise_session_artifacts_atomically(
                     run_id=deps.run_id,
                     session_id=deps.session_id or None,
@@ -1832,6 +1954,11 @@ class KernelAgentAlgorithm:
                 final=True,
             )
             return answer
+        # P9: this batch was the ONE silent artifact write path — without
+        # these events the deep-mode revision produced neither a file
+        # chip nor a live canvas refresh.
+        for stored in revised_records:
+            deps.emit(ARTIFACT_UPDATED_EVENT, artifact_event_payload(stored))
         _review_narration(
             f"{len(findings)} Befund(e) behoben — Outputs ueberarbeitet.",
             final=True,
@@ -1900,6 +2027,17 @@ class KernelAgentAlgorithm:
             capability_context=self._capability_context(context, request),
             cancel_token=context.cancel_token,
             token_budget=int(context.token_budget or 0),
+            # P7-E1: the run's explicit editor target (empty for most
+            # runs) — the editor tools refuse every other document.
+            target_document_id=request.document_id or "",
+            # P14: the attachment is the consent — read_research_report
+            # refuses every id outside this tuple, so the model cannot
+            # read an arbitrary run it merely has visibility for.
+            attached_report_ids=tuple(
+                str(report.get("report_id") or "")
+                for report in (request.attached_reports or ())
+                if str(report.get("report_id") or "")
+            ),
         )
         # Context management is resolved per run (the compiled graph is
         # shared): the compaction trigger follows the RESOLVED model's
@@ -2171,6 +2309,31 @@ class KernelAgentAlgorithm:
                 run_store=self._run_service.run_store,
                 run_async=run_coro,
             )
+            # P9d: this branch runs exactly ONCE per run (no checkpoint
+            # yet) — the durable record of which comments rode along.
+            # The comment text travels in full (no sanitizer cap on the
+            # key); the quote is a VISIBLY shortened preview, its full
+            # text stays reachable via the document itself.
+            if request.canvas_context is not None:
+                context = request.canvas_context
+                deps.emit(
+                    CANVAS_CONTEXT_ATTACHED_EVENT,
+                    {
+                        "artifact_id": context.artifact_id,
+                        "revision": context.revision,
+                        "comments": [
+                            {
+                                "comment": comment.comment,
+                                "quote_preview": (
+                                    comment.quote
+                                    if len(comment.quote) <= 120
+                                    else f"{comment.quote[:120]}…"
+                                ),
+                            }
+                            for comment in context.comments
+                        ],
+                    },
+                )
             return {
                 "messages": [
                     {
@@ -2199,9 +2362,13 @@ class KernelAgentAlgorithm:
         ``request.history`` (API callers) wins over the builder, same
         precedence as the phase machine.
         """
-        from inqtrix.agents.prompts import build_kernel_user_message
+        from inqtrix.agents.prompts import (
+            build_canvas_context_section,
+            build_kernel_user_message,
+        )
 
         self._hydrate_session_context(request, deps)
+        self._hydrate_collection_catalog(deps)
         history_block = deps.session_history
         registry = deps.artifact_registry
         last_form = deps.last_response_form
@@ -2223,6 +2390,15 @@ class KernelAgentAlgorithm:
             tool_directives_line=build_tool_directives_line(
                 request.tool_directives or ()
             ),
+            canvas_context_section=(
+                build_canvas_context_section(request.canvas_context)
+                if request.canvas_context is not None
+                else ""
+            ),
+            target_document_id=request.document_id or "",
+            report_requirement=request.report_requirement or "",
+            attached_reports=list(request.attached_reports or ()),
+            collection_catalog=deps.collection_catalog,
         )
         if request.execution_directive == "knowledge_only":
             message += (
@@ -2267,6 +2443,53 @@ class KernelAgentAlgorithm:
         deps.last_response_form = last_form
         deps.prior_evidence_count = prior_evidence_count
         self._recall_memory_briefing(request, deps)
+
+    def _hydrate_collection_catalog(self, deps: KernelDeps) -> None:
+        """List the run's knowledge collections for the model (P10-K3).
+
+        The kernel had no catalog at all: it searched blind, and its
+        tool docstring even promised a project-wide sweep that the run's
+        pinned boundary contradicts. The mission engine has listed its
+        collections since day one — this puts the kernel on the same
+        footing. Latched like the memory briefing: the deep-verify
+        rebuild calls the message builder a second time.
+
+        ``None`` when the catalog cannot be read, so the block is
+        OMITTED rather than asserting an empty knowledge base.
+        """
+        if deps.collection_catalog_loaded:
+            return
+        deps.collection_catalog_loaded = True
+        if deps.source_policy.knowledge != "available":
+            deps.collection_catalog = ()
+            return
+        if deps.capability_registry is None:
+            deps.collection_catalog = None
+            return
+        try:
+            output = run_coro(
+                deps.capability_registry.invoke(
+                    "knowledge.collections.list",
+                    {},
+                    deps.capability_context,
+                )
+            )
+        except Exception:  # noqa: BLE001 - degrade VISIBLY, never silently
+            log.warning(
+                "Wissens-Sammlungskatalog fuer den Kernel nicht abrufbar - "
+                "der Lauf startet ohne Sammlungsuebersicht.",
+                exc_info=True,
+            )
+            deps.collection_catalog = None
+            return
+        deps.collection_catalog = tuple(
+            {
+                "collection_id": str(getattr(item, "id", "")),
+                "name": str(getattr(item, "name", "")),
+                "document_count": int(getattr(item, "document_count", 0) or 0),
+            }
+            for item in getattr(output, "collections", [])
+        )
 
     def _recall_memory_briefing(
         self, request: "RunRequest", deps: KernelDeps
@@ -2407,13 +2630,22 @@ class KernelAgentAlgorithm:
             }
             for request in payload["action_requests"]
         ]
+        # P10-K1: a knowledge gate says WHICH collections the run may
+        # reach. The boundary is pinned at submission and enforced
+        # server-side, so the names are known here — asking about "the
+        # project's internal collections" without naming them made the
+        # decision blind. Sorted for replay-stable payload identity.
+        scope_names = _knowledge_scope_names(deps, actions)
+        gate_payload: dict[str, Any] = {"actions": actions}
+        if scope_names is not None:
+            gate_payload["knowledge_scope"] = scope_names
         record = run_coro(
             self._control.create_approval(
                 ApprovalRecord(
                     approval_id=approval_id,
                     run_id=run_id,
                     kind="tool",
-                    payload={"actions": actions},
+                    payload=gate_payload,
                     interrupt_key=interrupt_id,
                 )
             )
@@ -2423,7 +2655,7 @@ class KernelAgentAlgorithm:
             {
                 "approval_id": record.approval_id,
                 "kind": "tool",
-                "actions": actions,
+                **gate_payload,
             },
         )
 
@@ -2979,16 +3211,34 @@ def _kernel_consent_reason(deps: KernelDeps) -> str:
     )
 
 
+def _asserted_execution_snapshot(
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """A tool-boundary snapshot must be the COMPLETE triple: clients
+    replace all three layers on arrival, so a partial dict would erase
+    the layers it omits."""
+    missing = {"current_node", "phase", "execution"} - set(snapshot)
+    if missing:
+        raise ValueError(
+            f"execution snapshot missing keys: {sorted(missing)}"
+        )
+    return snapshot
+
+
 def _observe_update(
-    deps: KernelDeps, update: dict[str, Any]
+    deps: KernelDeps,
+    update: dict[str, Any],
+    execution_snapshot: Callable[[], dict[str, Any]],
 ) -> list[Any]:
     """Emit follow-the-agent events from one stream update; return interrupts.
 
     THE one place the raw update stream is interpreted: tool identity ->
     deterministic localized narration and started event (redacted args
-    preview), tool results -> finished, todo state -> todo.updated. Model
-    prose never becomes narration. Events are signals (R1) — clients refetch,
-    so a replayed duplicate is harmless.
+    preview), tool results -> finished (with the fresh execution snapshot,
+    so the desk's limit readouts advance at tool boundaries instead of
+    only at phase changes), todo state -> todo.updated. Model prose never
+    becomes narration. Events are signals (R1) — clients refetch, so a
+    replayed duplicate is harmless.
     """
     if "__interrupt__" in update:
         return list(update["__interrupt__"])
@@ -3055,23 +3305,15 @@ def _observe_update(
                     if invocation_id in deps.emitted_tool_start_ids:
                         continue
                     deps.emitted_tool_start_ids.add(invocation_id)
+                    # Derivation-true live advance (B1): each NEW invocation
+                    # in the update stream is one checkpointed model tool
+                    # call. Segment starts overwrite this from the
+                    # checkpoint, and the dedup set (seeded from the same
+                    # checkpoint) keeps replays from double-counting.
+                    deps.tool_calls_used += 1
                     args = call.get("args", {})
                     args = args if isinstance(args, dict) else {}
-                    query = args.get("query", "")
-                    # ONE preview form across both lanes (the quick-web
-                    # lane emits the bare query): a query-only call
-                    # previews as plain text, anything else as JSON.
-                    preview = (
-                        query
-                        if isinstance(query, str)
-                        and query.strip()
-                        and len(args) == 1
-                        else json.dumps(args, ensure_ascii=False)
-                    )
-                    if len(preview) > _ARGS_PREVIEW_LIMIT:
-                        preview = (
-                            preview[:_ARGS_PREVIEW_LIMIT] + "…"
-                        )
+                    preview = _args_preview(args)
                     deps.emit(
                         TOOL_STARTED_EVENT,
                         {
@@ -3100,9 +3342,8 @@ def _observe_update(
                         "status": str(
                             getattr(message, "status", "") or "success"
                         ),
-                        "result_preview": str(content)[
-                            :_ARGS_PREVIEW_LIMIT
-                        ],
+                        "result_preview": _visible_clip(str(content)),
+                        "snapshot": execution_snapshot(),
                     },
                 )
         todos = delta.get("todos")
@@ -3252,6 +3493,43 @@ def _checkpointed_usage(snapshot: Any) -> dict[str, int]:
     return totals
 
 
+def _reactivate_editor_read_receipts(deps: KernelDeps, snapshot: Any) -> None:
+    """Rebuild editor read receipts from checkpointed ToolMessages (P7-E1).
+
+    Same trust template as ``_reactivate_loaded_skills``: only the
+    PRODUCING TOOLS mint receipts — a marker-shaped line relayed by any
+    other tool (web answers carry attacker-controlled text verbatim)
+    must never count as a read. Unlike a lost skill RESTRICTION, a lost
+    receipt is only a lost PERMISSION: a corrupt marker is skipped with
+    a warning and the model simply has to read again — no abort.
+    """
+    from inqtrix.agents.kernel.tools import (
+        EDITOR_READ_MARKER,
+        EDITOR_READ_TOOLS,
+    )
+
+    if snapshot is None or not snapshot.values:
+        return
+    prefix = EDITOR_READ_MARKER.split("{", 1)[0]
+    for message in snapshot.values.get("messages") or []:
+        if getattr(message, "type", "") != "tool":
+            continue
+        if getattr(message, "name", "") not in EDITOR_READ_TOOLS:
+            continue
+        content = str(getattr(message, "content", "") or "")
+        if not content.startswith(prefix):
+            continue
+        marker_body = content[len(prefix):].split("]", 1)[0]
+        document_id, separator, revision = marker_body.rpartition("@")
+        if not document_id or not separator or not revision.isdigit():
+            log.warning(
+                "Editor-Lesequittung ohne gueltigen Marker im Checkpoint "
+                "— sie wird nicht rekonstruiert (erneutes Lesen noetig)."
+            )
+            continue
+        deps.editor_read_receipts[document_id] = int(revision)
+
+
 def _checkpointed_steps(snapshot: Any) -> int:
     """Return the cumulative committed LangGraph super-step coordinate."""
     if snapshot is None:
@@ -3345,3 +3623,27 @@ def _checkpointed_tool_use_counts(snapshot: Any) -> dict[str, int]:
         elif name in KNOWLEDGE_TOOL_NAMES:
             counts["knowledge"] += 1
     return counts
+
+
+def _recover_clarified_answers(deps: KernelDeps, snapshot: Any) -> None:
+    """Re-read what the user already answered, from the checkpoint.
+
+    ``deps`` is rebuilt for EVERY segment, and every approval gate starts
+    a new one — so an answer given before a gate was gone by the time the
+    coverage judge ran, and the judge reported a gap the user had already
+    closed (F-P14-02, seen twice live). The answer itself is durable: it
+    is the ToolMessage ``ask_user`` returned. Read it back like the
+    loaded-skill markers, and trust the PRODUCING TOOL rather than the
+    text — other tools relay provider-controlled text verbatim.
+    """
+    if snapshot is None or not snapshot.values:
+        return
+    for message in snapshot.values.get("messages") or []:
+        if getattr(message, "type", "") != "tool":
+            continue
+        if getattr(message, "name", "") != "ask_user":
+            continue
+        content = str(getattr(message, "content", "") or "").strip()
+        if not content or content not in deps.clarified_answers:
+            if content:
+                deps.clarified_answers.append(content)

@@ -452,4 +452,40 @@ describe('applyKnowledgeRunEvent', () => {
       status: 'running',
     })
   })
+
+  it('renders the dispatch queue as a real step and settles it on start', () => {
+    const progress = reduceEvents([
+      event('inqtrix.run.queued', { queue_position: 1, status: 'queued' }),
+    ])
+    expect(progress.steps.map((step) => [step.kind, step.status])).toEqual([
+      ['queued', 'running'],
+    ])
+
+    const started = applyKnowledgeRunEvent(
+      progress,
+      event('inqtrix.run.started', { status: 'running' }),
+    )
+    expect(started.steps).toEqual([
+      { facts: {}, id: 'queued', kind: 'queued', status: 'done' },
+    ])
+  })
+
+  it('settles the queued step on segment resume and re-opens it when a segment re-queues', () => {
+    const requeued = reduceEvents([
+      event('inqtrix.run.queued', { queue_position: 1, status: 'queued' }),
+      event('inqtrix.run.resumed', { status: 'running' }),
+      event('inqtrix.run.queued', { queue_position: 2, resumed: true, status: 'queued' }),
+    ])
+    expect(requeued.steps).toEqual([
+      { facts: {}, id: 'queued', kind: 'queued', status: 'running' },
+    ])
+  })
+
+  it('keeps a single queued step across duplicate queued frames', () => {
+    const progress = reduceEvents([
+      event('inqtrix.run.queued', { queue_position: 1, status: 'queued' }),
+      event('inqtrix.run.queued', { queue_position: 1, status: 'queued' }),
+    ])
+    expect(progress.steps).toHaveLength(1)
+  })
 })

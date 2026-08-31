@@ -82,12 +82,14 @@ function buildFilterOptions(
   return [
     { count: jobs.length, key: 'all', label: labels.all },
     {
-      count: jobs.filter((job) => job.status === 'running').length,
+      // Unavailable runs retract their status (calm lock): they count
+      // only under "all", mirroring visibleResearchJobs.
+      count: jobs.filter((job) => job.status === 'running' && !job.unavailable).length,
       key: 'running',
       label: labels.running,
     },
     {
-      count: jobs.filter((job) => job.status === 'queued').length,
+      count: jobs.filter((job) => job.status === 'queued' && !job.unavailable).length,
       key: 'queued',
       label: labels.queued,
     },

@@ -5,13 +5,13 @@ import {
   AlertTriangle,
   BookSearch,
   Check,
-  ChevronDown,
   ChevronRight,
   Copy,
   ExternalLink,
   FileText,
   Globe2,
   ListChecks,
+  MessageSquareText,
   PenLine,
   Search,
   X,
@@ -28,6 +28,8 @@ import { appMotion } from '@/motion/transitions'
 import type { CanvasViewDescriptor } from '@/features/canvas/types'
 import type { TranslationDictionary } from '@/i18n/translations'
 import { AgentActivityLine } from '../AgentPulseTrack'
+import { childProgressLine } from '../childProgress'
+import { diffHunkPlan, type DiffHunkPlan } from './artifactDiffHunks'
 import {
   canEditAgentRun,
   isActiveAgentRun,
@@ -46,6 +48,9 @@ import { clarificationAnswerSummary } from '../clarificationAnswers'
 import {
   agentArtifactReferences,
   agentCitationLabelFromHref,
+  agentReferenceAsKnowledge,
+  isWebEvidenceReference,
+  answerCitationLabels,
   linkifyAgentArtifactCitations,
   type AgentArtifactReference,
 } from '../artifactCitations'
@@ -58,7 +63,19 @@ import {
   agentTaskResultPreview,
   effectiveAgentTaskStatus,
 } from '../plan/taskPresentation'
-import { agentRunCompletionRecap } from '../runPresentation'
+import {
+  agentRunCompletionRecap,
+  agentTodoReportAge,
+  agentTurnDocumentTarget,
+  shouldAnimateAgentNarration,
+} from '../runPresentation'
+import { CitationGroupList } from '@/features/knowledge/CitationRow'
+import {
+  citationViews,
+  groupCitationsByDocument,
+} from '@/features/knowledge/citations'
+import { agentRunFailureText } from '../runFailure'
+import { decidedReportGuidance } from '../plan/reportGuidance'
 import { WebEvidenceSourceRow } from '../WebEvidenceSourceRow'
 import { copyTextToClipboard } from '@/lib/clipboard'
 
@@ -73,8 +90,29 @@ export type AgentTimelineActions = {
     approvalId: string,
     decision: AgentApprovalDecisionRequest,
   ) => Promise<unknown>
+  /** Child-gate twins: the decision targets the CHILD run id, the local
+   * echo lands on the parent record (F-P0-CHILDGATE). */
+  answerChildClarification: (
+    parentRunId: string,
+    childRunId: string,
+    clarificationId: string,
+    answer: AgentClarificationAnswerRequest,
+  ) => Promise<unknown>
+  decideChildApproval: (
+    parentRunId: string,
+    childRunId: string,
+    approvalId: string,
+    decision: AgentApprovalDecisionRequest,
+  ) => Promise<unknown>
   onCancelRun: (runId: string) => void
   onOpenCanvas: (descriptor: CanvasViewDescriptor) => void
+  /** Revision-body fetch for the inline chip diff (P9b). Resolves the
+   * artifact's CURRENT anchor internally; view-only, never store-bound. */
+  loadArtifactRevision: (
+    runId: string,
+    artifactId: string,
+    revision: number,
+  ) => Promise<{ content_markdown: string }>
   applyPatch: (
     runId: string,
     patchId: string,
@@ -106,16 +144,26 @@ export type AgentTimelineActions = {
  */
 export function AgentRunTurn({
   actions,
-  animateEntry = true,
+  artifactNames,
+  historical = false,
   run,
+  sessionMemo,
   transportDegraded = false,
 }: {
   actions: AgentTimelineActions
-  /** False for runs that already existed when the workspace mounted: a
-   * remounted history renders in place instead of replaying its entry
-   * animation over the view-level entry. */
-  animateEntry?: boolean
+  /** Session file names (P9, artifactId -> `name.md`), derived from the
+   * anchor-independent session index; absent while it has not loaded —
+   * the chips then fall back to plain titles instead of faking names. */
+  artifactNames?: Record<string, string>
+  /** Persisted/hydrated turns render in place. Exact events carrying the
+   * transport's live provenance may still animate as the run continues. */
+  historical?: boolean
   run: AgentRunRecord
+  /** The session's memo under its CURRENT run anchor (P4 / F-NEU-1): an
+   * update re-anchors the artifact server-side, so after a reload an
+   * older turn's own artifact listing no longer carries the memo it
+   * produced. The memo is unique per session — this is the fallback. */
+  sessionMemo?: { artifactId: string; runId: string } | null
   /** Live updates are on the polling fallback — shown as
    * a visible hint, never a silent behavior change. */
   transportDegraded?: boolean
@@ -128,9 +176,24 @@ export function AgentRunTurn({
   // run always streams in full.
   const [historyExpanded, setHistoryExpanded] = useState(false)
   const showSteps = isActive || historyExpanded
+  // Inline chip diffs (P9b): expansion state lives on the TURN so the
+  // file rows keep their open diff when they move between the running
+  // fallback slot and the answer block.
+  const [expandedDiffs, setExpandedDiffs] = useState<
+    Record<string, boolean>
+  >({})
+  // P9d: the sent-comments line above the question bubble (collapsed
+  // by default — quiet, expandable on demand).
+  const [contextExpanded, setContextExpanded] = useState(false)
   const memoId = run.artifactOrder.find(
     (artifactId) => run.artifacts[artifactId]?.kind === 'memo',
   )
+  const memoTarget = agentTurnDocumentTarget(
+    memoId,
+    run.runId,
+    run.touchedArtifacts,
+    sessionMemo,
+  ) ?? undefined
   const answerId = run.artifactOrder.find(
     (artifactId) => run.artifacts[artifactId]?.kind === 'answer',
   )
@@ -154,20 +217,42 @@ export function AgentRunTurn({
     tasks,
     memoId ? run.artifacts[memoId] : undefined,
   )
+  // File rows are OUTPUT (P9b): they render inside the answer block —
+  // above its copy bar — once an answer exists, and fall back to the
+  // turn's tail while the run is still producing one.
+  const artifactRows = run.touchedArtifacts.length > 0 ? (
+    <ArtifactFileRows
+      actions={actions}
+      artifactNames={artifactNames}
+      expandedDiffs={expandedDiffs}
+      historical={historical}
+      onToggleDiff={(artifactId) =>
+        setExpandedDiffs((current) => ({
+          ...current,
+          [artifactId]: !current[artifactId],
+        }))}
+      reduceMotion={reduceMotion}
+      run={run}
+      t={t}
+    />
+  ) : null
 
   return (
     <motion.div
       animate={{ opacity: 1, y: 0 }}
       className="space-y-2"
-      initial={reduceMotion || !animateEntry ? false : { opacity: 0, y: 6 }}
+      initial={reduceMotion || historical ? false : { opacity: 0, y: 6 }}
       transition={appMotion.card}
     >
       {/* The question follows the chat mode's user-message pattern to
           the letter (meta line above, tone-aware bubble below) so Agent
           Desk and Chat read as ONE design language. */}
-      <div className="flex min-w-0 justify-end">
-        <div className="min-w-0 max-w-[min(72%,44rem)]">
-          <div className="mb-1 flex flex-wrap items-center justify-end gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">
+      {/* Meta line, sent-comments box and bubble are SIBLINGS in a
+          right-aligned column (P9f): each sizes to its own content under
+          the same cap, so expanding the box never re-widens the bubble
+          — the box may simply be wider than the bubble. */}
+      <div className="flex min-w-0 flex-col items-end">
+        <div className="mb-1 flex max-w-[min(72%,44rem)] flex-wrap items-center justify-end gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">
             <span>{t.chat.you}</span>
             <span className="whitespace-nowrap tabular-nums">
               {formatMessageTimestamp(run.createdAt, locale)}
@@ -183,45 +268,106 @@ export function AgentRunTurn({
               </span>
             )}
           </div>
-          <div className="inqtrix-user-bubble rounded-lg px-3 py-2.5 text-sm leading-6 shadow-[0_1px_2px_var(--shadow-hairline)]">
+          {run.canvasContextMeta
+            && run.canvasContextMeta.comments.length > 0 && (
+            <div className="mb-1.5 max-w-[min(72%,44rem)] rounded-md border border-border/70 bg-surface/60 text-left">
+              {/* P9d/P9e: the chat chain-trace design language — full-
+                  width header button, bordered rows — records which
+                  comments rode this submission (replay-durable). The box
+                  sizes to its own content and may exceed the bubble's
+                  width when expanded (P9f decoupling). */}
+              <button
+                aria-expanded={contextExpanded}
+                className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left t-meta-sm font-semibold text-muted-foreground transition hover:text-foreground"
+                onClick={() => setContextExpanded((current) => !current)}
+                type="button"
+              >
+                <MessageSquareText className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  {t.agent.timeline.sentCanvasComments
+                    .replace(
+                      '{count}',
+                      String(run.canvasContextMeta.comments.length),
+                    )
+                    .replace(
+                      '{name}',
+                      artifactNames?.[run.canvasContextMeta.artifactId]
+                        || t.agent.canvas.views.document,
+                    )}
+                </span>
+                <ChevronRight
+                  className={cn(
+                    'size-3.5 shrink-0 transition-transform',
+                    contextExpanded && 'rotate-90',
+                  )}
+                />
+              </button>
+              {contextExpanded && (
+                <div className="border-t border-border/70 px-2.5 py-1">
+                  {run.canvasContextMeta.comments.map((comment, index) => (
+                    <div
+                      className="flex min-w-0 gap-1.5 border-b border-border/40 py-1 last:border-0"
+                      key={index}
+                    >
+                      <span className="grid size-4 shrink-0 place-items-center rounded-[4px] bg-brand-subtle t-hint font-semibold tabular-nums text-brand">
+                        {index + 1}
+                      </span>
+                      <span className="min-w-0 t-meta-sm">
+                        <span className="text-muted-foreground">
+                          „{comment.quotePreview}“
+                        </span>{' '}
+                        <span className="text-foreground">
+                          {comment.comment}
+                        </span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="inqtrix-user-bubble min-w-0 max-w-[min(72%,44rem)] rounded-lg px-3 py-2.5 text-sm leading-6 shadow-[0_1px_2px_var(--shadow-hairline)]">
             <p className="whitespace-pre-wrap break-words">{run.question}</p>
           </div>
-        </div>
       </div>
 
       {run.status === 'completed' && (
         <RunCompletionRecap
-          memoId={memoId}
-          onOpenMemo={(artifactId) => actions.onOpenCanvas({
-            artifactId,
-            runId: run.runId,
+          memo={memoTarget}
+          onOpenMemo={(target) => actions.onOpenCanvas({
+            artifactId: target.artifactId,
+            runId: target.runId,
             view: 'document',
           })}
+          onToggleSteps={() =>
+            setHistoryExpanded((current) => !current)}
           recap={completionRecap}
+          stepCount={run.stepLog.length}
+          stepsExpanded={historyExpanded}
           t={t}
         />
       )}
 
-      {!isActive && run.stepLog.length > 0 && (
+      {/* Completed runs fold the step toggle into the recap's fact line
+          (P9b) — the standalone row remains for failed/cancelled runs. */}
+      {!isActive && run.status !== 'completed' && run.stepLog.length > 0 && (
         <button
           aria-expanded={historyExpanded}
           className="flex items-center gap-1.5 px-1 t-meta text-muted-foreground transition-colors hover:text-foreground"
           onClick={() => setHistoryExpanded((current) => !current)}
           type="button"
         >
-          {run.status === 'completed' ? (
-            <Check className="icon-xs shrink-0 text-success" />
-          ) : (
-            <X className="icon-xs shrink-0 text-muted-foreground" />
-          )}
-          {t.agent.timeline.stepsSummary.replace(
-            '{count}',
-            String(run.stepLog.length),
-          )}
-          <ChevronDown
+          <X className="icon-xs shrink-0 text-muted-foreground" />
+          {run.stepLog.length === 1
+            ? t.agent.timeline.stepsSummaryOne
+            : t.agent.timeline.stepsSummary.replace(
+              '{count}',
+              String(run.stepLog.length),
+            )}
+          <ChevronRight
             className={cn(
               'size-3 shrink-0 transition-transform',
-              historyExpanded && 'rotate-180',
+              historyExpanded && 'rotate-90',
             )}
           />
         </button>
@@ -232,6 +378,7 @@ export function AgentRunTurn({
             <StreamEntry
               actions={actions}
               entry={entry}
+              historicalRun={historical}
               isLatest={isActive && index === run.stepLog.length - 1}
               key={entry.seq}
               run={run}
@@ -256,8 +403,16 @@ export function AgentRunTurn({
         </button>
       )}
 
-      {answer && (
-        <AgentAnswerBlock actions={actions} answer={answer} run={run} t={t} />
+      {answer ? (
+        <AgentAnswerBlock
+          actions={actions}
+          answer={answer}
+          artifactRows={artifactRows}
+          run={run}
+          t={t}
+        />
+      ) : (
+        artifactRows && <div className="px-1">{artifactRows}</div>
       )}
 
       {(run.status === 'failed' || run.status === 'cancelled') && (
@@ -268,7 +423,10 @@ export function AgentRunTurn({
               {run.status === 'cancelled'
                 ? t.agent.timeline.cancelled
                 : run.error
-                  ? t.agent.timeline.taskFailed.replace('{error}', run.error)
+                  ? t.agent.timeline.taskFailed.replace(
+                    '{error}',
+                    agentRunFailureText(run.error, t),
+                  )
                   : t.agent.timeline.failure}
             </p>
             {tasks.length > 0 && (
@@ -288,11 +446,37 @@ export function AgentRunTurn({
         </div>
       )}
 
+      {run.error
+        && run.status !== 'failed'
+        && run.status !== 'cancelled' && (
+        <p
+          className="flex items-start gap-1.5 px-1 t-meta text-destructive/90"
+          data-testid="agent-run-surface-error"
+          role="status"
+        >
+          <AlertTriangle className="mt-0.5 icon-xs shrink-0" />
+          <span className="min-w-0 break-words">
+            {agentRunFailureText(run.error, t)}
+          </span>
+        </p>
+      )}
+
       {isActive && transportDegraded && (
         <p className="flex items-center gap-1.5 px-1 t-hint text-muted-foreground">
           <AlertTriangle className="icon-xs shrink-0 text-warning" />
           {t.agent.timeline.transportDegraded}
         </p>
+      )}
+      {isActive && (run.todos?.length ?? 0) > 0 && (
+        <AgentTodoList
+          reportAgeSeconds={agentTodoReportAge(
+            run.todosAt,
+            run.stepLog,
+            Date.now() / 1000,
+          )}
+          t={t}
+          todos={run.todos ?? []}
+        />
       )}
       {isActive && (
         <div className="flex items-center gap-2 px-1">
@@ -301,6 +485,7 @@ export function AgentRunTurn({
             gate={isGateAgentRun(run.status)}
             text={activityText(run, t)}
           />
+          <ElapsedRuntime startedAt={run.startedAt} />
           {canEditAgentRun(run) && (
             <Button
               aria-label={t.agent.composer.stop}
@@ -319,15 +504,112 @@ export function AgentRunTurn({
   )
 }
 
+/** The kernel's live task list — ONE compact checklist block that
+ * replaces itself per todo.updated event (dsh-style recitation). */
+function AgentTodoList({
+  reportAgeSeconds,
+  t,
+  todos,
+}: {
+  /** Seconds since the model last reported this list, when the run has
+   * worked since — the list is a report, not a live readout. */
+  reportAgeSeconds: number | null
+  t: TranslationDictionary
+  todos: { content: string; status: string }[]
+}) {
+  return (
+    <div
+      className="mx-1 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5"
+      data-testid="agent-todo-list"
+    >
+      <p className="t-caption uppercase tracking-wide text-muted-foreground/70">
+        {t.agent.timeline.todoTitle}
+        {reportAgeSeconds !== null && (
+          <span data-testid="agent-todo-reported-at">
+            {' · '}
+            {t.agent.timeline.todoReportedAgo.replace(
+              '{duration}',
+              formatDuration(reportAgeSeconds),
+            )}
+          </span>
+        )}
+      </p>
+      <ul className="mt-1 space-y-0.5">
+        {todos.map((todo, index) => {
+          const done = todo.status === 'completed'
+          const active = todo.status === 'in_progress'
+          return (
+            <li
+              className={cn(
+                'flex items-start gap-1.5 t-meta',
+                done
+                  ? 'text-muted-foreground/70 line-through'
+                  : active
+                    ? 'text-foreground/90'
+                    : 'text-muted-foreground',
+              )}
+              key={`${index}:${todo.content}`}
+            >
+              {done ? (
+                <Check className="mt-0.5 icon-xs shrink-0 text-success/80" />
+              ) : active ? (
+                <span
+                  aria-hidden="true"
+                  className="mt-1.5 size-1.5 shrink-0 rounded-full bg-brand inqtrix-running-dot"
+                />
+              ) : (
+                <span
+                  aria-hidden="true"
+                  className="mt-1.5 size-1.5 shrink-0 rounded-full border border-muted-foreground/50"
+                />
+              )}
+              <span className="min-w-0 break-words">{todo.content}</span>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+/** Live elapsed time of the active run — the P0 audit's "no clock, no
+ * progress" finding. A plain 1s interval (rAF pauses in background
+ * tabs); the value derives from startedAt, so ticks only repaint. */
+function ElapsedRuntime({ startedAt }: { startedAt: string | undefined }) {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 1000)
+    return () => window.clearInterval(id)
+  }, [])
+  if (!startedAt) return null
+  const seconds = Math.max(
+    0,
+    Math.floor((Date.now() - Date.parse(startedAt)) / 1000),
+  )
+  if (!Number.isFinite(seconds)) return null
+  return (
+    <span className="shrink-0 t-hint tabular-nums text-muted-foreground">
+      {formatDuration(seconds)}
+    </span>
+  )
+}
+
 function RunCompletionRecap({
-  memoId,
+  memo,
   onOpenMemo,
+  onToggleSteps,
   recap,
+  stepCount = 0,
+  stepsExpanded = false,
   t,
 }: {
-  memoId: string | undefined
-  onOpenMemo: (artifactId: string) => void
+  memo: { artifactId: string; runId: string } | undefined
+  onOpenMemo: (target: { artifactId: string; runId: string }) => void
+  /** Step-feed disclosure folded into the fact line (P9b). */
+  onToggleSteps?: () => void
   recap: ReturnType<typeof agentRunCompletionRecap>
+  stepCount?: number
+  stepsExpanded?: boolean
   t: TranslationDictionary
 }) {
   const facts = [
@@ -355,15 +637,48 @@ function RunCompletionRecap({
   ].filter(Boolean)
   return (
     <section className="mx-1 border-l-2 border-success/55 py-1 pl-3">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <Check className="icon-sm shrink-0 text-success" />
-        <p className="min-w-0 flex-1 t-list text-foreground/90">
-          {t.agent.timeline.recapTitle}
-        </p>
-        {memoId && (
+      {/* Title and facts share ONE flex-wrap row (P9f): a single compact
+          line on normal widths that folds back to two when narrow. */}
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
+        <span className="flex shrink-0 items-center gap-2">
+          <Check className="icon-sm shrink-0 text-success" />
+          <p className="t-list text-foreground/90">
+            {t.agent.timeline.recapTitle}
+          </p>
+        </span>
+        {(facts.length > 0 || stepCount > 0) && (
+          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 t-meta tabular-nums text-muted-foreground">
+            {facts.length > 0 && <span>{facts.join(' · ')}</span>}
+            {stepCount > 0 && onToggleSteps && (
+              <>
+                {facts.length > 0 && <span aria-hidden="true">·</span>}
+                <button
+                  aria-expanded={stepsExpanded}
+                  className="flex items-center gap-1 transition-colors hover:text-foreground"
+                  onClick={onToggleSteps}
+                  type="button"
+                >
+                  {stepCount === 1
+                    ? t.agent.timeline.stepsSummaryOne
+                    : t.agent.timeline.stepsSummary.replace(
+                      '{count}',
+                      String(stepCount),
+                    )}
+                  <ChevronRight
+                    className={cn(
+                      'size-3 shrink-0 transition-transform',
+                      stepsExpanded && 'rotate-90',
+                    )}
+                  />
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        {memo && (
           <Button
-            className="h-6 shrink-0 gap-1 bg-brand px-2 text-xs text-brand-foreground hover:bg-brand/90"
-            onClick={() => onOpenMemo(memoId)}
+            className="ml-auto h-6 shrink-0 gap-1 bg-brand px-2 text-xs text-brand-foreground hover:bg-brand/90"
+            onClick={() => onOpenMemo(memo)}
             size="sm"
             type="button"
           >
@@ -372,17 +687,247 @@ function RunCompletionRecap({
           </Button>
         )}
       </div>
-      {facts.length > 0 && (
-        <p className="mt-1 t-meta tabular-nums text-muted-foreground">
-          {facts.join(' · ')}
-        </p>
-      )}
       {process.length > 0 && (
         <p className="mt-0.5 t-meta-sm text-foreground/75">
           {process.join(' · ')}
         </p>
       )}
     </section>
+  )
+}
+
+/**
+ * The turn's file rows (P9b): one row per touched document, the ± badge
+ * doubling as a disclosure (chevron right -> down) that expands an
+ * inline hunk diff below the rows — the canvas full diff stays
+ * reachable from inside the expansion.
+ */
+function ArtifactFileRows({
+  actions,
+  artifactNames,
+  expandedDiffs,
+  historical,
+  onToggleDiff,
+  reduceMotion,
+  run,
+  t,
+}: {
+  actions: AgentTimelineActions
+  artifactNames?: Record<string, string>
+  expandedDiffs: Record<string, boolean>
+  historical: boolean
+  onToggleDiff: (artifactId: string) => void
+  reduceMotion: boolean
+  run: AgentRunRecord
+  t: TranslationDictionary
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {run.touchedArtifacts.map((touched) => {
+          // File-row identity (P9): the derived session file name
+          // leads; title stays the honest fallback while the session
+          // index has not loaded (never a fake unsuffixed name).
+          const label = artifactNames?.[touched.artifactId]
+            || touched.title
+            || run.artifacts[touched.artifactId]?.title
+            || t.agent.canvas.views.document
+          // The ± badge needs a diffable base revision AND a complete
+          // server-counted sum — otherwise it stays honestly absent.
+          const showDelta = touched.fromRevision >= 1
+            && touched.linesAdded !== undefined
+            && touched.linesRemoved !== undefined
+          const expanded = Boolean(expandedDiffs[touched.artifactId])
+          return (
+            <motion.span
+              animate={{ opacity: 1, y: 0 }}
+              className="inline-flex h-6 min-w-0 max-w-80 items-stretch overflow-hidden rounded-full border border-border bg-surface t-hint font-semibold text-muted-foreground"
+              // Same live-boundary rule as the step rows: only a chip
+              // that arrived on the live side of its stream rises (4D).
+              initial={
+                reduceMotion || historical || !touched.arrivedLive
+                  ? false
+                  : { opacity: 0, y: 4 }
+              }
+              key={touched.artifactId}
+              transition={appMotion.list}
+            >
+              <button
+                className="inline-flex min-w-0 items-center gap-1.5 pl-2.5 pr-2 transition-colors hover:text-foreground"
+                onClick={() => actions.onOpenCanvas({
+                  artifactId: touched.artifactId,
+                  runId: run.runId,
+                  view: 'document',
+                })}
+                // Full name stays reachable at the visual cut (9b).
+                title={label}
+                type="button"
+              >
+                <FileText className="icon-xs shrink-0" />
+                <span className="truncate">{label}</span>
+                <span className="shrink-0 rounded-full border border-border bg-background px-1.5 py-px t-hint font-semibold">
+                  {touched.created
+                    ? t.agent.timeline.artifactCreated
+                    : t.agent.timeline.artifactUpdated}
+                </span>
+              </button>
+              {showDelta && (
+                <button
+                  aria-expanded={expanded}
+                  aria-label={t.agent.timeline.artifactDiff
+                    .replace('{from}', String(touched.fromRevision))
+                    .replace('{to}', String(touched.revision))}
+                  className="inline-flex shrink-0 items-center gap-1 border-l border-border px-2 tabular-nums transition-colors hover:bg-background"
+                  onClick={() => onToggleDiff(touched.artifactId)}
+                  title={t.agent.timeline.artifactDiff
+                    .replace('{from}', String(touched.fromRevision))
+                    .replace('{to}', String(touched.revision))}
+                  type="button"
+                >
+                  <span className="text-success">
+                    +{touched.linesAdded}
+                  </span>
+                  <span className="text-destructive">
+                    −{touched.linesRemoved}
+                  </span>
+                  <ChevronRight
+                    className={cn(
+                      'size-3 shrink-0 transition-transform',
+                      expanded && 'rotate-90',
+                    )}
+                  />
+                </button>
+              )}
+            </motion.span>
+          )
+        })}
+      </div>
+      {run.touchedArtifacts
+        .filter((touched) => expandedDiffs[touched.artifactId])
+        .map((touched) => (
+          <ArtifactInlineDiff
+            actions={actions}
+            artifactId={touched.artifactId}
+            fromRevision={touched.fromRevision}
+            key={touched.artifactId}
+            runId={run.runId}
+            t={t}
+            toRevision={touched.revision}
+          />
+        ))}
+    </div>
+  )
+}
+
+/**
+ * Inline hunk diff of one turn's revision span (P9b): changed regions
+ * only — git-style context, visible "unchanged lines" gaps, an inner
+ * scroll bound — with the canvas full-document diff one click away.
+ */
+function ArtifactInlineDiff({
+  actions,
+  artifactId,
+  fromRevision,
+  runId,
+  t,
+  toRevision,
+}: {
+  actions: AgentTimelineActions
+  artifactId: string
+  fromRevision: number
+  runId: string
+  t: TranslationDictionary
+  toRevision: number
+}) {
+  const [plan, setPlan] = useState<DiffHunkPlan | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setPlan(null)
+    setError(null)
+    void Promise.all([
+      actions.loadArtifactRevision(runId, artifactId, fromRevision),
+      actions.loadArtifactRevision(runId, artifactId, toRevision),
+    ])
+      .then(([from, to]) => {
+        if (cancelled) return
+        setPlan(diffHunkPlan(from.content_markdown, to.content_markdown))
+      })
+      .catch(() => {
+        if (!cancelled) setError(t.agent.timeline.diffLoadFailed)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [actions, artifactId, fromRevision, runId, t, toRevision])
+
+  const gap = (count: number, key: string) => (
+    <p
+      className="px-2 py-0.5 t-hint text-muted-foreground/80"
+      key={key}
+    >
+      {t.agent.timeline.diffSkippedLines.replace('{count}', String(count))}
+    </p>
+  )
+
+  return (
+    <div className="min-w-0 max-w-4xl rounded-md border border-border bg-surface">
+      {error ? (
+        <p className="px-2 py-1.5 t-hint text-destructive/90" role="status">
+          {error}
+        </p>
+      ) : plan === null ? (
+        <p className="px-2 py-1.5 t-hint text-muted-foreground">…</p>
+      ) : (
+        <div className="max-h-72 overflow-y-auto py-1 font-mono t-hint leading-5">
+          {plan.hunks.map((hunk, hunkIndex) => (
+            <div key={hunkIndex}>
+              {hunk.skippedBefore > 0
+                && gap(hunk.skippedBefore, `gap-${hunkIndex}`)}
+              {hunk.lines.map((line, lineIndex) => (
+                <p
+                  className={cn(
+                    'flex min-w-0 gap-2 whitespace-pre-wrap break-words px-2',
+                    line.type === 'insert'
+                      && 'bg-success/10 text-success',
+                    line.type === 'delete'
+                      && 'bg-destructive/10 text-destructive',
+                    line.type === 'context' && 'text-muted-foreground',
+                  )}
+                  key={lineIndex}
+                >
+                  <span aria-hidden="true" className="w-3 shrink-0 select-none">
+                    {line.type === 'insert'
+                      ? '+'
+                      : line.type === 'delete'
+                        ? '−'
+                        : ' '}
+                  </span>
+                  <span className="min-w-0 flex-1">{line.text || ' '}</span>
+                </p>
+              ))}
+            </div>
+          ))}
+          {plan.skippedAfter > 0 && gap(plan.skippedAfter, 'gap-tail')}
+        </div>
+      )}
+      <div className="border-t border-border/70 px-2 py-1">
+        <button
+          className="t-hint text-muted-foreground transition-colors hover:text-foreground"
+          onClick={() => actions.onOpenCanvas({
+            artifactId,
+            fromRevision,
+            runId,
+            toRevision,
+            view: 'diff',
+          })}
+          type="button"
+        >
+          {t.agent.timeline.openFullDiff}
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -407,11 +952,15 @@ function DecisionReceipt({ children }: { children: React.ReactNode }) {
 function AgentAnswerBlock({
   actions,
   answer,
+  artifactRows,
   run,
   t,
 }: {
   actions: AgentTimelineActions
   answer: AgentArtifactRecord
+  /** The turn's file rows (P9b) — output belongs to the answer, above
+   * its copy bar, not above the run status. */
+  artifactRows?: React.ReactNode
   run: AgentRunRecord
   t: TranslationDictionary
 }) {
@@ -428,12 +977,24 @@ function AgentAnswerBlock({
     () => (writing ? [] : agentArtifactReferences(answer.refs)),
     [answer.refs, writing],
   )
+  // Citations render from the FIRST delta. While writing the real refs
+  // do not exist yet, but the server sends the LABELS the finished
+  // answer will cite (`answer.started`) — and the linkifier needs only
+  // those. Without this the body was rewritten wholesale the moment the
+  // answer settled: every `[W1]` became a link in one step, which reads
+  // as the message being re-inserted. Same labels before and after, so
+  // the markdown handed to the renderer no longer changes at all.
+  const citationLabels = useMemo(
+    () =>
+      answerCitationLabels(writing, answer.publicationRefLabels, references),
+    [answer.publicationRefLabels, references, writing],
+  )
   const linkedBody = useMemo(
     () =>
-      body !== undefined && references.length > 0
-        ? linkifyAgentArtifactCitations(body, references)
+      body !== undefined && citationLabels.length > 0
+        ? linkifyAgentArtifactCitations(body, citationLabels)
         : body,
-    [body, references],
+    [body, citationLabels],
   )
   const onCitationClick = (event: MouseEvent<HTMLDivElement>) => {
     const anchor = (event.target as HTMLElement | null)?.closest('a')
@@ -534,6 +1095,7 @@ function AgentAnswerBlock({
           references={references}
         />
       )}
+      {artifactRows && <div className="mt-2">{artifactRows}</div>}
       {body !== undefined && ready && (
         <div className="mt-1 flex items-center gap-1">
           <Button
@@ -572,9 +1134,13 @@ function AgentAnswerBlock({
 }
 
 /**
- * Compact source list under the chat answer. Web references retain their
- * external URL and expose the same evidence-trail action/status as the Canvas;
- * Knowledge references open the evidence view directly.
+ * Source list under the chat answer, folded behind a disclosure (P9f):
+ * a long reference list (13 rows in the survey session measured 862px)
+ * would otherwise dominate the transcript, so the default is collapsed
+ * with a visible count — same chevron convention as every other
+ * expander. Web references retain their external URL and expose the
+ * same evidence-trail action/status as the Canvas; Knowledge references
+ * open the evidence view directly.
  */
 function AgentAnswerSources({
   onOpenEvidence,
@@ -584,51 +1150,81 @@ function AgentAnswerSources({
   references: AgentArtifactReference[]
 }) {
   const { t } = useLocale()
+  const [expanded, setExpanded] = useState(false)
+  const webReferences = references.filter(isWebEvidenceReference)
+  const knowledgeGroups = useMemo(
+    () =>
+      groupCitationsByDocument(
+        citationViews(
+          references
+            .filter((reference) => !isWebEvidenceReference(reference))
+            .map(agentReferenceAsKnowledge),
+          [],
+          t.knowledge.viewerSection,
+        ).map((view) => ({ ...view, canOpen: true })),
+      ),
+    [references, t.knowledge.viewerSection],
+  )
   return (
     <section
       className="mt-3 max-w-4xl border-t border-border/70 pt-2"
       data-testid="agent-sources"
     >
-      <h3 className="t-meta-sm font-semibold text-muted-foreground">
-        {t.knowledge.sources}
-      </h3>
-      <ul className="mt-1.5 space-y-1.5">
-        {references.map((reference) => {
-          const web = Boolean(reference.queryId)
-            || Boolean(reference.url && isWebHref(reference.url))
-          return (
-            <li
-              className={web ? undefined : 'flex min-w-0 items-start gap-2'}
-              key={reference.label}
-            >
-              {web ? (
-                <WebEvidenceSourceRow
-                  onInspect={() => onOpenEvidence(reference.label)}
-                  reference={{
-                    ...reference,
-                    domain: hostFromUrl(reference.url ?? ''),
-                    key: reference.referenceId ?? reference.label,
-                  }}
-                />
-              ) : (
-                <>
-                  <FileText className="mt-0.5 icon-sm shrink-0 text-muted-foreground/70" />
-                  <span className="mt-0.5 shrink-0 t-mono text-muted-foreground">
-                    {reference.label}
-                  </span>
-                  <button
-                    className="min-w-0 flex-1 truncate text-left t-list text-foreground transition-colors hover:text-brand"
-                    onClick={() => onOpenEvidence(reference.label)}
-                    type="button"
-                  >
-                    {reference.title}
-                  </button>
-                </>
-              )}
-            </li>
-          )
-        })}
-      </ul>
+      <button
+        aria-expanded={expanded}
+        className="flex items-center gap-1 t-meta-sm font-semibold text-muted-foreground transition-colors hover:text-foreground"
+        onClick={() => setExpanded((current) => !current)}
+        type="button"
+      >
+        {references.length === 1
+          ? t.agent.timeline.sourcesSummaryOne
+          : t.agent.timeline.sourcesSummary.replace(
+            '{count}',
+            String(references.length),
+          )}
+        <ChevronRight
+          className={cn(
+            'size-3 shrink-0 transition-transform',
+            expanded && 'rotate-90',
+          )}
+        />
+      </button>
+      {expanded && (
+        <div className="mt-1.5 space-y-2">
+          {/* Knowledge citations render EXACTLY like the Knowledge Desk's:
+              the cited passage leads, the document name and its section
+              sit in the quiet meta line, and several passages of one PDF
+              collapse into one group. A flat list repeated the same file
+              name for every citation and never said WHERE in it. */}
+          {knowledgeGroups.length > 0 && (
+            <CitationGroupList
+              activeKey={null}
+              groups={knowledgeGroups}
+              onOpen={(view) => onOpenEvidence(view.label)}
+              onOpenDocument={(group) => {
+                const first = group.citations[0]
+                if (first) onOpenEvidence(first.label)
+              }}
+            />
+          )}
+          {webReferences.length > 0 && (
+            <ul className="space-y-1.5">
+              {webReferences.map((reference) => (
+                <li key={reference.label}>
+                  <WebEvidenceSourceRow
+                    onInspect={() => onOpenEvidence(reference.label)}
+                    reference={{
+                      ...reference,
+                      domain: hostFromUrl(reference.url ?? ''),
+                      key: reference.referenceId ?? reference.label,
+                    }}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </section>
   )
 }
@@ -646,22 +1242,18 @@ function hostFromUrl(url: string): string | null {
   }
 }
 
-/** Same scheme guard as `webUrl()` (copyAnswer): tool-provided URLs are
- * trusted data, but only http(s) ever reaches `window.open`/`href`. */
-function isWebHref(url: string): boolean {
-  return /^https?:\/\//i.test(url)
-}
-
 /** One transcript line, dispatched by step kind. */
 function StreamEntry({
   actions,
   entry,
+  historicalRun = false,
   isLatest = false,
   run,
   t,
 }: {
   actions: AgentTimelineActions
   entry: AgentStepEntry
+  historicalRun?: boolean
   /** Newest line of an ACTIVE run — the only one that types itself. */
   isLatest?: boolean
   run: AgentRunRecord
@@ -691,7 +1283,7 @@ function StreamEntry({
       const displayText = failed && entry.error
         ? `${text} · ${entry.error}`
         : text
-      return (
+      const row = (
         <p
           className={cn(
             'flex items-start gap-1.5 t-meta',
@@ -713,6 +1305,24 @@ function StreamEntry({
           )}
           <span className="min-w-0 break-words">{displayText}</span>
         </p>
+      )
+      const childLine = settled || failed
+        ? null
+        : delegatedChildLine(run, entry, t)
+      if (!childLine) return row
+      // A delegation is ONE tool row that can own the run for tens of
+      // minutes. Its child reports phase and task all along; this is
+      // where that reaches the reader.
+      return (
+        <>
+          {row}
+          <p
+            className="flex items-start gap-1.5 pl-5 t-meta text-muted-foreground/70"
+            data-testid="agent-child-progress"
+          >
+            <span className="min-w-0 break-words">{childLine}</span>
+          </p>
+        </>
       )
     }
     case 'plan': {
@@ -860,9 +1470,155 @@ function StreamEntry({
     }
     case 'narration':
       if (!entry.text) return null
-      return <NarrationText animate={isLatest} text={entry.text} />
+      return (
+        <NarrationText
+          animate={shouldAnimateAgentNarration({
+            entry,
+            historicalRun,
+            isLatest,
+          })}
+          text={entry.text}
+        />
+      )
+    case 'notice': {
+      const label = noticeDisplayText(entry, t)
+      if (!label) return null
+      return (
+        <p
+          className="flex items-start gap-1.5 t-meta text-warning"
+          data-testid="agent-notice-item"
+        >
+          <AlertTriangle className="mt-0.5 icon-xs shrink-0" />
+          <span className="min-w-0 break-words">{label}</span>
+        </p>
+      )
+    }
+    case 'gate_requested': {
+      // The request marker stays visible even when its row is gone —
+      // unlike the decision receipts, history must never lose WHAT was
+      // asked (the rows only enrich the line).
+      const clarification = entry.clarificationId
+        ? run.clarifications.find(
+          (item) => item.clarificationId === entry.clarificationId,
+        )
+        : undefined
+      const approval = entry.approvalId
+        ? run.approvals.find(
+          (item) => item.approvalId === entry.approvalId,
+        )
+        : undefined
+      const label = entry.clarificationId
+        ? t.agent.timeline.gateRequestedClarification
+        : gateRequestedLabel(entry.detail ?? approval?.kind ?? '', t)
+      const detail = clarification?.question ?? ''
+      // P6B scope badge: a decision that granted the tool run-wide
+      // stays readable in the history.
+      const grantedForRun =
+        approval?.decisionPayload?.approval_scope === 'run'
+      // The result requirement shaped every section of the report. It
+      // lived only in the decision payload, so after the gate closed
+      // the user had no way to see what was still in force.
+      const guidance = approval ? decidedReportGuidance([approval]) : ''
+      return (
+        <div className="space-y-0.5">
+          <p className="flex items-start gap-1.5 t-meta text-muted-foreground">
+            <PenLine className="mt-0.5 icon-xs shrink-0" />
+            <span className="min-w-0 break-words">
+              {label}
+              {detail ? ` · ${detail}` : ''}
+              {grantedForRun
+                ? ` · ${t.agent.timeline.gateGrantedForRun}`
+                : ''}
+            </span>
+          </p>
+          {guidance && <GateGuidanceLine guidance={guidance} />}
+        </div>
+      )
+    }
     default:
       return null
+  }
+}
+
+/** The result requirement of a decided plan gate, collapsed by default.
+ *
+ * Collapsed because it can be 2000 characters and the transcript is a
+ * conversation, not a form; present because a requirement the user
+ * cannot re-read is one they have to remember. */
+function GateGuidanceLine({ guidance }: { guidance: string }) {
+  const { t } = useLocale()
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div className="pl-[1.125rem]">
+      <button
+        aria-expanded={expanded}
+        className="flex items-center gap-1 t-hint text-muted-foreground/80 transition-colors hover:text-foreground"
+        onClick={() => setExpanded((current) => !current)}
+        type="button"
+      >
+        <ChevronRight
+          className={cn(
+            'icon-xs transition-transform',
+            expanded && 'rotate-90',
+          )}
+        />
+        {t.agent.plan.reportGuidanceEffective}
+      </button>
+      {expanded && (
+        <p className="mt-0.5 whitespace-pre-line break-words t-meta text-foreground/85">
+          {guidance}
+        </p>
+      )}
+    </div>
+  )
+}
+
+
+/** i18n label of one runtime notice row (the row carries only its code).
+ * Exported for unit tests (node env cannot render the component). */
+export function noticeDisplayText(
+  entry: Pick<AgentStepEntry, 'current' | 'detail' | 'noticeCode' | 'status' | 'total'>,
+  t: TranslationDictionary,
+): string {
+  switch (entry.noticeCode) {
+    case 'tool_limit':
+      return t.agent.timeline.noticeToolLimit
+        .replace('{used}', String(entry.current ?? '—'))
+        .replace('{limit}', String(entry.total ?? '—'))
+    case 'quick_web_fallback':
+      return entry.detail === 'answer'
+        ? t.agent.timeline.noticeQuickWebAnswerFallback
+        : t.agent.timeline.noticeQuickWebQueryFallback
+    case 'citation_validation':
+      return entry.status === 'degraded'
+        ? t.agent.timeline.noticeCitationsDegraded.replace(
+          '{labels}',
+          entry.detail ?? '',
+        )
+        : t.agent.timeline.noticeCitationsRepaired
+    case 'sufficiency_gap':
+      return t.agent.timeline.noticeSufficiencyGap.replace(
+        '{gaps}',
+        entry.detail ?? '',
+      )
+    default:
+      return ''
+  }
+}
+
+function gateRequestedLabel(kind: string, t: TranslationDictionary): string {
+  switch (kind) {
+    case 'plan':
+    case 'replan':
+      return t.agent.timeline.gateRequestedPlan
+    case 'discovery':
+      return t.agent.timeline.gateRequestedDiscovery
+    case 'patch':
+      return t.agent.timeline.gateRequestedPatch
+    case 'tool':
+      return t.agent.timeline.gateRequestedTool
+    default:
+      return t.agent.timeline.gateRequested
   }
 }
 
@@ -929,6 +1685,24 @@ function ActivityGlyph({
   return <Search className="mt-0.5 icon-xs shrink-0" />
 }
 
+/** The live line of the child a delegation row started, if it has one.
+ *
+ * The link already exists: a child's `taskId` IS the delegating tool
+ * call's id, which is how the gate tray finds the child's assignment. */
+function delegatedChildLine(
+  run: AgentRunRecord,
+  entry: AgentStepEntry,
+  t: TranslationDictionary,
+): string | null {
+  const key = entry.activityKey
+  if (!key?.startsWith('tool:')) return null
+  const toolCallId = key.slice('tool:'.length)
+  const child = Object.values(run.children).find(
+    (candidate) => candidate.taskId.split(':')[0] === toolCallId,
+  )
+  return child ? childProgressLine(child, t) : null
+}
+
 function stationLabel(
   phase: string,
   t: TranslationDictionary,
@@ -960,6 +1734,19 @@ export function activityText(
     return t.agent.activity.waitingApproval
   }
   if (run.status === 'waiting_for_input') return t.agent.activity.waitingInput
+  // Waiting for children is NOT idling: the delegated run is doing the
+  // work, and its progress arrives here as `child.progress`. Without
+  // this branch the line fell through to the parent's own last tool
+  // row, which froze the moment it delegated — one unchanging sentence
+  // for twenty minutes, on BOTH surfaces that render this text (the
+  // transcript's running line and the follow-execution panel). The run
+  // looked hung while it was verifying its twelfth finding.
+  if (run.status === 'waiting_for_children') {
+    for (const child of Object.values(run.children)) {
+      const line = childProgressLine(child, t)
+      if (line) return line
+    }
+  }
   // Parallel work is the point of the wave scheduler — the live line
   // says so instead of pretending one operation runs at a time.
   const runningTasks = run.plan

@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from inqtrix.storage.migration_contract import (
+    assert_schema_head,
+)
 from inqtrix.project.asset_lifecycle import lock_asset_lifecycle
 from inqtrix.project.asset_records_ports import (
     AssetDeletionInProgress,
@@ -139,7 +142,6 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
         app_role: str,
         queue: "ValkeyUploadQueue | None",
         worker_id: str,
-        max_concurrent: int,
         reconcile_delay_seconds: float = 120.0,
         recover_orphans: bool | None = False,
     ) -> None:
@@ -148,7 +150,6 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
             app_role=app_role,
             worker_id=worker_id,
             queue=queue,
-            max_concurrent=max_concurrent,
             recover_orphans=recover_orphans,
         )
         self._reconcile_delay_seconds = max(1.0, reconcile_delay_seconds)
@@ -998,6 +999,13 @@ class PostgresUploadOperationStore(DurableJobStoreBase):
             allowed.append(UploadOperationStatus.RUNNING.value)
         now = time.time()
         async with self._session(tenant_id) as session:
+            # Cutover fence, FIRST statement of the claim transaction: a
+            # worker whose image predates a completed migration must not
+            # take a durable claim -- nor run this transaction's other
+            # writes -- against a schema its code no longer matches. Rides
+            # in the same transaction, so a mismatch rolls everything back
+            # and the queue entry stays unacked for an upgraded worker.
+            await assert_schema_head(session)
             row = (
                 (
                     await session.execute(

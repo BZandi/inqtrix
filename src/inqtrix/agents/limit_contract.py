@@ -270,3 +270,35 @@ def latest_terminal_limit_choice(
         }:
             return gate, choice, record
     return None
+
+
+def effective_tool_grants(
+    control: AgentControlStore,
+    *,
+    run_id: str,
+    run_async: Callable[[Any], Any],
+) -> frozenset[str]:
+    """Fold approved run-wide tool grants into one per-segment set (P6B).
+
+    Mirrors :func:`effective_extended_limit`: the decided approval row is
+    the durable decision record, folded fresh at every segment start. A
+    grant is exactly an ``approve`` on a ``kind="tool"`` gate whose
+    ``decision_payload`` carries ``approval_scope == "run"``; the granted
+    names are the action tools of that gate. ``ALWAYS_GATED_TOOLS`` are
+    excluded by construction — the service refuses to store such a grant,
+    and this fold refuses to honor one that slipped in anyway.
+    """
+    from inqtrix.agents.kernel.policy import ALWAYS_GATED_TOOLS
+
+    granted: set[str] = set()
+    records = run_async(control.list_approvals(run_id))
+    for record in records:
+        if record.kind != "tool" or record.decision != "approve":
+            continue
+        if dict(record.decision_payload).get("approval_scope") != "run":
+            continue
+        for action in record.payload.get("actions") or []:
+            name = str(action.get("tool") or "")
+            if name and name not in ALWAYS_GATED_TOOLS:
+                granted.add(name)
+    return frozenset(granted)

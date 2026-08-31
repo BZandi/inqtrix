@@ -25,7 +25,7 @@ from inqtrix.knowledge.contextualize import (
     ContextualizationValidationError,
     LLMChunkContextualizer,
 )
-from inqtrix.knowledge.chunking import ChunkSlice, chunk_text_slices
+from inqtrix.knowledge.chunking import ChunkSlice
 from inqtrix.knowledge.evidence import UnverifiedKnowledgeEvidence
 from inqtrix.knowledge.stores.memory import MemoryKnowledgeStore
 from inqtrix.knowledge.stores.ports import KnowledgeProviderContext

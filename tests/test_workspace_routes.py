@@ -31,7 +31,7 @@ from inqtrix.settings import ServerSettings, Settings, StorageSettings
 
 from tests.contract._app import StubSearch
 from tests.test_knowledge_routes import KnowledgeStubLLM
-from tests.test_oidc_bff import ISSUER, FakeIdp, make_provider, run_login
+from tests.test_oidc_bff import FakeIdp, make_provider, run_login
 
 
 def make_world(registration="invite"):

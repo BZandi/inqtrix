@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Coroutine
 
+from inqtrix.observability.metrics_defs import active_metrics
 from inqtrix.storage.db import build_session_factory, tenant_session
 from inqtrix.urls import sanitize_error
 
@@ -111,6 +112,7 @@ class PollingJobSubscription:
         after_sequence: int = 0,
         terminal_events: frozenset[str],
         thread_label: str,
+        stream: bool = True,
     ) -> None:
         self.entity_id = entity_id
         self.replay = replay
@@ -128,7 +130,12 @@ class PollingJobSubscription:
         replay_is_terminal = bool(
             replay and replay[-1]["type"] in terminal_events
         )
-        if not replay_is_terminal:
+        # ``stream=False`` is the one-shot replay read (the ``?format=json``
+        # polling fallback): no poller thread, no registration — and no
+        # viewer-histogram observation, which must count STREAM joins only.
+        # A 3s polling cadence counted as joins would drown the 5b evidence
+        # gate in per-poll artifacts and read real overlap as 1.
+        if not replay_is_terminal and stream:
             self._thread = threading.Thread(
                 target=self._poll,
                 args=(last_seq,),
@@ -224,6 +231,17 @@ class DurableJobStoreBase:
     _dispatch_thread_prefix: str = "inqtrix-job"
     _job_kind: str = "Durable job"
 
+    # In-process execution slots, set by each store that actually dispatches.
+    # DELIBERATELY declared without a value: subclasses also read it as the
+    # ceiling of their queue-full admission check, where a silent default
+    # would not mean "dispatches nothing" but "already at capacity" -- an
+    # inherited zero turns ``running >= max_concurrent`` permanently true and
+    # rejects work that should have been admitted. A store that forgets the
+    # assignment therefore raises AttributeError at first read instead of
+    # quietly refusing jobs. A store that never dispatches (upload, whose work
+    # is composed by UploadOperationService) never reads it at all.
+    _max_concurrent: int
+
     def __init__(
         self,
         *,
@@ -231,7 +249,6 @@ class DurableJobStoreBase:
         app_role: str,
         worker_id: str,
         queue: Any,
-        max_concurrent: int,
         recover_orphans: bool | None = None,
     ) -> None:
         self._engine = engine
@@ -239,7 +256,6 @@ class DurableJobStoreBase:
         self._app_role = app_role
         self._worker_id = worker_id
         self._queue = queue
-        self._max_concurrent = max_concurrent
         self._lock = threading.RLock()
         self._close_lock = threading.Lock()
         self._local: dict[str, _LocalJob] = {}
@@ -359,6 +375,19 @@ class DurableJobStoreBase:
             if self._closing or self._closed:
                 raise RuntimeError(f"{self._job_kind} store is closing")
             self._subscriptions.add(subscription)
+            # Concurrency this entity just reached, counted under the
+            # SAME lock that owns the registry. Feeds the deferred
+            # shared-poller decision; no entity ids leave this method.
+            concurrent = sum(
+                1
+                for existing in self._subscriptions
+                if existing.entity_id == subscription.entity_id
+            )
+            metrics = active_metrics()
+            if metrics is not None:
+                metrics.observe_stream_viewers(
+                    job_kind=self._job_kind, concurrent=concurrent
+                )
             try:
                 thread.start()
             except BaseException:

@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, useEffect, useLayoutEffect } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
 import type {
   ChangeEvent,
   FormEvent,
@@ -7,6 +8,7 @@ import type {
 } from 'react'
 
 import {
+  BookOpen,
   BookSearch,
   BrainCircuit,
   Database,
@@ -14,6 +16,8 @@ import {
   Globe2,
   Layers,
   MessageSquareText,
+  PenLine,
+  Trash2,
   Plus,
   Gauge,
   Search,
@@ -61,6 +65,13 @@ import type {
   NodeModelResolution,
 } from '@/features/researchRuns/types'
 import { effortLevelLabel } from '@/lib/modelCard'
+import {
+  REPORT_GUIDANCE_MAX_CHARS_FALLBACK,
+  REPORT_RULE_IDS_MAX_FALLBACK,
+  hasReportRequirement,
+  toggleReportRule,
+} from '@/features/agent/reportRequirement'
+import type { ReportRuleOption } from '@/features/agent/plan/PlanReviewBody'
 import { useLocale } from '@/i18n/LocaleProvider'
 import { cn } from '@/lib/utils'
 import { AgentStatusMenu } from './AgentStatusMenu'
@@ -85,6 +96,16 @@ import { ComposerDisclosureHint } from '@/features/composer/ComposerDisclosureHi
 export type AgentCollectionOption = { id: string; title: string }
 
 export type AgentDocumentOption = { id: string; title: string }
+
+/** A session canvas document offered for @-mention (P9, K5): pinned as
+ * `canvas_context` (no comments) on the next submission. */
+export type AgentCanvasDocumentOption = {
+  artifactId: string
+  revision: number
+  /** Derived file name (`marktbericht.md`) — the display identity. */
+  name: string
+  title: string
+}
 
 export type AgentModelPickerProps = {
   /** Concrete-model catalog (empty -> tier fallback inside the picker). */
@@ -143,6 +164,10 @@ export function AgentComposer({
   answerMode = false,
   autonomy,
   autonomyModes,
+  canvasComments = [],
+  canvasDocuments = [],
+  pinnedCanvasDocumentId = null,
+  onPinnedCanvasDocumentChange,
   collections,
   disabled = false,
   documents = [],
@@ -161,6 +186,8 @@ export function AgentComposer({
   onDepthModeChange,
   onEngineModeChange,
   onDraftQuestionChange,
+  onEditCanvasComment,
+  onRemoveCanvasComment,
   onSelectedCollectionIdsChange,
   onSelectedDocumentIdChange,
   onResponseFormChange,
@@ -170,6 +197,17 @@ export function AgentComposer({
   onExecutionDirectiveChange,
   onSourcePolicyChange,
   overview = null,
+  reportOptions = [],
+  reportIds = [],
+  reportIdsMax: reportLimit = 3,
+  onReportIdsChange,
+  reportGuidance = '',
+  reportRuleIds = [],
+  reportRuleOptions = [],
+  reportGuidanceMaxChars: reportGuidanceLimit = REPORT_GUIDANCE_MAX_CHARS_FALLBACK,
+  reportRuleIdsMax: reportRuleLimit = REPORT_RULE_IDS_MAX_FALLBACK,
+  onReportGuidanceChange,
+  onReportRuleIdsChange,
   responseForm = 'auto',
   running = false,
   selectedCollectionIds,
@@ -193,7 +231,45 @@ export function AgentComposer({
   autonomy: string
   /** From `capabilities.agent.autonomy_modes` — never hardcoded. */
   autonomyModes: string[]
+  /** Queued canvas selection comments (P4/P9c) — stacked rows above
+   * the input; they ride the next submission's canvas_context. */
+  canvasComments?: import('./canvas/commentQueue').AgentCanvasCommentDraft[]
+  /** Pencil on a stacked row (P9c): jump to the anchor + edit. */
+  onEditCanvasComment?: (id: string) => void
+  /** Session canvas documents for the @-mention group (P9, K5); empty
+   * hides the group. */
+  canvasDocuments?: AgentCanvasDocumentOption[]
+  /** The mention-pinned canvas document (caller-owned, like the comment
+   * queue); rides the next submission when no comments are queued. */
+  pinnedCanvasDocumentId?: string | null
+  onPinnedCanvasDocumentChange?: (artifactId: string | null) => void
   collections: AgentCollectionOption[]
+  /** Finished Research-Desk reports that can be attached as INPUT
+   * (P14). Empty hides the group entirely. */
+  reportOptions?: import('@/features/project/selectors').CompletedReportOption[]
+  /** Attached report ids for the next submission. Ids only — the server
+   * resolves the name and the kernel fetches the body on demand. */
+  reportIds?: string[]
+  /** Server cap (published == enforced). */
+  reportIdsMax?: number
+  onReportIdsChange?: (reportIds: string[]) => void
+  /** Result requirement for the NEXT submission (S6): how the result has
+   * to look. Caller-owned like the comment queue, and cleared by the
+   * caller on an accepted submission. Without it, a run that never
+   * reaches a plan gate — autonomous, the speed tier, and every kernel
+   * run — has no way to state one at all. */
+  reportGuidance?: string
+  /** Attached prompt-library rules, IDS ONLY; the server resolves their
+   * text from the caller's own catalog. */
+  reportRuleIds?: string[]
+  /** Rules the user opted into for the agent surface (`visibility.agent`);
+   * empty hides the section. */
+  reportRuleOptions?: ReportRuleOption[]
+  /** Server limits (published == enforced). */
+  reportGuidanceMaxChars?: number
+  reportRuleIdsMax?: number
+  onReportGuidanceChange?: (guidance: string) => void
+  onReportRuleIdsChange?: (ruleIds: string[]) => void
   disabled?: boolean
   /** Patchable editor documents (server-synced or demo); empty hides the
    * document scope entirely. */
@@ -225,6 +301,7 @@ export function AgentComposer({
   onDepthModeChange?: (mode: 'normal' | 'deep') => void
   onDraftQuestionChange: (draft: string) => void
   onEngineModeChange?: (mode: AgentEngineMode) => void
+  onRemoveCanvasComment?: (id: string) => void
   onSelectedCollectionIdsChange: (ids: string[]) => void
   onSelectedDocumentIdChange?: (id: string | null) => void
   onResponseFormChange?: (form: AgentResponseForm) => void
@@ -303,6 +380,22 @@ export function AgentComposer({
     () => documents.filter((document) => document.id !== selectedDocumentId),
     [documents, selectedDocumentId],
   )
+  const pinnedCanvasDocument =
+    canvasDocuments.find(
+      (document) => document.artifactId === pinnedCanvasDocumentId,
+    ) ?? null
+  // Single-document channel (P9, K5): queued comments already bind the
+  // attachment to THEIR document, so other canvas documents stop being
+  // offered while the queue is non-empty — the conflict cannot arise.
+  const addableCanvasDocuments = useMemo(
+    () =>
+      canvasComments.length > 0
+        ? []
+        : canvasDocuments.filter(
+          (document) => document.artifactId !== pinnedCanvasDocumentId,
+        ),
+    [canvasComments.length, canvasDocuments, pinnedCanvasDocumentId],
+  )
   const mentionCandidates = useMemo(() => {
     if (!mention) return []
     const query = mention.query.toLowerCase()
@@ -316,8 +409,42 @@ export function AgentComposer({
           && document.title.toLowerCase().includes(query),
       )
       .map((document) => ({ kind: 'document' as const, option: document }))
-    return [...matchingCollections, ...matchingDocuments]
-  }, [addableCollections, documents, mention, selectedDocumentId])
+    const matchingCanvasDocuments = addableCanvasDocuments
+      .filter(
+        (document) =>
+          document.name.toLowerCase().includes(query)
+          || document.title.toLowerCase().includes(query),
+      )
+      .map((document) => ({ kind: 'canvas' as const, option: document }))
+    // Finished research reports as INPUT (P14). At the cap the group
+    // disappears from the menu rather than offering a click that would
+    // quietly do nothing.
+    const matchingReports = reportIds.length >= reportLimit
+      ? []
+      : reportOptions
+        .filter(
+          (report) =>
+            !reportIds.includes(report.runId)
+            && (report.title.toLowerCase().includes(query)
+              || report.label.toLowerCase().includes(query)),
+        )
+        .map((report) => ({ kind: 'report' as const, option: report }))
+    return [
+      ...matchingCollections,
+      ...matchingDocuments,
+      ...matchingCanvasDocuments,
+      ...matchingReports,
+    ]
+  }, [
+    addableCanvasDocuments,
+    addableCollections,
+    documents,
+    mention,
+    reportIds,
+    reportLimit,
+    reportOptions,
+    selectedDocumentId,
+  ])
   const mentionOptions: MentionMenuOption[] = mentionCandidates.map(
     (candidate) =>
       candidate.kind === 'collection'
@@ -329,14 +456,34 @@ export function AgentComposer({
           secondary: t.knowledge.collectionMenuHandle,
           tone: 'brand',
         }
-        : {
-          group: t.navigation.editor,
-          icon: FileText,
-          isCategory: false,
-          primary: candidate.option.title,
-          secondary: t.agent.patch.title,
-          tone: 'file',
-        },
+        : candidate.kind === 'document'
+          ? {
+            group: t.navigation.editor,
+            icon: FileText,
+            isCategory: false,
+            primary: candidate.option.title,
+            secondary: t.agent.patch.title,
+            tone: 'file',
+          }
+          : candidate.kind === 'canvas'
+            ? {
+              group: t.agent.composer.canvasDocGroup,
+              icon: FileText,
+              isCategory: false,
+              primary: candidate.option.name,
+              secondary: t.agent.composer.canvasDocChip,
+              tone: 'brand',
+            }
+            : {
+              group: t.agent.composer.reportGroup,
+              icon: BookOpen,
+              isCategory: false,
+              // A research report has no title of its own — the run's
+              // question is what the Research Desk shows as its name.
+              primary: candidate.option.title,
+              secondary: t.agent.composer.reportChip,
+              tone: 'brand',
+            },
   )
 
   const slashCandidates = useMemo(() => {
@@ -392,14 +539,20 @@ export function AgentComposer({
 
   // answerMode overrides the running gate: a parked run WAITS for this
   // input — the send answers the clarification instead of racing a run.
+  // P9d: attached comments make the submission self-sufficient — the
+  // backend instructs the model to address every comment, so an empty
+  // input may send. The visible default question below keeps the
+  // transcript honest (nothing travels silently).
   const canSubmit =
     !disabled
     && !submitting
     && (answerMode || !running)
-    && question.trim().length > 0
+    && (question.trim().length > 0 || canvasComments.length > 0)
   const placeholder = answerMode
     ? t.agent.timeline.answerPlaceholder
-    : t.agent.composer.placeholder
+    : canvasComments.length > 0
+      ? t.agent.composer.canvasCommentsPlaceholder
+      : t.agent.composer.placeholder
 
   function updateMentionFromTextarea(textarea: HTMLTextAreaElement) {
     // A selection event may fire against the PRE-commit DOM value right
@@ -437,8 +590,12 @@ export function AgentComposer({
         ...selectedCollectionIds,
         candidate.option.id,
       ])
-    } else {
+    } else if (candidate.kind === 'document') {
       onSelectedDocumentIdChange?.(candidate.option.id)
+    } else if (candidate.kind === 'report') {
+      onReportIdsChange?.([...reportIds, candidate.option.runId])
+    } else {
+      onPinnedCanvasDocumentChange?.(candidate.option.artifactId)
     }
     setQuestion(nextValue)
     setMention(null)
@@ -540,7 +697,12 @@ export function AgentComposer({
     if (!canSubmit) return
     const trailing = extractTrailingExecutionDirective(question)
     if (trailing && !executionDirectiveAvailability[trailing.directive]) return
-    const submittedQuestion = trailing?.question ?? question.trim()
+    // P9d: with attached comments an empty input sends the VISIBLE
+    // default question (it lands in the bubble like any typed text).
+    const submittedQuestion = (trailing?.question ?? question.trim())
+      || (canvasComments.length > 0
+        ? t.agent.composer.canvasCommentsDefaultQuestion
+        : '')
     if (!submittedQuestion) return
     setSubmitting(true)
     try {
@@ -575,6 +737,74 @@ export function AgentComposer({
 
   return (
     <form className="agent-composer-container mx-auto max-w-5xl" onSubmit={handleSubmit}>
+      {/* Stacked pending canvas comments (P9c/P9d): an own card ABOVE
+          the composer frame — the editor attach panel's design language
+          (frame, header, entrance animation) with the agent's rows
+          (quote + text + pencil + trash, the GitHub pending mechanic). */}
+      <AnimatePresence initial={false}>
+        {canvasComments.length > 0 ? (
+          <motion.div
+            animate={{ height: 'auto', opacity: 1 }}
+            className="mb-2 overflow-hidden rounded-md border border-brand/30 bg-brand-subtle/30"
+            exit={{ height: 0, opacity: 0 }}
+            initial={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18 }}
+          >
+            <div className="flex items-center gap-1.5 px-3 pb-0.5 pt-2 t-meta-sm font-semibold text-brand">
+              <MessageSquareText aria-hidden="true" className="size-3.5" />
+              {t.agent.composer.canvasCommentHeader.replace(
+                '{count}',
+                String(canvasComments.length),
+              )}
+            </div>
+            <div className="flex flex-col px-2 pb-2">
+              {canvasComments.map((comment, index) => (
+                <div
+                  className="flex min-w-0 items-center gap-1.5 rounded px-1 py-0.5"
+                  key={comment.id}
+                >
+                  <span className="grid size-4 shrink-0 place-items-center rounded-[4px] bg-brand-subtle t-hint font-semibold tabular-nums text-brand">
+                    {index + 1}
+                  </span>
+                  <span
+                    className="max-w-44 shrink-0 truncate t-meta-sm text-muted-foreground"
+                    title={comment.plainText || comment.quote}
+                  >
+                    „{comment.plainText || comment.quote}“
+                  </span>
+                  {/* Full text stays reachable at the cut (9b). */}
+                  <span
+                    className="min-w-0 flex-1 truncate t-meta-sm text-foreground"
+                    title={comment.comment}
+                  >
+                    {comment.comment}
+                  </span>
+                  <Button
+                    aria-label={t.agent.composer.editCanvasComment}
+                    className="size-5 shrink-0 text-muted-foreground hover:text-foreground"
+                    onClick={() => onEditCanvasComment?.(comment.id)}
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <PenLine className="size-3" />
+                  </Button>
+                  <Button
+                    aria-label={t.agent.composer.removeCanvasComment}
+                    className="size-5 shrink-0 text-muted-foreground hover:text-destructive"
+                    onClick={() => onRemoveCanvasComment?.(comment.id)}
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <Trash2 className="size-3" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
         <div className="relative overflow-visible rounded-xl border border-border bg-card px-2.5 py-2 shadow-[0_8px_28px_-12px_var(--shadow-soft)] transition-[border-color,box-shadow] duration-150 focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/15">
         {mention && (
           <MentionMenu
@@ -653,8 +883,99 @@ export function AgentComposer({
 
         {(selectedCollections.length > 0
           || selectedDocument
-          || selectedSkillIds.length > 0) && (
+          || selectedSkillIds.length > 0
+          || hasReportRequirement(reportGuidance, reportRuleIds)
+          || reportIds.length > 0
+          || pinnedCanvasDocument) && (
           <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+            {/* Mention-pinned canvas document (P9, K5): hidden while
+                comments are queued — they bind the channel themselves. */}
+            {pinnedCanvasDocument && canvasComments.length === 0 && (
+              <Chip
+                active
+                aria-label={`${t.agent.composer.canvasDocChip}: ${pinnedCanvasDocument.name}`}
+                dot="bg-brand"
+                onClick={() => onPinnedCanvasDocumentChange?.(null)}
+                title={pinnedCanvasDocument.title}
+              >
+                <FileText aria-hidden="true" className="size-3 shrink-0" />
+                <span className="max-w-48 truncate">
+                  {pinnedCanvasDocument.name}
+                </span>
+                <X aria-hidden="true" className="size-3 shrink-0" />
+              </Chip>
+            )}
+            {/* Attached research reports (P14): the agent reads them
+                on demand, so the chip is the only place the user sees
+                WHAT the run was given. */}
+            {reportIds.map((runId) => {
+              const report = reportOptions.find(
+                (option) => option.runId === runId,
+              )
+              return (
+                <Chip
+                  active
+                  aria-label={`${t.agent.composer.reportChip}: ${report?.title ?? runId}`}
+                  dot="bg-brand"
+                  key={runId}
+                  onClick={() =>
+                    onReportIdsChange?.(
+                      reportIds.filter((id) => id !== runId),
+                    )}
+                  title={report?.title ?? runId}
+                >
+                  <BookOpen aria-hidden="true" className="size-3 shrink-0" />
+                  <span className="max-w-48 truncate">
+                    {report?.title ?? runId}
+                  </span>
+                  <X aria-hidden="true" className="size-3 shrink-0" />
+                </Chip>
+              )
+            })}
+            {/* The result requirement, visible BEFORE sending: it is
+                the one attachment whose effect the user cannot read off
+                the answer afterwards, so it must be legible here. */}
+            {reportRuleIds.map((ruleId) => {
+              const rule = reportRuleOptions.find(
+                (option) => option.ruleId === ruleId,
+              )
+              return (
+                <Chip
+                  active
+                  aria-label={`${t.agent.composer.reportRequirement}: ${rule?.label ?? ruleId}`}
+                  dot="bg-brand"
+                  key={ruleId}
+                  onClick={() =>
+                    onReportRuleIdsChange?.(
+                      reportRuleIds.filter((id) => id !== ruleId),
+                    )}
+                  title={rule?.title ?? ruleId}
+                >
+                  <BookOpen aria-hidden="true" className="size-3 shrink-0" />
+                  <span className="max-w-48 truncate">
+                    {rule?.label ?? ruleId}
+                  </span>
+                  <X aria-hidden="true" className="size-3 shrink-0" />
+                </Chip>
+              )
+            })}
+            {reportGuidance.trim() && (
+              <Chip
+                active
+                aria-label={`${t.agent.composer.reportRequirement}: ${reportGuidance}`}
+                dot="bg-brand"
+                onClick={() => onReportGuidanceChange?.('')}
+                /* The cut is visual only — the full text stays reachable
+                   here and in the menu it was typed in (9b). */
+                title={reportGuidance}
+              >
+                <WandSparkles aria-hidden="true" className="size-3 shrink-0" />
+                <span className="max-w-48 truncate">
+                  {reportGuidance.trim()}
+                </span>
+                <X aria-hidden="true" className="size-3 shrink-0" />
+              </Chip>
+            )}
             {selectedSkillIds.map((skillId) => {
               const skill = slashSkills.find((item) => item.id === skillId)
               return (
@@ -737,7 +1058,8 @@ export function AgentComposer({
                   disabled={
                     disabled
                     || (addableCollections.length === 0
-                      && addableDocuments.length === 0)
+                      && addableDocuments.length === 0
+                      && addableCanvasDocuments.length === 0)
                   }
                   type="button"
                   variant="ghost"
@@ -799,6 +1121,66 @@ export function AgentComposer({
                         ))}
                       </div>
                     ) : null}
+                  </>
+                ) : null}
+                {onReportIdsChange && reportOptions.length > 0 ? (
+                  <>
+                    <DropdownMenuSeparator className="mx-0 my-1" />
+                    <OptionMenuHeader
+                      count={reportOptions.length - reportIds.length}
+                      title={t.agent.composer.reportGroup}
+                    />
+                    {reportIds.length >= reportLimit ? (
+                      <p className="px-2.5 py-2 t-meta text-muted-foreground">
+                        {t.agent.composer.reportCap.replace(
+                          '{max}',
+                          String(reportLimit),
+                        )}
+                      </p>
+                    ) : (
+                      <div className="py-1">
+                        {reportOptions
+                          .filter((report) => !reportIds.includes(report.runId))
+                          .map((report) => (
+                            <OptionMenuItem
+                              active={false}
+                              description={t.agent.composer.reportChip}
+                              icon={BookOpen}
+                              key={report.runId}
+                              label={report.title}
+                              onSelect={() =>
+                                onReportIdsChange([
+                                  ...reportIds,
+                                  report.runId,
+                                ])}
+                            />
+                          ))}
+                      </div>
+                    )}
+                  </>
+                ) : null}
+                {addableCanvasDocuments.length > 0 ? (
+                  <>
+                    <DropdownMenuSeparator className="mx-0 my-1" />
+                    <OptionMenuHeader
+                      count={addableCanvasDocuments.length}
+                      title={t.agent.composer.canvasDocGroup}
+                    />
+                    <div className="py-1">
+                      {addableCanvasDocuments.map((document) => (
+                        <OptionMenuItem
+                          active={false}
+                          description={t.agent.composer.canvasDocChip}
+                          icon={FileText}
+                          key={document.artifactId}
+                          label={document.name}
+                          onSelect={() =>
+                            onPinnedCanvasDocumentChange?.(
+                              document.artifactId,
+                            )}
+                        />
+                      ))}
+                    </div>
                   </>
                 ) : null}
               </DropdownMenuContent>
@@ -985,6 +1367,91 @@ export function AgentComposer({
                         onSelect={() => onEngineModeChange?.(mode)}
                       />
                     ))}
+                    {onReportGuidanceChange || onReportRuleIdsChange ? (
+                      <>
+                        <DropdownMenuSeparator className="mx-0 my-1" />
+                        <p className="px-2.5 pb-1 pt-1.5 t-caption text-muted-foreground/65">
+                          {t.agent.composer.reportRequirement}
+                        </p>
+                        {/* The result requirement, BEFORE the run (S6).
+                            The plan gate carries the same pair, but a
+                            run in Auto, on the speed tier, or in the
+                            kernel never reaches one — so without this
+                            the requirement had no entry point at all. */}
+                        {reportRuleOptions.length > 0 && onReportRuleIdsChange ? (
+                          <div className="flex flex-wrap items-center gap-1 px-2.5 pb-1.5">
+                            {reportRuleOptions.map((option) => {
+                              const active = reportRuleIds.includes(option.ruleId)
+                              const blocked =
+                                !active && reportRuleIds.length >= reportRuleLimit
+                              return (
+                                <button
+                                  aria-pressed={active}
+                                  className={cn(
+                                    'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 t-hint transition-colors',
+                                    active
+                                      ? 'border-brand/50 bg-brand/10 text-brand'
+                                      : 'border-border text-muted-foreground hover:text-foreground',
+                                    blocked
+                                      && 'cursor-not-allowed opacity-40 hover:text-muted-foreground',
+                                  )}
+                                  disabled={blocked || disabled}
+                                  key={option.ruleId}
+                                  onClick={() =>
+                                    onReportRuleIdsChange(
+                                      toggleReportRule(
+                                        reportRuleIds,
+                                        option.ruleId,
+                                        reportRuleLimit,
+                                      ),
+                                    )}
+                                  title={
+                                    blocked
+                                      ? t.agent.plan.reportRulesCap.replace(
+                                        '{max}',
+                                        String(reportRuleLimit),
+                                      )
+                                      : option.title
+                                  }
+                                  type="button"
+                                >
+                                  <BookOpen aria-hidden="true" className="icon-xs" />
+                                  {option.label}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        ) : null}
+                        {onReportGuidanceChange ? (
+                          <div className="px-2.5 pb-1.5">
+                            <textarea
+                              aria-label={t.agent.composer.reportRequirement}
+                              className="w-full resize-none rounded-md border border-border bg-card px-2.5 py-1.5 t-meta text-foreground placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                              disabled={disabled}
+                              maxLength={reportGuidanceLimit}
+                              onChange={(event) =>
+                                onReportGuidanceChange(event.target.value)}
+                              // A menu closes on Enter and treats typed
+                              // characters as type-ahead; the textarea
+                              // keeps those to itself. Escape is NOT
+                              // one of them — swallowing it left the
+                              // menu open with no keyboard way out
+                              // (observed live), so it travels on.
+                              onKeyDown={(event) => {
+                                if (event.key === 'Escape') return
+                                event.stopPropagation()
+                              }}
+                              placeholder={t.agent.composer.reportRequirementPlaceholder}
+                              rows={2}
+                              value={reportGuidance}
+                            />
+                            <p className="mt-0.5 t-hint text-muted-foreground/70">
+                              {t.agent.composer.reportRequirementHint}
+                            </p>
+                          </div>
+                        ) : null}
+                      </>
+                    ) : null}
                     {onResponseFormChange ? (
                       <>
                         <DropdownMenuSeparator className="mx-0 my-1" />
@@ -1018,7 +1485,7 @@ export function AgentComposer({
                         {tiers.map((tier) => (
                           <OptionMenuItem
                             active={tierMode === tier.id}
-                            description={`${tierHint(tier.id, t)} · ${tier.latency_hint}`}
+                            description={`${tierHint(tier.id, t)} · ${t.agent.composer.tierLatencyHint}`}
                             descriptionLines={2}
                             icon={tierIcon(tier.id)}
                             keepOpen

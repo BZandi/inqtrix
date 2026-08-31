@@ -1333,9 +1333,11 @@ export type EditorSuggestionDraftRevisionWire = {
 }
 
 export type EditorPrivateSuggestionDraftWire = {
+  anchor_text?: string | null
   anchor_version: 1
   change_summary: string[]
   created_at: number
+  edit_position?: 'replace' | 'before' | 'after' | 'append' | null
   evidence: {
     mode: 'add_sources' | 'fact_check' | 'verify_citations'
     sources: Array<{ title: string; url: string }>
@@ -1352,8 +1354,12 @@ export type EditorPrivateSuggestionDraftWire = {
 }
 
 export type EditorSuggestionDraftCreateWire = {
+  // Nur bei der ERSTANLAGE gesetzt: Ankerstelle und Einfuegeart gehoeren zur
+  // Identitaet des Vorschlags und duerfen von einer Revision nicht wandern.
+  anchor_text?: string
   anchor_version: 1
   change_summary: string[]
+  edit_position?: 'replace' | 'before' | 'after' | 'append'
   evidence: EditorPrivateSuggestionDraftWire['evidence']
   group_id: string
   patch_id: string
@@ -2612,6 +2618,30 @@ export async function createResearchRun(
       tool_directives: request.toolDirectives,
       source_policy: request.sourcePolicy,
       execution_directive: request.executionDirective,
+      canvas_context: request.canvasContext
+        ? {
+          artifact_id: request.canvasContext.artifactId,
+          comments: request.canvasContext.comments.map((comment) => ({
+            artifact_id: comment.artifactId,
+            comment: comment.comment,
+            quote: comment.quote,
+            quote_after: comment.quoteAfter,
+            quote_before: comment.quoteBefore,
+            revision: comment.revision,
+          })),
+          revision: request.canvasContext.revision,
+        }
+        : undefined,
+      // Presence, not truthiness — but only when there is something to
+      // say: an omitted field is "no requirement", and the server
+      // refuses the pair on non-agent modes rather than dropping it.
+      report_guidance: request.reportGuidance || undefined,
+      report_rule_ids: request.reportRuleIds?.length
+        ? request.reportRuleIds
+        : undefined,
+      // Ids only: the server resolves name, completion and visibility
+      // from the caller's own runs (P14).
+      report_ids: request.reportIds?.length ? request.reportIds : undefined,
     },
   })
 }
@@ -2832,6 +2862,16 @@ export async function listAgentRunArtifacts(
   return payload.data
 }
 
+export async function listAgentSessionArtifacts(
+  sessionId: string,
+  options: ClientOptions = {},
+) {
+  return requestJson<{ data: AgentArtifactMetaWire[] }>(
+    `/v1/agent-sessions/${sessionId}/artifacts`,
+    options,
+  )
+}
+
 export async function getAgentRunArtifact(
   runId: string,
   artifactId: string,
@@ -2857,6 +2897,26 @@ export async function updateAgentRunArtifact(
   return requestJson<{ id: string; revision: number; updated_by: string }>(
     `/v1/runs/${runId}/artifacts/${artifactId}`,
     { ...options, method: 'PUT', body },
+  )
+}
+
+/** Metadata-only rename (P9): title changes, revision does not — the
+ * content history never records a rename. 409 `locked_by: 'agent'`
+ * while the agent is writing. */
+export async function renameAgentRunArtifact(
+  runId: string,
+  artifactId: string,
+  body: { title: string },
+  options: ClientOptions = {},
+) {
+  return requestJson<{
+    id: string
+    revision: number
+    title: string
+    updated_by: string
+  }>(
+    `/v1/runs/${runId}/artifacts/${artifactId}`,
+    { ...options, method: 'PATCH', body },
   )
 }
 
@@ -2886,6 +2946,24 @@ export async function getEditorPatch(
     `/v1/editor/patches/${patchId}`,
     options,
   )
+}
+
+/** Patch METADATA of one document (no edit bodies), newest first.
+ * `status` filters to one lifecycle state; bodies come from
+ * `getEditorPatch`. */
+export async function listEditorDocumentPatches(
+  documentId: string,
+  status: 'pending' | 'accepted' | 'rejected' | null = null,
+  options: ClientOptions = {},
+) {
+  const query = status ? `?status=${status}` : ''
+  return requestJson<{
+    data: Array<{
+      patch_id: string
+      source: 'suggest' | 'instruct' | 'agent'
+      status: 'pending' | 'accepted' | 'rejected'
+    }>
+  }>(`/v1/editor/documents/${documentId}/patches${query}`, options)
 }
 
 /** Apply a pending patch server-side. 409 `conflict` carries
@@ -3920,6 +3998,12 @@ export async function changePassword(
 export type AdminSystemRuntime = {
   api: {
     openapi: boolean
+    /** Effective concurrent-chat ceiling of THIS api process.
+     * Optional: an older api image does not publish it, and the row
+     * must disappear rather than render "undefined". */
+    chat_max_concurrent?: number
+    /** Threads reserved for event-stream readers in this api process. */
+    stream_reader_workers?: number
   }
   files: {
     blob_storage: string
@@ -3951,6 +4035,17 @@ export type AdminSystemRuntime = {
     queue_depth: number | null
     store: string
     worker_dispatch: boolean
+    /** Admission cap of this api process; with worker_dispatch the
+     * execution capacity belongs to the worker fleet and is not claimed.
+     * Optional like the api block's concurrency fields: version skew. */
+    admission_max_concurrent?: number
+    queue_max_size?: number
+  }
+  /** Optional as a whole: an older api does not publish the block. */
+  agents?: {
+    /** Ceiling of the agent checkpointer's own psycopg pool in THIS
+     * process. */
+    checkpointer_pool_size?: number | null
   }
   storage: {
     backend: string

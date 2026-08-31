@@ -44,7 +44,7 @@ export type PromptTemplateInfo = {
   revision: number
   title: string
   updated_at: number
-  visibility: { chat?: boolean; editor?: boolean }
+  visibility: { agent?: boolean; chat?: boolean; editor?: boolean }
 }
 
 export type PromptTemplatePayload = {
@@ -53,7 +53,7 @@ export type PromptTemplatePayload = {
   include_in_autocomplete: boolean
   label: string
   title: string
-  visibility: { chat: boolean; editor: boolean }
+  visibility: { agent: boolean; chat: boolean; editor: boolean }
 }
 
 function isoFromUnix(seconds: number): string {
@@ -86,6 +86,9 @@ export function ruleFromTemplate(
     title: info.title,
     updatedAt: isoFromUnix(info.updated_at),
     visibility: {
+      // The agent surface is opt-IN (the two older ones default on):
+      // rules that existed before it must not start shaping reports.
+      agent: info.visibility.agent === true,
       chat: info.visibility.chat !== false,
       editor: info.visibility.editor !== false,
     },
@@ -124,6 +127,7 @@ export function templatePayloadFromRule(rule: ChatRuleRecord): PromptTemplatePay
     label: rule.label,
     title: rule.title,
     visibility: {
+      agent: rule.visibility?.agent === true,
       chat: rule.visibility?.chat !== false,
       editor: rule.visibility?.editor !== false,
     },

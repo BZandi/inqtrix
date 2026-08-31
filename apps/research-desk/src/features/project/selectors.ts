@@ -23,6 +23,7 @@ import type {
 } from './types'
 import { type JobPhase, type LocalizedText, type ResearchJob } from '@/features/researchDesk/types'
 import type { ReferenceDoc } from '@/features/files/referenceBlocks'
+import { sortExplorerFolders, sortExplorerItems } from './explorerSort'
 import {
   normalizeChatRule,
   normalizeLinkedContextRefs,
@@ -49,7 +50,7 @@ export type ChatRuleOption = {
   visibility: ChatRuleVisibility
 }
 
-export type ChatRuleSurface = 'chat' | 'editor'
+export type ChatRuleSurface = 'agent' | 'chat' | 'editor'
 
 export type ChatHistorySection =
   | {
@@ -143,22 +144,41 @@ export function projectKnowledgeSessionSections(state: ProjectState): KnowledgeS
     }
   }
 
-  const sections: KnowledgeSessionHistorySection[] = groupOrder.flatMap((groupId) => {
+  // Sort program: automatic modes order folder sections alphabetically
+  // and the rows inside every section by activity/name; manual keeps
+  // the explicit arrays (drag placement) untouched.
+  const mode = state.ui.explorerSort.knowledge
+  const groupSections = groupOrder.flatMap((groupId) => {
     const group = groups[groupId]
     if (!group) return []
     return [{
       group,
       groupId,
       kind: 'group' as const,
-      sessions: groupedSessions.get(groupId) ?? [],
+      sessions: sortExplorerItems(
+        groupedSessions.get(groupId) ?? [],
+        mode,
+        (session) => session.updatedAt,
+        (session) => session.title,
+      ),
     }]
   })
+  const sections: KnowledgeSessionHistorySection[] = sortExplorerFolders(
+    groupSections,
+    mode,
+    (section) => section.group.title,
+  )
 
   if (ungroupedSessions.length > 0 || sections.length === 0 || groupOrder.length > 0) {
     sections.push({
       groupId: null,
       kind: 'ungrouped',
-      sessions: ungroupedSessions,
+      sessions: sortExplorerItems(
+        ungroupedSessions,
+        mode,
+        (session) => session.updatedAt,
+        (session) => session.title,
+      ),
     })
   }
 
@@ -168,6 +188,12 @@ export function projectKnowledgeSessionSections(state: ProjectState): KnowledgeS
 export function selectedResearchRun(state: ProjectState) {
   const selectedJobId = state.ui.selectedJobId
   return selectedJobId ? state.researchRuns[selectedJobId] ?? null : null
+}
+
+/** SSOT for a chat row's activity time: the last message's createdAt,
+ * falling back to updatedAt — the sidebar sorts AND labels with this. */
+export function chatThreadActivityTimeIso(thread: ChatThreadRecord): string {
+  return thread.messages[thread.messages.length - 1]?.createdAt ?? thread.updatedAt
 }
 
 export function projectChatThreads(state: ProjectState): ChatThreadRecord[] {
@@ -194,22 +220,45 @@ export function projectChatHistorySections(state: ProjectState): ChatHistorySect
     }
   }
 
-  const sections: ChatHistorySection[] = state.chatThreadGroupOrder.flatMap((groupId) => {
+  // Sort program: same three-mode vocabulary as every desk rail.
+  // Activity time is thread.updatedAt (bumped by every exchange), so
+  // `recent` finally re-bubbles active conversations — the underlying
+  // chatThreadOrder stays the untouched created_at pagination prefix.
+  const mode = state.ui.explorerSort.chat
+  // Activity time == the row's visible age label (last message, with
+  // updatedAt only as fallback) so 'recent' never reorders without a
+  // visible cause (renames/message edits bump updatedAt, not activity).
+  const groupSections = state.chatThreadGroupOrder.flatMap((groupId) => {
     const group = state.chatThreadGroups[groupId]
     if (!group) return []
     return [{
       group,
       groupId,
       kind: 'group' as const,
-      threads: groupedThreads.get(groupId) ?? [],
+      threads: sortExplorerItems(
+        groupedThreads.get(groupId) ?? [],
+        mode,
+        chatThreadActivityTimeIso,
+        (thread) => thread.title,
+      ),
     }]
   })
+  const sections: ChatHistorySection[] = sortExplorerFolders(
+    groupSections,
+    mode,
+    (section) => section.group.title,
+  )
 
   if (ungroupedThreads.length > 0 || sections.length === 0 || state.chatThreadGroupOrder.length > 0) {
     sections.push({
       groupId: null,
       kind: 'ungrouped',
-      threads: ungroupedThreads,
+      threads: sortExplorerItems(
+        ungroupedThreads,
+        mode,
+        chatThreadActivityTimeIso,
+        (thread) => thread.title,
+      ),
     })
   }
 
@@ -329,7 +378,8 @@ export function chatRuleOptionsFromRules(
       markdown: rule.contentMarkdown,
       ruleId: rule.id,
       title: rule.title,
-      visibility: rule.visibility ?? { chat: true, editor: true },
+      visibility: rule.visibility
+        ?? { agent: false, chat: true, editor: true },
     }))
 }
 
@@ -1032,6 +1082,10 @@ export function researchRunToJob(run: ResearchRunRecord): ResearchJob {
       .filter(isDisplayableResearchEvent)
       .map((event) => ({
         active: event.active,
+        arrivedLive: event.arrivedLive,
+        // Carried through, not re-derived: the record's id is already the
+        // stable `<runId>-<sequence>` identity the live rows key on.
+        id: event.id,
         kind: event.kind ?? 'progress',
         phase: event.phase,
         severity: event.severity ?? 'info',
@@ -1046,6 +1100,7 @@ export function researchRunToJob(run: ResearchRunRecord): ResearchJob {
     startedAt: run.startedAt ? formatTime(run.startedAt) : undefined,
     startedAtIso: run.startedAt,
     status: run.status,
+    unavailable: run.unavailable === true ? true : undefined,
     submittedAt: formatTime(run.submittedAt),
     title: text(run.summary.title),
   }

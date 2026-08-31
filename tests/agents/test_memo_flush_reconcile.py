@@ -17,7 +17,6 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
 
 from inqtrix.agents.algorithm import _MEMO_CONFLICT_SEPARATOR, _flush_memo
 from inqtrix.agents.control_memory import MemoryAgentControlStore

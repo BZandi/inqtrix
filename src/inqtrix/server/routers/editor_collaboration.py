@@ -864,12 +864,23 @@ def _public_error(exc: Exception):
         ),
     ):
         reason = getattr(exc, "reason", str(exc))
+        current_sequence = getattr(exc, "current_sequence", None)
+        # Nur wo der Server einen konkreten Stand nennen kann, ist die
+        # Aussage "nicht mehr aktuell" wahr. Fuer jeden anderen Konflikt
+        # benennt die Meldung den Vorgang, ohne eine Ursache zu erfinden:
+        # eine falsche Begruendung schickt den Nutzer in eine Wiederholung,
+        # die nie gelingen kann, und verdeckt den echten Grund.
+        message = (
+            "Der Kollaborationsstand ist nicht mehr aktuell."
+            if current_sequence is not None
+            else f"Die Aenderung wurde abgelehnt (Grund: {reason})."
+        )
         return error_response(
             409,
-            "Der Kollaborationsstand ist nicht mehr aktuell.",
+            message,
             "conflict",
             reason=reason,
-            current_sequence=getattr(exc, "current_sequence", None),
+            current_sequence=current_sequence,
         )
     if isinstance(exc, CollaborationLeaseInvalid):
         if exc.reason in {"access_revoked", "permission_denied"}:

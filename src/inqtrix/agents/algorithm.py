@@ -18,7 +18,7 @@ import asyncio
 import logging
 import threading
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Callable, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, TypedDict
 
 from inqtrix.constants import REASONING_TIMEOUT
 from inqtrix.agents import (
@@ -65,6 +65,7 @@ from inqtrix.agents.control_ports import (
     PlanRecord,
     TASK_TERMINAL_STATUSES,
     PlanTaskRecord,
+    artifact_event_payload,
     settle_cancelled_plan_tasks,
 )
 from inqtrix.agents.discovery import (
@@ -191,6 +192,10 @@ TASK_FAILED_EVENT = "inqtrix.agent.task.failed"
 ARTIFACT_CREATED_EVENT = "inqtrix.agent.artifact.created"
 ARTIFACT_UPDATED_EVENT = "inqtrix.agent.artifact.updated"
 ARTIFACT_EDIT_CONFLICT_EVENT = "inqtrix.agent.artifact.edit_conflict"
+# P9d: the durable record of WHICH canvas comments rode a submission —
+# run summaries deliberately never carry the canvas context (P4 share
+# design), so the transcript surfaces it from this replayable event.
+CANVAS_CONTEXT_ATTACHED_EVENT = "inqtrix.agent.canvas_context.attached"
 ACTIVITY_EVENT = "inqtrix.agent.activity"
 
 _WAITING_STATUS_BY_KIND = {
@@ -208,6 +213,10 @@ class AgentPhaseState(TypedDict, total=False):
     question: str
     history: str
     autonomy: str
+    delegated: bool
+    """This run is a delegated child (run row carries a parent): its
+    round-0 plan gate was covered by the delegation approval — see the
+    plan node's narrowing. Read once at round 0, checkpoint-durable."""
     session_id: str
     skill_point_answers: dict[str, dict[str, str]]
     """Per attached skill: point-name -> answer (from context or the
@@ -401,15 +410,35 @@ class WorkspaceAgentAlgorithm:
                 run_store=self._run_service.run_store,
                 run_async=_run_async,
             )
+            # Whether this run IS a delegation: the run row is the only
+            # truthful source (RunRequest carries no tree linkage), read
+            # once at round 0 and checkpointed with the state, so resumes
+            # never re-read. Pre-upgrade checkpoints lack the key and
+            # keep their plan gate (fail-safe toward gating). The read
+            # MUST present the owner's visibility: under the store's
+            # authorization predicate a ``visible_to=None`` read only
+            # sees anonymous rows, so an owned (child) run would answer
+            # RunNotFound (same contract as ``deps.visible_to`` reads).
+            own_row = self._run_service.run_store.get(
+                run_id, visible_to=deps.visible_to
+            )
             graph_input: Any = {
                 "question": request.question,
                 "history": request.history,
                 "autonomy": request.autonomy
                 or self._platform.default_autonomy,
+                "delegated": bool(own_row.get("parent_run_id")),
                 "session_id": request.session_id,
                 "target_document_id": request.document_id,
                 "phase": "intake",
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+                # Seeded from the submit-time requirement (S6). Three
+                # paths never reach a plan gate — autonomous, the speed
+                # tier and delegated children — so without this seed
+                # they had NO way to state one. A later plan-gate
+                # decision replaces it; an approval that says nothing
+                # about the result leaves it standing.
+                "report_guidance": request.report_requirement or "",
                 "clarification_rounds": 0,
                 "replan_rounds": 0,
                 "revisions_used": 0,
@@ -600,15 +629,21 @@ class WorkspaceAgentAlgorithm:
         record = _run_async(
             self._control.get_approval(run_id, payload.get("id", ""))
         )
-        return {
+        resume: dict[str, Any] = {
             "kind": "approval",
             "status": record.status,
             "decision": record.decision,
             "note": record.note,
-            "report_guidance": str(
-                dict(record.decision_payload).get("report_guidance", "")
-            ),
         }
+        decided_payload = dict(record.decision_payload)
+        # Presence carries the decision: a key that was never sent must
+        # not arrive as "" and overwrite an earlier guidance, and a key
+        # that WAS sent empty must arrive so it can clear one.
+        if "report_guidance" in decided_payload:
+            resume["report_guidance"] = str(
+                decided_payload["report_guidance"] or ""
+            )
+        return resume
 
     # -- graph ------------------------------------------------------------- #
 
@@ -1246,6 +1281,12 @@ def _node_intake(state: AgentPhaseState) -> AgentPhaseState:
     # override wins, then a skill's pinned deliverable, then the intake
     # profile's inference; a failed intake or a patch assignment stays
     # on the established canvas path (safe default = today's behavior).
+    # SURFACE only. A skill may pin four values, but only two of them
+    # name a surface: `email` and `talking_points` are FORMS that live on
+    # the canvas. The fold is therefore correct — and it is no longer a
+    # silent one: `build_skills_block` states the pinned form in the
+    # prompt, so the author's choice survives the routing decision
+    # instead of evaporating in it.
     skill_deliverable = next(
         (
             "chat" if skill.deliverable == "chat" else "canvas"
@@ -1782,8 +1823,20 @@ def _node_discovery(state: AgentPhaseState) -> AgentPhaseState:
     return state
 
 
-def _skills_prompt_block(deps: "_RunDeps", state: AgentPhaseState) -> str:
-    """The combined skill + tool-directive prompt section of one run."""
+def _skills_prompt_block(
+    deps: "_RunDeps",
+    state: AgentPhaseState,
+    *,
+    scope: str = "document",
+) -> str:
+    """The combined skill + tool-directive prompt section of one run.
+
+    ``scope="section"`` is for the per-section writer: it writes a PART
+    of the deliverable, so a pinned format contributes its register but
+    not its envelope. With the whole-deliverable wording a four-section
+    memo became four complete emails — four subject lines, four
+    salutations, four closings — assembled under the memo's headings.
+    """
     parts: list[str] = []
     directives = build_tool_directives_line(
         deps.request.tool_directives or ()
@@ -1791,7 +1844,9 @@ def _skills_prompt_block(deps: "_RunDeps", state: AgentPhaseState) -> str:
     if directives:
         parts.append(directives)
     block = build_skills_block(
-        deps.skills, dict(state.get("skill_point_answers") or {})
+        deps.skills,
+        dict(state.get("skill_point_answers") or {}),
+        scope=scope,
     )
     if block:
         parts.append(block)
@@ -1894,6 +1949,14 @@ def _node_plan(state: AgentPhaseState) -> AgentPhaseState:
         ):
             # Speed tier: no gate unless the PERMISSION dimension
             # (strict) demands one — permission always beats speed.
+            needs_interrupt = autonomy == "strict"
+        if replan_round == 0 and state.get("delegated"):
+            # A delegated child's round-0 plan was already consented to:
+            # whoever approved dispatching this run has seen its objective
+            # (Betreiber-Entscheid 2026-08-27). Permission still beats
+            # delegation — strict keeps the gate — and replans re-gate
+            # per delta below, because their content is new information
+            # the delegation approval never covered.
             needs_interrupt = autonomy == "strict"
         if replan_round == 0:
             if skill_plan_policy == "always":
@@ -2077,9 +2140,13 @@ def _node_plan_approval(state: AgentPhaseState) -> AgentPhaseState:
             phase="planning",
         )
         return state
-    guidance = str(decision.get("report_guidance", "") or "").strip()
-    if guidance:
-        state["report_guidance"] = guidance
+    if "report_guidance" in decision:
+        # An absent key leaves an earlier guidance standing (a replan
+        # approval without new requirements keeps the old ones); a
+        # present key wins, including the empty string that clears them.
+        state["report_guidance"] = str(
+            decision.get("report_guidance") or ""
+        ).strip()
     # approve OR edit: the control store holds the authoritative latest
     # version (an edit appended one) — reload (rule R5).
     latest, latest_tasks = _run_async(deps.control.get_plan(run_id))
@@ -3288,6 +3355,10 @@ def _perform_synthesis(state: AgentPhaseState) -> AgentPhaseState:
         )
     model, effort = deps.resolved("agent_synthesis")
     skills_block = _skills_prompt_block(deps, state)
+    # The section writer gets the same skills with a PART-scoped format
+    # line: the outline decides the whole deliverable, a section only
+    # fills one of its parts.
+    section_skills_block = _skills_prompt_block(deps, state, scope="section")
     outline_outcome = synthesis.run_outline(
         deps.llm,
         question=state["question"],
@@ -3348,7 +3419,7 @@ def _perform_synthesis(state: AgentPhaseState) -> AgentPhaseState:
             section_focus=section.focus,
             evidence_digest=section_digest,
             contradictions_digest=contradictions_digest,
-            skills_block=skills_block,
+            skills_block=section_skills_block,
             user_guidance=state.get("report_guidance", ""),
             model=model,
             reasoning_effort=effort,
@@ -3359,7 +3430,13 @@ def _perform_synthesis(state: AgentPhaseState) -> AgentPhaseState:
         sections.append((section.title, body))
         memo = synthesis.assemble_memo(outline.title, sections)
         state["memo_markdown"] = memo
-        state["memo_title"] = outline.title
+        # The name belongs to the DOCUMENT, not to the turn. A session
+        # memo is named once, when it is created, and changes name only
+        # through an explicit rename. Re-titling on every canvas turn
+        # silently threw away a name the user had given it — and made
+        # the file in the transcript change identity under them.
+        if not state.get("memo_base_revision"):
+            state["memo_title"] = outline.title
         _flush_memo(deps, state, memo, status="writing")
         _emit_narration(
             deps,
@@ -3469,6 +3546,7 @@ def _node_critic(state: AgentPhaseState) -> AgentPhaseState:
         success_criteria=state.get("success_criteria", []),
         facts=facts,
         user_guidance=state.get("report_guidance", ""),
+        skills_block=_skills_prompt_block(deps, state),
         model=model,
         reasoning_effort=effort,
         timeout=deps.timeout,
@@ -4046,12 +4124,9 @@ def _flush_memo(
             if first and record.revision == 1
             else ARTIFACT_UPDATED_EVENT
         ),
-        {
-            "artifact_id": record.artifact_id,
-            "kind": "memo",
-            "revision": record.revision,
-            "updated_by": "agent",
-        },
+        # P9: the shared builder adds the previously missing title (the
+        # memo chip's documented fallback gap) plus the line delta.
+        artifact_event_payload(record),
     )
 
 
@@ -4552,6 +4627,82 @@ def _run_web_instant(deps: "_RunDeps", task: PlanTaskRecord) -> TaskOutcome:
     )
 
 
+class _QueryOutcome(NamedTuple):
+    """What ONE sub-query produced, carrying nothing shared.
+
+    Each query owns its result so the queries can run concurrently and
+    still be folded in QUERY order — the sequential loop's observable
+    behaviour, at a fraction of its wall time.
+    """
+
+    index: int
+    query: str
+    answer: str = ""
+    references: tuple[dict[str, Any], ...] | list[dict[str, Any]] = ()
+    warnings: tuple[str, ...] | list[str] = ()
+    usage: dict[str, Any] = {}  # noqa: RUF012 — read-only per outcome
+    #: A rejected sub-answer: a named gap, not a task failure.
+    failure: Any = None
+    #: An exception from the capability itself; re-raised by the caller.
+    raised: BaseException | None = None
+    #: Never started, because a sibling had already raised.
+    skipped: bool = False
+
+
+def _execute_queries(
+    queries: list[str],
+    run_one: "Callable[[int, str], _QueryOutcome]",
+    max_parallel: int,
+) -> list[_QueryOutcome]:
+    """Run a task's sub-queries and return them in QUERY order.
+
+    The queries of one task are independent by construction: each builds
+    its prompt from ``(task, query)`` alone (``_task_query_prompt``) and
+    reads nothing the others produce. Dependencies live one level up, on
+    ``PlanTaskRecord.depends_on``, and are sequenced by the wave
+    scheduler — this function never touches that.
+
+    Same shape as ``scheduler.execute_wave`` one level down, including
+    the sequential fast path (no pool for a single query) and the
+    ``contextvars`` copy, without which the run context would not reach
+    the worker thread.
+    """
+    if len(queries) <= 1 or max_parallel <= 1:
+        return [
+            run_one(index, query)
+            for index, query in enumerate(queries, start=1)
+        ]
+    from concurrent.futures import ThreadPoolExecutor
+
+    # The sequential loop stopped at the first exception, so its siblings
+    # never ran. A pool submits them all, and a capability that is simply
+    # down would fail every one of them — N paid failures where the loop
+    # had one. A query that has not STARTED when a sibling raises is
+    # skipped, mirroring `scheduler.execute_wave`'s `wave_stop`.
+    stop = threading.Event()
+
+    def _guarded(index: int, query: str) -> _QueryOutcome:
+        if stop.is_set():
+            return _QueryOutcome(index=index, query=query, skipped=True)
+        try:
+            return run_one(index, query)
+        except BaseException:
+            stop.set()
+            raise
+
+    with ThreadPoolExecutor(
+        max_workers=min(max_parallel, len(queries)),
+        thread_name_prefix="inqtrix-agent-query",
+    ) as pool:
+        futures = []
+        for index, query in enumerate(queries, start=1):
+            worker_context = contextvars.copy_context()
+            futures.append(
+                pool.submit(worker_context.run, _guarded, index, query)
+            )
+        return [future.result() for future in futures]
+
+
 def _run_rag_query(
     deps: "_RunDeps",
     state: AgentPhaseState,
@@ -4580,47 +4731,50 @@ def _run_rag_query(
     answers: list[str] = []
     references_by_key: dict[str, dict[str, Any]] = {}
     retrieval_warning_messages: list[str] = []
+    # Sub-queries whose answer was rejected. They do not stop the task —
+    # they become a named gap in its result — but a task where EVERY
+    # query failed has nothing to stand on and still fails.
+    failed_queries: list[tuple[str, Any]] = []
     usage_total = {"prompt_tokens": 0, "completion_tokens": 0}
-    active_query_index = 0
-
-    def _forward_knowledge_event(
-        event: str, payload: dict[str, Any]
-    ) -> None:
-        """Preserve nested Knowledge verdicts in mission/parent audit."""
-
-        if event not in {
-            "inqtrix.knowledge.answer.retry",
-            "inqtrix.knowledge.grounding.checked",
-            "inqtrix.knowledge.retrieval.degraded",
-            "inqtrix.knowledge.retrieval.warning",
-        }:
-            return
-        # Enrichment first, payload last: an event that carries its own
-        # `attempt` (answer.retry's regeneration attempt, documented as
-        # always 2) must not be clobbered by the mission task attempt.
-        deps.emit(
-            event,
-            {
-                "task_id": task.task_id,
-                "attempt": attempt,
-                "query_index": active_query_index,
-                **dict(payload),
-            },
-        )
-
-    sub_context = RunContext(
-        providers=deps.context.providers,
-        strategies=deps.context.strategies,
-        agent_settings=deps.context.agent_settings,
-        principal=deps.context.principal,
-        workspace_id=deps.context.workspace_id,
-        run_id=None,
-        cancel_token=deps.context.cancel_token,
-        event_sink=_forward_knowledge_event,
-        token_budget=int(deps.context.token_budget or 0),
+    max_parallel = max(
+        1, int(deps.platform.max_parallel_queries_per_task or 1)
     )
-    for index, query in enumerate(queries, start=1):
-        active_query_index = index
+
+    def _run_one_query(index: int, query: str) -> _QueryOutcome:
+        """Everything ONE sub-query does, owning all of its own state.
+
+        The event sink is bound to THIS query's index. It used to read a
+        shared ``active_query_index``, which is exactly the kind of
+        sharing that survives a sequential loop and silently misreports
+        under concurrency: a grounding verdict would be filed under
+        whichever query happened to be current.
+        """
+
+        def _forward_knowledge_event(
+            event: str, payload: dict[str, Any]
+        ) -> None:
+            """Preserve nested Knowledge verdicts in mission/parent audit."""
+
+            if event not in {
+                "inqtrix.knowledge.answer.retry",
+                "inqtrix.knowledge.grounding.checked",
+                "inqtrix.knowledge.retrieval.degraded",
+                "inqtrix.knowledge.retrieval.warning",
+            }:
+                return
+            # Enrichment first, payload last: an event that carries its own
+            # `attempt` (answer.retry's regeneration attempt, documented as
+            # always 2) must not be clobbered by the mission task attempt.
+            deps.emit(
+                event,
+                {
+                    "task_id": task.task_id,
+                    "attempt": attempt,
+                    "query_index": index,
+                    **dict(payload),
+                },
+            )
+
         activity = {
             "kind": "searching",
             "scope": "task",
@@ -4640,10 +4794,22 @@ def _run_rag_query(
                 RunRequest(
                     mode="knowledge",
                     question=_task_query_prompt(task, query),
-                    knowledge_filters=filters,
+                    # Own copy per query: the shared dict was safe while
+                    # the loop was sequential, and a copy costs nothing.
+                    knowledge_filters=dict(filters),
                 ),
                 runtime=deps.runtime,
-                context=sub_context,
+                context=RunContext(
+                    providers=deps.context.providers,
+                    strategies=deps.context.strategies,
+                    agent_settings=deps.context.agent_settings,
+                    principal=deps.context.principal,
+                    workspace_id=deps.context.workspace_id,
+                    run_id=None,
+                    cancel_token=deps.context.cancel_token,
+                    event_sink=_forward_knowledge_event,
+                    token_budget=int(deps.context.token_budget or 0),
+                ),
             )
         except Exception as exc:
             deps.emit(
@@ -4657,17 +4823,18 @@ def _run_rag_query(
                     },
                 },
             )
-            raise
+            return _QueryOutcome(index=index, query=query, raised=exc)
         raw_state = result.raw.get("result_state", {}) or {}
         retrieval_state = raw_state.get("knowledge_retrieval", {}) or {}
         retrieval_degradations = list(
             retrieval_state.get("degradations", []) or []
         )
         retrieval_warnings = list(retrieval_state.get("warnings", []) or [])
+        warning_messages: list[str] = []
         for degradation in retrieval_degradations:
             if not isinstance(degradation, dict):
                 continue
-            message = (
+            warning_messages.append(
                 "Die Knowledge-Suche erreichte eine technische "
                 "Kandidatengrenze und lieferte "
                 f"{int(degradation.get('returned_hits', 0) or 0)}/"
@@ -4675,34 +4842,29 @@ def _run_rag_query(
                 "angeforderte verifizierte Treffer; das Ergebnis ist kein "
                 "Vollständigkeitsnachweis."
             )
-            if message not in retrieval_warning_messages:
-                retrieval_warning_messages.append(message)
         for warning in retrieval_warnings:
             if not isinstance(warning, dict):
                 continue
             count = int(warning.get("count", 0) or 0)
             code = str(warning.get("code", "") or "").strip()
-            rendered = (
+            warning_messages.append(
                 "Die Knowledge-Suche schloss "
                 f"{count if count else 'einzelne'} Treffer durch eine "
                 "Integritätsprüfung aus"
                 f"{f' ({code})' if code else ''}."
             )
-            if rendered not in retrieval_warning_messages:
-                retrieval_warning_messages.append(rendered)
         usage = result.raw.get("usage", {}) or {}
-        usage_total["prompt_tokens"] += int(
-            usage.get("prompt_tokens", 0) or 0
-        )
-        usage_total["completion_tokens"] += int(
-            usage.get("completion_tokens", 0) or 0
-        )
         terminal_failure = result.terminal_failure
         if terminal_failure is not None:
-            # A nested Knowledge run retains its token usage and safe failure
-            # explanation, but neither its rejected completion nor a partial
-            # multi-query result may enter mission synthesis.  Stop this task
-            # at the first terminal verdict and persist the same stable code.
+            # A rejected sub-answer never enters the synthesis — but the
+            # sibling queries that DID verify are real evidence. Throwing
+            # them away used to end whole runs over one malformed block:
+            # five checked searches discarded because the sixth could not
+            # be parsed. The GAP travels with the result instead — named
+            # in the answer under "Retrieval-Hinweis" and visible as a
+            # failed step — so the synthesis writes with it in view and
+            # the reader can see what is missing. Only a task where
+            # NOTHING verified still fails.
             deps.emit(
                 ACTIVITY_EVENT,
                 {
@@ -4714,30 +4876,22 @@ def _run_rag_query(
                     },
                 },
             )
-            return TaskOutcome(
-                status="failed",
-                summary=task_result_summary(terminal_failure.message),
-                failure_reason=terminal_failure.message,
-                failure_code=terminal_failure.type,
-                usage=usage_total,
-                transient=False,
+            warning_messages.append(
+                f"Die Teilfrage \"{query}\" lieferte kein verwertbares "
+                f"Ergebnis: {terminal_failure.message}"
             )
-        if result.answer:
-            answers.append(result.answer)
-        for ref in raw_state.get("report_references", []):
-            if not isinstance(ref, dict):
-                continue
-            normalized = dict(ref)
-            if not normalized.get("excerpt") and normalized.get("source_text"):
-                normalized["excerpt"] = normalized["source_text"]
-            key = str(
-                normalized.get("url")
-                or (
-                    normalized.get("document_id"),
-                    normalized.get("chunk_index"),
-                )
+            return _QueryOutcome(
+                index=index,
+                query=query,
+                failure=terminal_failure,
+                warnings=warning_messages,
+                usage=usage,
             )
-            references_by_key.setdefault(key, normalized)
+        references = [
+            dict(ref)
+            for ref in raw_state.get("report_references", [])
+            if isinstance(ref, dict)
+        ]
         deps.emit(
             ACTIVITY_EVENT,
             {
@@ -4751,7 +4905,67 @@ def _run_rag_query(
                 "warnings": [*retrieval_degradations, *retrieval_warnings],
             },
         )
+        return _QueryOutcome(
+            index=index,
+            query=query,
+            answer=result.answer or "",
+            references=references,
+            warnings=warning_messages,
+            usage=usage,
+        )
+
+    outcomes = _execute_queries(queries, _run_one_query, max_parallel)
+
+    # Folded in QUERY order, never in completion order. Three things here
+    # are order-dependent and stay exactly as the sequential loop had
+    # them: the answer text's order, which duplicate reference wins
+    # (`setdefault` — the earlier query), and which failure code carries.
+    for outcome in outcomes:
+        if outcome.raised is not None:
+            raise outcome.raised
+        if outcome.skipped:
+            # A sibling raised before this one started; the raise below
+            # carries the failure, so it contributes nothing.
+            continue
+        usage_total["prompt_tokens"] += int(
+            outcome.usage.get("prompt_tokens", 0) or 0
+        )
+        usage_total["completion_tokens"] += int(
+            outcome.usage.get("completion_tokens", 0) or 0
+        )
+        for message in outcome.warnings:
+            if message not in retrieval_warning_messages:
+                retrieval_warning_messages.append(message)
+        if outcome.failure is not None:
+            failed_queries.append((outcome.query, outcome.failure))
+            continue
+        if outcome.answer:
+            answers.append(outcome.answer)
+        for ref in outcome.references:
+            normalized = dict(ref)
+            if not normalized.get("excerpt") and normalized.get("source_text"):
+                normalized["excerpt"] = normalized["source_text"]
+            key = str(
+                normalized.get("url")
+                or (
+                    normalized.get("document_id"),
+                    normalized.get("chunk_index"),
+                )
+            )
+            references_by_key.setdefault(key, normalized)
     references = list(references_by_key.values())
+    if failed_queries and not answers:
+        # Nothing verified: there is no partial result to carry, so the
+        # task fails with the FIRST stable code, exactly as before.
+        _first_query, first_failure = failed_queries[0]
+        return TaskOutcome(
+            status="failed",
+            summary=task_result_summary(first_failure.message),
+            failure_reason=first_failure.message,
+            failure_code=first_failure.type,
+            usage=usage_total,
+            transient=False,
+        )
     answer = "\n\n".join(answers)
     if retrieval_warning_messages:
         answer = (

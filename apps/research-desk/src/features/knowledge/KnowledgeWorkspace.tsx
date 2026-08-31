@@ -1,4 +1,6 @@
+import type { ExplorerSortMode } from '@/features/project/explorerSort'
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -39,6 +41,7 @@ import { useAnimatedResizablePanelCollapse } from '@/components/ui/animated-pane
 import { ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import { ResponsiveSidePanel } from '@/components/ui/responsive-side-panel'
 import { ConversationSkeleton } from '@/components/ui/conversation-skeleton'
+import { Skeleton } from '@/components/ui/skeleton'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { WelcomeState } from '@/components/ui/welcome-state'
@@ -50,6 +53,10 @@ import {
 import { useScrollRestoration } from '@/features/scroll/useScrollRestoration'
 import { formatMessageTimestamp } from '@/lib/time'
 import { cn } from '@/lib/utils'
+import {
+  StructuralLoadBoundary,
+  type StructuralVisibilityChange,
+} from '@/motion/StructuralLoadBoundary'
 import { appMotion } from '@/motion/transitions'
 import { useMediaQuery } from '@/features/researchDesk/hooks/useMediaQuery'
 import type {
@@ -143,6 +150,10 @@ type KnowledgeWorkspaceProps = {
   onModeChange: (mode: KnowledgeMode) => void
   onMoveSessionGroup: (groupId: string, targetIndex: number) => void
   onMoveSessionToGroup: (sessionId: string, groupId: string | null, targetIndex: number) => void
+  onAdoptVisibleOrder: (itemIds: string[], folderIds: string[]) => void
+  onChangeSortMode: (mode: ExplorerSortMode) => void
+  sortMode: ExplorerSortMode
+  onPrefetchSession?: (sessionId: string) => void
   onProfileChange: (profileId: string | null) => void
   onRenameSessionGroup: (groupId: string, title: string) => void
   onRenameSession: (sessionId: string, title: string) => void
@@ -205,6 +216,10 @@ export function KnowledgeWorkspace({
   onModeChange,
   onMoveSessionGroup,
   onMoveSessionToGroup,
+  onAdoptVisibleOrder,
+  onChangeSortMode,
+  sortMode,
+  onPrefetchSession,
   onProfileChange,
   onRenameSessionGroup,
   onRenameSession,
@@ -255,7 +270,19 @@ export function KnowledgeWorkspace({
       ? 'knowledge:incognito'
       : selectedSessionId ? `knowledge:${selectedSessionId}` : 'knowledge:pending')
     : null
-  const knowledgeContentReady = !isItemsLoading
+  const knowledgeRevealKey = knowledgeScrollKey ?? `knowledge:${mode}`
+  const [knowledgeReadyKey, setKnowledgeReadyKey] = useState<string | null>(null)
+  const knowledgeGateReady = knowledgeReadyKey === knowledgeRevealKey
+  const handleKnowledgeVisibilityChange = useCallback(({ identity, visible }: StructuralVisibilityChange) => {
+    setKnowledgeReadyKey((current) => {
+      if (visible) return identity
+      return current === identity ? null : current
+    })
+  }, [])
+  const knowledgeStructuralPhase = isItemsLoading
+    ? items.length > 0 ? 'refreshing' : 'pending'
+    : items.length > 0 ? 'ready' : 'empty'
+  const knowledgeContentReady = !isItemsLoading && (items.length === 0 || knowledgeGateReady)
   const knowledgeContentVersion = useMemo(
     () => items.map((item) => [
       item.id,
@@ -451,6 +478,10 @@ export function KnowledgeWorkspace({
       onRetrySessionDeletion={onRetrySessionDeletion}
       onMoveSessionGroup={onMoveSessionGroup}
       onMoveSessionToGroup={onMoveSessionToGroup}
+      onAdoptVisibleOrder={onAdoptVisibleOrder}
+      onChangeSortMode={onChangeSortMode}
+      sortMode={sortMode}
+      onPrefetchSession={onPrefetchSession}
       onRenameSessionGroup={onRenameSessionGroup}
       onRenameSession={onRenameSession}
       onSelectSession={handleSelectSession}
@@ -853,6 +884,14 @@ export function KnowledgeWorkspace({
 
   const askCenter = (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      <StructuralLoadBoundary
+        className="min-h-0 flex-1"
+        fallback={<KnowledgeSurfaceSkeleton />}
+        identity={knowledgeRevealKey}
+        onVisibilityChange={handleKnowledgeVisibilityChange}
+        phase={knowledgeStructuralPhase}
+      >
+      <div className="flex min-h-0 flex-1 flex-col">
       {workspaceHeader}
       <AnimatePresence initial={false}>
         {isItemSelectionMode && (
@@ -909,16 +948,16 @@ export function KnowledgeWorkspace({
           </motion.div>
         )}
       </AnimatePresence>
-      <ScrollArea
-        className={cn(
-          'min-h-0 flex-1',
-          items.length === 0 && !isItemsLoading && '[&_[data-scroll-area-viewport]>div]:h-full',
-        )}
-        data-knowledge-ask-scroll=""
-      >
+        <ScrollArea
+          className={cn(
+            'min-h-0 flex-1',
+            items.length === 0 && !isItemsLoading && '[&_[data-scroll-area-viewport]>div]:h-full',
+          )}
+          data-knowledge-ask-scroll=""
+        >
         <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-5 px-4 py-6 md:px-8">
           {items.length === 0 && isItemsLoading ? (
-            <ConversationSkeleton reduceMotion={reduceMotion} />
+            null
           ) : items.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center px-6 py-8 text-center">
               <WelcomeState
@@ -989,6 +1028,7 @@ export function KnowledgeWorkspace({
                         replayLabel={t.knowledge.rerunQuestion}
                         selectionLabel={selectionLabel}
                         timestampLabel={formatMessageTimestamp(item.createdAt, locale)}
+                        youLabel={t.chat.you}
                       />
                 {item.status === 'completed' && item.answer ? (
                   <AnswerCard
@@ -999,12 +1039,23 @@ export function KnowledgeWorkspace({
                     onOpenReference={(reference) => openReference(item, reference)}
                     steps={item.progress.steps}
                   />
-                ) : item.status === 'failed' || item.status === 'cancelled' ? (
-                  <KnowledgeRunCard
-                    collectionCount={Math.max(item.collectionTitles.length, 1)}
-                    item={item}
-                  />
                 ) : null}
+                {/* Mounted for the item's whole life, not just while a card is
+                    shown — that is what makes the distinction exact. An item
+                    loaded as history already carries its card on this
+                    AnimatePresence's FIRST render and appears in place; an item
+                    that was still running when the list mounted had no card
+                    yet, so the one appearing when the ask fails is genuinely
+                    new and rises. */}
+                <AnimatePresence initial={false}>
+                  {(item.status === 'failed' || item.status === 'cancelled') && (
+                    <KnowledgeRunCard
+                      collectionCount={Math.max(item.collectionTitles.length, 1)}
+                      item={item}
+                      key={item.id}
+                    />
+                  )}
+                </AnimatePresence>
                     </div>
                   </div>
                 </div>
@@ -1013,7 +1064,9 @@ export function KnowledgeWorkspace({
           )}
           <div ref={threadEndRef} />
         </div>
-      </ScrollArea>
+        </ScrollArea>
+      </div>
+      </StructuralLoadBoundary>
       <div className="z-10 shrink-0 px-3 pb-2 pt-2 md:px-6">
         <div className="mx-auto max-w-5xl">
           <AnimatePresence initial={false} onExitComplete={() => setIsRunDockExiting(false)}>
@@ -1234,6 +1287,21 @@ export function KnowledgeWorkspace({
   )
 }
 
+function KnowledgeSurfaceSkeleton() {
+  return (
+    <div aria-hidden className="flex h-full min-h-0 flex-col bg-background">
+      <div className="flex inqtrix-panel-header shrink-0 items-center gap-3 border-b border-border px-3">
+        <Skeleton className="size-7 rounded-md" />
+        <Skeleton className="h-4 w-52 max-w-[45%]" />
+        <Skeleton className="ml-auto h-7 w-28 rounded-md" />
+      </div>
+      <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col px-4 py-6 md:px-8">
+        <ConversationSkeleton anchor="top" fill />
+      </div>
+    </div>
+  )
+}
+
 function KnowledgeQuestionBubble({
   collectionLabel,
   copiedLabel,
@@ -1248,6 +1316,7 @@ function KnowledgeQuestionBubble({
   replayLabel,
   selectionLabel,
   timestampLabel,
+  youLabel,
 }: {
   collectionLabel: string
   copiedLabel: string
@@ -1262,6 +1331,7 @@ function KnowledgeQuestionBubble({
   replayLabel: string
   selectionLabel: string
   timestampLabel: string
+  youLabel: string
 }) {
   const [copied, setCopied] = useState(false)
 
@@ -1279,44 +1349,48 @@ function KnowledgeQuestionBubble({
 
   return (
     <div className="flex min-w-0 justify-end">
-      <div className="min-w-0 max-w-[min(80%,40rem)]">
+      {/* Chat/agent user-message pattern to the letter (unification
+          round): meta line ABOVE the bubble ("Sie" + timestamp + index),
+          actions in their own row below, same 72%/44rem width cap. */}
+      <div className="min-w-0 max-w-[min(72%,44rem)]">
+        <div className="mb-1 flex flex-wrap items-center justify-end gap-x-2 gap-y-0.5 t-meta-sm font-semibold text-muted-foreground">
+          {isSelectionMode && (
+            <KnowledgeSelectionPill isSelected={isSelected} label={selectionLabel} />
+          )}
+          <span>{youLabel}</span>
+          <span className="whitespace-nowrap tabular-nums">{timestampLabel}</span>
+          {collectionLabel && (
+            <span className="flex min-w-0 items-center gap-1 font-normal">
+              <Database className="icon-xs shrink-0" />
+              <span className="min-w-0 truncate">{collectionLabel}</span>
+            </span>
+          )}
+        </div>
         <div className="inqtrix-user-bubble rounded-lg px-3 py-2.5 text-sm leading-6 shadow-[0_1px_2px_var(--shadow-hairline)]">
           {question}
         </div>
-        <div className="mt-1 flex min-w-0 items-center justify-end gap-1 t-meta-sm text-muted-foreground">
-          <span className="shrink-0 whitespace-nowrap tabular-nums">{timestampLabel}</span>
-          {collectionLabel && (
-            <>
-              <span className="shrink-0 text-muted-foreground/45">·</span>
-              <Database className="icon-xs shrink-0" />
-              <span className="min-w-0 truncate">{collectionLabel}</span>
-            </>
-          )}
-          {isSelectionMode ? (
-            <KnowledgeSelectionPill isSelected={isSelected} label={selectionLabel} />
-          ) : (
-            <div className="ml-0.5 flex shrink-0 items-center gap-0.5">
-              <KnowledgeQuestionAction
-                icon={copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-                label={copied ? copiedLabel : copyLabel}
-                onClick={() => void copyQuestion()}
-                success={copied}
-              />
-              <KnowledgeQuestionAction
-                disabled={disabled}
-                icon={<PencilLine className="size-3" />}
-                label={editLabel}
-                onClick={onEdit}
-              />
-              <KnowledgeQuestionAction
-                disabled={disabled}
-                icon={<SendHorizontal className="size-3" />}
-                label={replayLabel}
-                onClick={onReplay}
-              />
-            </div>
-          )}
-        </div>
+        {!isSelectionMode && (
+          <div className="mt-1 flex min-w-0 items-center justify-end gap-0.5 text-muted-foreground">
+            <KnowledgeQuestionAction
+              icon={copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+              label={copied ? copiedLabel : copyLabel}
+              onClick={() => void copyQuestion()}
+              success={copied}
+            />
+            <KnowledgeQuestionAction
+              disabled={disabled}
+              icon={<PencilLine className="size-3" />}
+              label={editLabel}
+              onClick={onEdit}
+            />
+            <KnowledgeQuestionAction
+              disabled={disabled}
+              icon={<SendHorizontal className="size-3" />}
+              label={replayLabel}
+              onClick={onReplay}
+            />
+          </div>
+        )}
       </div>
     </div>
   )

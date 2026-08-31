@@ -25,6 +25,10 @@ const chatRuleCategoryRank: Record<ChatRuleCategory, number> = {
 export const defaultChatRuleCategory: ChatRuleCategory = 'instruction'
 
 export const defaultChatRuleVisibility: ChatRuleVisibility = {
+  // Opt-IN for the agent surface: an existing rule was written for chat
+  // or the editor, and turning it into a report requirement without its
+  // owner saying so would change what missions produce.
+  agent: false,
   chat: true,
   editor: true,
 }
@@ -40,6 +44,7 @@ export function chatRuleVisibilityOrDefault(value: unknown): ChatRuleVisibility 
     ? value as Record<string, unknown>
     : {}
   return {
+    agent: typeof record.agent === 'boolean' ? record.agent : defaultChatRuleVisibility.agent,
     chat: typeof record.chat === 'boolean' ? record.chat : defaultChatRuleVisibility.chat,
     editor: typeof record.editor === 'boolean' ? record.editor : defaultChatRuleVisibility.editor,
   }

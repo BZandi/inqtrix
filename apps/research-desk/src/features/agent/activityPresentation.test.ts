@@ -21,6 +21,15 @@ describe('agent activity presentation', () => {
     }, de)).toBe('Durchsucht Projektwissen · 4 Vorgänge')
   })
 
+  it('labels the kernel model turn instead of exposing its wire code', () => {
+    expect(normalizeAgentOperation('agent.model.turn')).toBe('model_turn')
+    expect(activityDisplayText({
+      detail: 'agent.model.turn',
+      kind: 'working',
+      operation: 'model_turn',
+    }, de)).toBe('Denkt nach')
+  })
+
   it('assigns source-semantic timeline icon kinds', () => {
     expect(agentActivityIconKind('web_instant')).toBe('web')
     expect(agentActivityIconKind('knowledge_search')).toBe('knowledge')

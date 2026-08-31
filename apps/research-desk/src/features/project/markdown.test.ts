@@ -144,7 +144,7 @@ describe('serializeChatRule / parseChatRule', () => {
       linkedContextRefs: [],
       title: 'Legacy',
       updatedAt: '2026-01-02T00:00:00.000Z',
-      visibility: { chat: true, editor: true },
+      visibility: { agent: false, chat: true, editor: true },
     })
   })
 
@@ -157,7 +157,7 @@ describe('serializeChatRule / parseChatRule', () => {
         { groupId: 'group-1', kind: 'file-group' },
         { kind: 'chat-rule', ruleId: 'ignored-linked-rule' },
       ],
-      visibility: { chat: true, editor: false },
+      visibility: { agent: false, chat: true, editor: false },
     })
 
     const file = serializeChatRule(rule)
@@ -197,7 +197,7 @@ describe('parseFrontmatter line-ending tolerance (Windows/CRLF)', () => {
     linkedContextRefs: [],
     title: 'Legacy',
     updatedAt: '2026-01-02T00:00:00.000Z',
-    visibility: { chat: true, editor: true },
+    visibility: { agent: false, chat: true, editor: true },
   }
 
   it('accepts CRLF frontmatter from a Windows autocrlf checkout', () => {
@@ -340,6 +340,15 @@ describe('project file export plan', () => {
     expect(paths).not.toContain('rules/shared-rule.md')
     expect(paths.some((path) => path.includes('doc-owned'))).toBe(true)
     expect(paths.some((path) => path.includes('doc-shared'))).toBe(false)
+
+    // Das Manifest darf nichts versprechen, was im Archiv nicht liegt. Die
+    // Ordnungsfelder kamen frueher ungefiltert aus dem Zustand, waehrend der
+    // Exportplan Fremdfreigaben ueberspringt -- ein Import fand dann eine Id
+    // ohne Datei.
+    const manifest = parseProjectManifest(serializeProjectManifest(state).contents)
+
+    expect(manifest.editor_document_order).toEqual(['doc-owned'])
+    expect(manifest.rule_order).toEqual(['rule-owned'])
   })
 
   it('round-trips server provenance and a local recovery boundary', () => {

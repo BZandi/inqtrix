@@ -11,8 +11,10 @@ import {
 
 import {
   collaborationSocketWindow,
+  installCollaborationStatusObserver as installStatusObserverInPage,
   installCollaborationWebSocketObserver as installWebSocketObserverInPage,
   type CollaborationSocketObserverState,
+  type CollaborationStatusObserverState,
 } from '../browser-observer'
 import { CollaborationFixtureControlClient } from '../control'
 import type { CollaborationE2EStack } from '../config'
@@ -36,8 +38,10 @@ const labels = {
     accessRevoked: 'Zugriff entzogen',
     all: 'Alle',
     assistant: 'KI',
+    assistantPlaceholder: 'Beschreiben Sie, was am Dokument geändert werden soll...',
     author: 'Person',
     changes: 'Änderungen',
+    sendInstruction: 'Senden',
     closeInspector: 'Inspector schließen',
     display: 'Anzeige',
     edit: 'Bearbeiten',
@@ -77,8 +81,10 @@ const labels = {
     accessRevoked: 'Access revoked',
     all: 'All',
     assistant: 'AI',
+    assistantPlaceholder: 'Describe what should change in this document...',
     author: 'Person',
     changes: 'Changes',
+    sendInstruction: 'Send',
     closeInspector: 'Close inspector',
     display: 'Display',
     edit: 'Edit',
@@ -535,6 +541,232 @@ test.describe('two-user editor collaboration', () => {
     for (const page of [ownerPage, collaboratorPage]) {
       await expectTextOccurrences(editor(page), ownerMarker, 0)
       await expectTextOccurrences(editor(page), collaboratorMarker, 0)
+    }
+  })
+
+  // Fuenfzehn Stellen in dieser Datei beweisen, dass die Verbindung abbricht,
+  // WENN sie soll -- Widerruf, Rechteentzug, Protokollverstoss. Keine einzige
+  // sicherte bisher zu, dass sie es NICHT tut, wenn nichts passiert. Die
+  // Aussage "die Zusammenarbeit ist stabil" stuetzte sich damit auf eine
+  // einzelne Handmessung. Dieses Szenario macht sie zu einem Tor.
+  test('@stays-connected @mobile two writing sessions keep one socket and never surface the reconnect banner', async ({ collaboration }, testInfo) => {
+    const { collaboratorPage, ownerPage, stack } = requireCollaboration(collaboration)
+    // Eigenes Dokument, absichtlich von keinem anderen Szenario benutzt:
+    // dieser Test haelt seine beiden Sitzungen eine halbe Minute offen. Auf
+    // einem geteilten Dokument stiesse er auf die Restsitzungen eines
+    // Szenarios, das die Seite neu laedt, liefe in den Deckel von fuenf
+    // gleichzeitigen Sitzungen je Nutzer und Dokument -- und meldete den
+    // Ratenschutz als Verbindungsabbruch. Genau das ist beim ersten Lauf
+    // passiert, auf genau einem der vier Browserprojekte.
+    const documentId = requireCapabilityDocument(
+      stack.documents.staysConnected,
+      'fixture.documents.staysConnected',
+      testInfo,
+    )
+    const pages = [ownerPage, collaboratorPage]
+
+    // Beide Sonden VOR der Navigation: addInitScript wirkt erst ab der
+    // naechsten Seitenladung. Nach openDocument installiert beobachten sie
+    // nichts und meldeten trotzdem "keine Vorkommnisse".
+    for (const page of pages) {
+      await installWebSocketObserver(page)
+      await installStatusObserver(page)
+    }
+    await Promise.all(pages.map((page) => openDocument(page, documentId, stack.locale)))
+    await Promise.all(pages.map((page) => waitForConnected(page, stack.locale)))
+    await Promise.all(pages.map((page) => chooseWriteMode(page, stack.locale, 'edit')))
+
+    // Die Sonden muessen BEWEISEN, dass sie mitschreiben. Ohne diesen Schritt
+    // waere "null Abbrueche" eine Aussage ueber ein leeres Protokoll und das
+    // Szenario immergruen -- der teuerste Fehler, den ein Tor machen kann.
+    for (const page of pages) {
+      await expect.poll(() => observedActiveCollaborationSocketId(page)).not.toBeNull()
+      expect(
+        await observedReconnectAppearances(page),
+        'The status observer must be installed before the assertions read it.',
+      ).not.toBeNull()
+    }
+
+    const markers: string[] = []
+    for (let round = 0; round < 6; round += 1) {
+      const page = round % 2 === 0 ? ownerPage : collaboratorPage
+      const marker = uniqueMarker(`stays-connected-${round}`)
+      // appendMarkerAtomically statt Tastatureingabe: es setzt die Einfuegung
+      // ueber eine DOM-Range ans echte Dokumentende und schreibt den Marker in
+      // EINEM Zug. Zeichenweises Tippen ans Zeilenende laesst eine
+      // eintreffende Fremdaenderung den Marker mitten im Wort zerreissen.
+      await appendMarkerAtomically(page, editor(page), marker)
+      markers.push(marker)
+      await page.waitForTimeout(4_000)
+    }
+
+    // Konvergenz: jede Marke steht in BEIDEN Sitzungen genau einmal.
+    for (const page of pages) {
+      for (const marker of markers) {
+        await expectTextOccurrences(editor(page), marker, 1)
+      }
+    }
+
+    for (const page of pages) {
+      expect(
+        await observedCloseCodes(page),
+        'A session that only writes must not lose its collaboration socket.',
+      ).toEqual([])
+      expect(
+        await observedReconnectAppearances(page),
+        'The reconnect banner must never appear while the transport is healthy.',
+      ).toEqual([])
+    }
+
+    // Das Fixture-Dokument wird von mehreren Szenarien geteilt; die Marken
+    // gehen wieder raus, damit der naechste Lauf denselben Ausgangstext sieht.
+    for (const marker of markers) {
+      await removeMarker(editor(ownerPage), marker)
+    }
+    for (const page of pages) {
+      for (const marker of markers) {
+        await expectTextOccurrences(editor(page), marker, 0)
+      }
+    }
+  })
+
+  // Der Editor-Assistent ist der einzige Hauptpfad des Produkts ohne jede
+  // automatische Abdeckung: seine Herkunft kam im gesamten E2E-Baum null Mal
+  // vor. Genau dort sass ein Fehler, der bei JEDEM Nutzer und JEDEM Versuch
+  // zuschlug -- "Uebernehmen" antwortete 409 patch_not_found -- und trotzdem
+  // blieben alle Tests gruen. Die Abdeckungsluecke hatte dieselbe Form wie
+  // die Produktluecke.
+  //
+  // Der Modellaufruf ist gestubbt, die Serverseite nicht: Traegerzeile,
+  // privater Entwurf und Veroeffentlichung laufen echt. Gegatet wird der
+  // Mechanismus, nicht das Modell -- ein LLM-Aufruf je Verifikationslauf
+  // waere teuer und nicht reproduzierbar.
+  test('@ai-suggestion-accept an assistant suggestion publishes and reaches the second session', async ({ collaboration }, testInfo) => {
+    const { collaboratorPage, ownerPage, stack } = requireCollaboration(collaboration)
+    const documentId = requireCapabilityDocument(
+      stack.documents.aiSuggestion,
+      'fixture.documents.aiSuggestion',
+      testInfo,
+    )
+    const pages = [ownerPage, collaboratorPage]
+    await Promise.all(pages.map((page) => openDocument(page, documentId, stack.locale)))
+    await Promise.all(pages.map((page) => waitForConnected(page, stack.locale)))
+
+    // Der Ankersatz steht woertlich im Fixture-Dokument; der gestubbte
+    // Vorschlag ersetzt darin genau ein Wort.
+    const anchorText = 'Der Assistent ersetzt hier ein Wort.'
+    // Ein echter Wortwechsel, kein Anhaengsel: 'ersetzt' -> 'ersetzte' waere
+    // eine reine Einfuegung eines Buchstabens, und die Diff-Bildung erzeugt
+    // dafuer voellig zu Recht KEINE Loeschmarke. Der veroeffentlichte
+    // Ersetzungspfad soll aber beide Marken tragen.
+    const replacement = 'Der Assistent tauscht hier ein Wort.'
+    const routePattern = '**/v1/editor/instruct'
+    const handler = async (route: Route): Promise<void> => {
+      await route.fulfill({
+        body: JSON.stringify({
+          assistant_message: 'Ein Wort wurde ersetzt.',
+          edits: [{
+            find: anchorText,
+            note: 'Zeitform angepasst.',
+            position: 'replace',
+            quote_after: '',
+            quote_before: '',
+            text: replacement,
+          }],
+          warnings: [],
+        }),
+        contentType: 'application/json',
+        status: 200,
+      })
+    }
+    await ownerPage.route(routePattern, handler)
+    try {
+      await openAssistant(ownerPage, stack.locale)
+      const composer = ownerPage.getByRole('textbox', {
+        name: labels[stack.locale].assistantPlaceholder,
+      })
+      await composer.click()
+      await ownerPage.keyboard.insertText('Setze den Satz in die Vergangenheit.')
+
+      // Die Traegerzeile ist die Vorautorisierung: ohne einen creator-privaten
+      // Entwurf auf genau dieses patch_id weist der Serverwaechter die
+      // Veroeffentlichung ab. Dass sie wirklich geschrieben wird, ist Teil der
+      // Zusicherung -- nicht nur, dass am Ende ein Vorschlag dasteht.
+      const [draftPersistence] = await Promise.all([
+        ownerPage.waitForResponse((response) => {
+          const path = new URL(response.url()).pathname
+          return response.request().method() === 'PUT'
+            && path.startsWith(`/v1/editor/documents/${documentId}/comments/`)
+            && path.endsWith('/suggestion-draft')
+        }, { timeout: 60_000 }),
+        ownerPage.getByRole('button', {
+          name: labels[stack.locale].sendInstruction,
+          exact: true,
+        }).click(),
+      ])
+      expect(draftPersistence.status()).toBe(200)
+    } finally {
+      if (!ownerPage.isClosed()) await ownerPage.unroute(routePattern, handler)
+    }
+
+    // Uebernehmen: der Pfad, der vorher ausnahmslos 409 patch_not_found gab.
+    const [publication] = await Promise.all([
+      ownerPage.waitForResponse((response) => (
+        new URL(response.url()).pathname
+          === `/v1/editor/documents/${documentId}/suggestions:publish`
+      ), { timeout: 60_000 }),
+      ownerPage.getByRole('button', {
+        name: labels[stack.locale].privateSuggestionAccept,
+      }).first().click(),
+    ])
+    expect(
+      publication.status(),
+      'An assistant publication must carry its own authorisation.',
+    ).toBe(200)
+
+    // Inhaltliche Abnahme, in BEIDEN Sitzungen: der zweite Nutzer sieht die
+    // Aenderung als geteilte Tracked Change. Geprueft ueber die Kennungen aus
+    // der Antwort und den vorhandenen Helfer, nicht ueber Text -- innerText
+    // verklebt Loeschung und Einfuegung zu einem Wort, das nirgends steht.
+    const published = await publication.json() as {
+      patch_id: string
+      suggestion_ids: string[]
+    }
+    expect(published.suggestion_ids).toHaveLength(1)
+    for (const page of pages) {
+      // Erst die Aenderung auswaehlen, dann die Marken pruefen: in der
+      // Standardansicht ist die Loeschung zwar im DOM, aber nicht sichtbar.
+      // Ohne diesen Schritt prueft man die Anwesenheit eines Knotens statt
+      // dessen, was der Nutzer sieht.
+      await selectPublishedCollaborationChange(
+        page,
+        stack.locale,
+        published.patch_id,
+      )
+      await expectPublishedReplacementMarks(
+        page,
+        published.suggestion_ids[0]!,
+        published.patch_id,
+      )
+    }
+
+    // Aufraeumen ist hier Teil der Zusicherung, nicht Hoeflichkeit: dieses
+    // Szenario VEROEFFENTLICHT eine Aenderung und wuerde den Ankersatz
+    // dauerhaft umschreiben. Die vier Browserprojekte laufen nacheinander
+    // gegen DASSELBE Dokument -- ohne Ruecknahme faende schon das zweite
+    // seinen Anker nicht mehr und meldete einen Verankerungsfehler, der
+    // in Wahrheit der Rueckstand des ersten waere.
+    const changeRow = ownerPage.locator(
+      `[data-inspector-change-id="${published.patch_id}"]`,
+    )
+    await changeRow.getByRole('button', {
+      exact: true,
+      name: labels[stack.locale].reject,
+    }).click()
+    await expect(changeRow).toHaveCount(0)
+    for (const page of pages) {
+      await expectTextOccurrences(editor(page), anchorText, 1)
+      await expectTextOccurrences(editor(page), replacement, 0)
     }
   })
 
@@ -1599,12 +1831,20 @@ test.describe('two-user editor collaboration', () => {
       const importedDocumentTitle = normalizedImportedDocumentTitle(
         exportedDocumentTitle as string,
       )
-      const exportedDocumentHashes = projectDocumentBodyHashes(zipFiles, true)
-      expect(exportedDocumentHashes).toHaveLength(projectDocumentCount(zipFiles))
       const exportedDocumentOrder = projectEditorDocumentOrder(zipFiles)
       const exportedDocumentById = new Map(
         projectDocumentEntries(zipFiles).map((document) => [document.id, document]),
       )
+      // Verglichen wird gegen ALLE Editor-Dokumente des Archivs, denn der
+      // Import laedt jede .md hoch, nicht nur die abgeloesten. Eine Sonde, die
+      // hier auf `detached_from_collaboration` filtert, stellt zwei
+      // verschiedene Mengen gegenueber -- und kann ausserdem genau die
+      // Eigenschaft nicht pruefen, aus der sie ihre Grundgesamtheit ableitet.
+      // Dass das Flag sitzt, sichern die beiden Einzeldokument-Zusicherungen,
+      // deren contentMode dieser Test selbst hergestellt hat.
+      const exportedDocumentHashes = [...exportedDocumentById.values()]
+        .map((document) => document.bodyHash)
+        .sort()
       expect(exportedDocumentOrder).toHaveLength(exportedDocumentById.size)
       const exportedDocumentHashesInOrder = exportedDocumentOrder.map((exportedId) => {
         const exportedDocument = exportedDocumentById.get(exportedId)
@@ -2660,16 +2900,47 @@ async function focusEditorEnd(surface: Locator): Promise<void> {
   })
 }
 
+/** Wie oft die Marke auf einer Flaeche steht -- und dass sie DORT BLEIBT.
+ *
+ *  Ein blosser `expect.poll` ist erfuellt, sobald der Zaehler die Erwartung
+ *  zum ERSTEN Mal beruehrt. Eine Verdopplung, die einen Rundlauf spaeter
+ *  eintrifft, liegt dann hinter der Messung -- die Zusicherung "genau
+ *  einmal" kann "zweimal" strukturell nicht sehen. Genau darauf sitzt
+ *  `@concurrent-edits` ("converge exactly once"), das ausser diesen
+ *  Zaehlungen keinen serverseitigen Gegenbeleg fuehrt.
+ *
+ *  Deshalb folgt auf die Konvergenz ein Ruhe-Fenster mit EIGENEM
+ *  Zeitbudget. Geteilt mit der Konvergenzfrist wuerde eine langsame
+ *  Konvergenz das Fenster auffressen und Geisterrot erzeugen -- der
+ *  Fehler, den `waitForDurableBrowserUpdate` (editor-system-live.mjs:1658)
+ *  im gemeinsamen `deadline` noch hat. Das Ruhe-Muster selbst ist von
+ *  dort uebernommen (`stableSince`, 250 ms unveraendert).
+ *
+ *  Fuer die 30 Aufrufe mit `expected = 0` wirkt dasselbe Fenster als
+ *  Wartezeit: eine Abwesenheit laesst sich nur ueber eine Zeitspanne
+ *  beobachten, nicht in einem einzigen Sample abfragen.
+ */
+const TEXT_OCCURRENCE_SETTLE_MS = 250
+
 async function expectTextOccurrences(
   surface: Locator,
   marker: string,
   expected: number,
 ): Promise<void> {
   await expect(surface).toBeVisible()
-  await expect.poll(async () => {
+  const occurrences = async (): Promise<number> => {
     const content = await surface.textContent()
     return (content ?? '').split(marker).length - 1
-  }).toBe(expected)
+  }
+  await expect.poll(occurrences).toBe(expected)
+  const settleDeadline = Date.now() + TEXT_OCCURRENCE_SETTLE_MS
+  while (Date.now() < settleDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(
+      await occurrences(),
+      `Die Marke "${marker}" blieb nicht bei ${expected} Vorkommen.`,
+    ).toBe(expected)
+  }
 }
 
 async function selectMarker(surface: Locator, marker: string): Promise<void> {
@@ -3275,6 +3546,27 @@ async function installWebSocketObserver(page: Page): Promise<void> {
   await page.addInitScript(installWebSocketObserverInPage)
 }
 
+async function installStatusObserver(page: Page): Promise<void> {
+  await page.addInitScript(installStatusObserverInPage)
+}
+
+/** Jedes Erscheinen des Wiederverbindungs-Streifens, durchgehend beobachtet.
+ *
+ * Ein leeres Ergebnis heisst NUR dann "der Streifen kam nie", wenn die Sonde
+ * auch wirklich lief. Genau dafuer meldet dieser Zugriff `null` statt einer
+ * leeren Liste, wenn kein Beobachterzustand im Fenster liegt -- eine fehlende
+ * Sonde darf sich nicht als bestandene Zusicherung tarnen. */
+async function observedReconnectAppearances(
+  page: Page,
+): Promise<CollaborationStatusObserverState['reconnectAppearances'] | null> {
+  return page.evaluate(() => {
+    const state = (window as unknown as {
+      __inqtrixCollaborationStatusObserver?: CollaborationStatusObserverState
+    }).__inqtrixCollaborationStatusObserver
+    return state ? [...state.reconnectAppearances] : null
+  })
+}
+
 async function armLargeStateBrowserTiming(
   page: Page,
   sourceMarker: string,
@@ -3637,9 +3929,6 @@ function projectMarkdownBodyHash(contents: string): string {
   return createHash('sha256').update(body.trim()).digest('hex')
 }
 
-function projectDocumentCount(files: StoredZipFile[]): number {
-  return projectDocumentEntries(files).length
-}
 
 function projectEditorDocumentOrder(files: StoredZipFile[]): string[] {
   const manifests = files.filter((file) => (
@@ -3676,21 +3965,6 @@ function projectDocumentEntries(files: StoredZipFile[]): {
     })
 }
 
-function projectDocumentBodyHashes(
-  files: StoredZipFile[],
-  detachedFromCollaboration: true | undefined,
-): string[] {
-  return files
-    .filter((file) => (
-      projectFrontmatterValue(file.contents, 'kind') === 'inqtrix.editor_document'
-      && projectFrontmatterValue(
-        file.contents,
-        'detached_from_collaboration',
-      ) === detachedFromCollaboration
-    ))
-    .map((file) => projectMarkdownBodyHash(file.contents))
-    .sort()
-}
 
 async function decideVisibleSuggestion(
   ownerPage: Page,

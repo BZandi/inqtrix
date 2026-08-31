@@ -30,7 +30,7 @@ export type EditorCollaborationStatusKind =
   | 'saved'
   | 'saving'
   | 'syncing'
-  | 'update_required'
+  | 'reload_required'
 
 export type EditorCollaborationStatusModel = {
   active: boolean
@@ -67,6 +67,8 @@ const GERMAN_COLLABORATION_NOTICES: Readonly<Record<string, string>> = {
     'Diese App-Version ist nicht mit dem Kollaborationsprotokoll kompatibel.',
   'The collaboration protocol or schema is not compatible.':
     'Diese App-Version ist nicht mit dem Kollaborationsprotokoll oder Dokumentschema kompatibel.',
+  'The collaboration service ended this session and will not resume it with the current state. Reload the page to continue.':
+    'Der Kollaborationsdienst hat diese Sitzung beendet und nimmt sie mit dem aktuellen Stand nicht wieder auf. Laden Sie die Seite neu, um weiterzuarbeiten.',
   'The collaboration session expired. Sign in again to continue.':
     'Die Anmeldung ist abgelaufen. Melden Sie sich erneut an, um fortzufahren.',
   'The document schema is not supported by this client.':
@@ -125,7 +127,7 @@ export function buildEditorCollaborationStatusModel({
   let kind: EditorCollaborationStatusKind = 'saved'
   if (!active) kind = 'inactive'
   else if (connectionStatus === 'access_revoked') kind = 'access_revoked'
-  else if (connectionStatus === 'incompatible') kind = 'update_required'
+  else if (connectionStatus === 'incompatible') kind = 'reload_required'
   else if (connectionStatus === 'origin_rejected') kind = 'origin_rejected'
   else if (connectionStatus === 'error' || durabilityStatus === 'error') kind = 'error'
   else if (connectionStatus === 'reconnecting') kind = 'reconnecting'

@@ -22,13 +22,14 @@ from inqtrix.project.base_session_store import (
     DEFAULT_TENANT as _DEFAULT_TENANT,
 )
 from inqtrix.project.asset_records_ports import (
-    DEFAULT_ASSET_SECTION_SPECS,
     AssetDeletionInProgress,
     AssetGroup,
     AssetNotFound,
     AssetRecord,
     AssetSection,
     AssetUploadConflict,
+    DEFAULT_ASSET_SECTION_SPECS,
+    ensure_initial_upload_status,
     GroupNotFound,
     SectionNotFound,
 )
@@ -315,7 +316,9 @@ class PostgresAssetStore(BaseSessionStore):
         origin, page_count, parse_status, parse_warning, text_truncated,
         size_bytes, server_file_id, parser_id=None, extracted_text, created_at,
         updated_at, created_by_user_id: uuid.UUID | None, workspace_id,
+        initial_upload_status: str = "ready",
     ) -> AssetRecord:
+        ensure_initial_upload_status(initial_upload_status)
         values = dict(
             id=id, tenant_id=_DEFAULT_TENANT, created_by_user_id=created_by_user_id,
             workspace_id=workspace_id, section_id=section_id, group_id=group_id,
@@ -325,6 +328,12 @@ class PostgresAssetStore(BaseSessionStore):
             size_bytes=size_bytes, server_file_id=server_file_id,
             parser_id=parser_id, extracted_text=extracted_text,
             created_at=created_at, updated_at=updated_at,
+            # INSERT-only intent from the caller: reserve_upload passes
+            # "awaiting_upload" so a reservation NEVER exists as 'ready'
+            # without bytes -- not even between two transactions. NOT in
+            # `mutable` below, so an existing row keeps its stored status
+            # and a repeated reservation cannot reset a finalised one.
+            upload_status=initial_upload_status,
         )
         mutable = ["section_id", "group_id", "title", "label", "origin",
                    "page_count", "parse_status",

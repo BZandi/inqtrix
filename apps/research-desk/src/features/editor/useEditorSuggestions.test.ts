@@ -5,6 +5,8 @@ import {
 } from '@inqtrix/editor-schema'
 import { Editor as HeadlessEditor } from '@tiptap/core'
 import type { Editor } from '@tiptap/react'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 
 import type {
@@ -16,6 +18,8 @@ import {
   beginEditorCollaborationAuthorityGuard,
   buildCollaborationSuggestionTargetMarkdown,
   collaborationPublicationFromResponse,
+  createAgentPatchSuggestionRecords,
+  createInstructionSuggestionRecords,
   editorAiReadOnlyReason,
   editorCollaborationActionDisabledReason,
   invokeEditorAiProvider,
@@ -151,6 +155,74 @@ describe('private AI suggestion relative anchors', () => {
   })
 })
 
+describe('Instruktionslauf mit einem unverankerbaren Edit', () => {
+  // Live gemessen: ein Lauf mit zwei Edits, von denen einer seinen Anker
+  // nicht aufloesen konnte, endete OHNE jeden Vorschlag -- auch der saubere
+  // Edit verschwand. Der Nutzer hatte den Modelllauf bezahlt und bekam einen
+  // roten Streifen. Ein Edit ist eine Aussage ueber diesen Edit, nicht ueber
+  // den Lauf.
+  function laufMitEinemUnauffindbarenEdit(
+    activeEditor: Editor | null,
+    anchorAdapter: EditorRelativePositionAdapter | null,
+  ) {
+    return createInstructionSuggestionRecords({
+      activeEditor,
+      anchorAdapter,
+      document: { ...BASE_DOCUMENT, contentMode: 'collaboration' },
+      groupId: 'group-1',
+      locale: 'de',
+      now: '2026-08-25T12:00:00.000Z',
+      proposal: {
+        assistantMessage: 'zwei Ersetzungen',
+        edits: [
+          {
+            find: 'Alpha',
+            note: 'ersetzt Alpha',
+            position: 'replace',
+            quote_after: '',
+            quote_before: '',
+            text: 'Beta',
+          },
+          {
+            find: 'kommt im Text nicht vor',
+            note: 'findet seinen Anker nicht',
+            position: 'replace',
+            quote_after: '',
+            quote_before: '',
+            text: 'egal',
+          },
+        ],
+      },
+    })
+  }
+
+  it('behaelt die verankerbaren Edits und verwirft nur den einen', () => {
+    const editor = new HeadlessEditor({
+      content: parseEditorMarkdown('Alpha omega'),
+      element: null,
+      extensions: createEditorSchemaExtensions({ enableUndoRedo: false }),
+      injectCSS: false,
+    })
+    try {
+      const records = laufMitEinemUnauffindbarenEdit(editor as unknown as Editor, serializer)
+
+      expect(records).toHaveLength(1)
+      expect(records[0]).toMatchObject({ proposedText: 'Beta' })
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  // Die Gegenrichtung: fehlt der Adapter, kann KEIN Edit dieses Laufs einen
+  // relativen Anker bekommen. Das ist eine Aussage ueber den Lauf und bleibt
+  // deshalb ein Abbruch -- sonst entstuenden Vorschlaege, die beim
+  // Uebernehmen garantiert scheitern.
+  it('bricht weiterhin ab, wenn der ganze Lauf keine relativen Anker kann', () => {
+    expect(() => laufMitEinemUnauffindbarenEdit(null, null))
+      .toThrowError(/Verankerung nicht sicher gespeichert/)
+  })
+})
+
 describe('private AI suggestion draft persistence', () => {
   const suggestion: EditorSuggestionRecord = {
     anchor: anchor(2, 8),
@@ -180,6 +252,11 @@ describe('private AI suggestion draft persistence', () => {
 
   it('reuses stable publication identifiers in the initial private draft payload', () => {
     expect(privateSuggestionDraftCreatePayload(suggestion)).toEqual({
+      // Die Ankerstelle reist mit: ohne sie findet der Uebernahmepfad die
+      // Stelle nach einem Neuladen nicht wieder. `edit_position` fehlt hier
+      // zu Recht -- dieser Vorschlag stammt aus dem Kommentarweg, der immer
+      // ersetzt und die Angabe nie brauchte.
+      anchor_text: 'old',
       anchor_version: 1,
       change_summary: ['Clearer wording'],
       evidence: suggestion.evidence,
@@ -194,6 +271,37 @@ describe('private AI suggestion draft persistence', () => {
       commandId: '00000000-0000-4000-8000-000000000002',
       patchId: '00000000-0000-4000-8000-000000000003',
     })
+  })
+
+  // Frueher wuerfelte diese Funktion zwei frische UUIDs, wenn kein Entwurf
+  // vorlag. Zu einer erfundenen Identitaet kann es per Konstruktion keine
+  // Autorisierung geben: der Server wies sie mit "patch_not_found" ab, und
+  // der Nutzer las eine Konfliktmeldung fuer etwas, das nie eine Chance
+  // hatte. Eine fehlende Autorisierung ist ein Programmfehler weiter oben
+  // und muss sich als solcher melden.
+  it('erfindet keine Identitaet, wenn die Autorisierung fehlt', () => {
+    const { privateDraft, ...ohneEntwurf } = suggestion
+    void privateDraft
+
+    expect(() => privateSuggestionPublicationIdentity(ohneEntwurf, 'en'))
+      .toThrowError(/no stored authorisation/i)
+  })
+
+  // Ein Assistentenlauf fuegt in drei von vier Faellen ein, statt zu
+  // ersetzen. Ohne edit_position im Entwurf baut der Uebernahmepfad nach
+  // einem Neuladen jede Einfuegung als Ersetzung neu auf -- der Nutzer
+  // verliert still Text.
+  it('traegt die Einfuegeart in die Erstanlage', () => {
+    const einfuegung = {
+      ...suggestion,
+      anchorText: 'Ankersatz',
+      editPosition: 'after' as const,
+    }
+
+    const payload = privateSuggestionDraftCreatePayload(einfuegung)
+
+    expect(payload.edit_position).toBe('after')
+    expect(payload.anchor_text).toBe('Ankersatz')
   })
 
   it('sends revisions without replacing the stable draft identity', () => {
@@ -635,5 +743,111 @@ describe('collaboration private suggestion publication target', () => {
       { commandId: 'command-1', expectedSequence: 17, patchId: 'patch-1' },
       'en',
     )).toThrow('not confirmed durably')
+  })
+})
+
+describe('createAgentPatchSuggestionRecords (P7: Server-Patch-Spiegelung)', () => {
+  const PATCH = {
+    patch_id: 'pch_p7',
+    document_id: 'document-1',
+    run_id: 'run_1',
+    source: 'agent' as const,
+    status: 'pending' as const,
+    edit_count: 3,
+    summary: 'Begriff ersetzen',
+    revision_before: 1,
+    applied_revision: null,
+    created_at: 1,
+    decided_at: null,
+    edits: [
+      {
+        id: 'ed_1',
+        find: 'Cached',
+        quote_before: '',
+        quote_after: '',
+        position: 'replace' as const,
+        text: 'Frischer',
+        note: '',
+      },
+      {
+        // Legitimately skipped: empty insert — the server apply skips
+        // it too, so no record (and no wrong edit-id pairing) appears.
+        id: 'ed_2',
+        find: 'body',
+        quote_before: '',
+        quote_after: '',
+        position: 'after' as const,
+        text: '',
+        note: '',
+      },
+      {
+        id: 'ed_3',
+        find: 'body',
+        quote_before: '',
+        quote_after: '',
+        position: 'replace' as const,
+        text: 'Inhalt',
+        note: '',
+      },
+    ],
+    warnings: [],
+    applied_edit_ids: null,
+    note: '',
+    document_revision: 1,
+  }
+
+  it('stamps every mirrored record with the RIGHT server edit id, across skips', () => {
+    const records = createAgentPatchSuggestionRecords({
+      activeEditor: null,
+      document: BASE_DOCUMENT,
+      groupId: 'group-p7',
+      locale: 'de',
+      now: '2026-08-28T12:00:00.000Z',
+      patch: PATCH,
+    })
+    expect(records.map((record) => record.serverPatch)).toEqual([
+      { editId: 'ed_1', patchId: 'pch_p7' },
+      { editId: 'ed_3', patchId: 'pch_p7' },
+    ])
+    expect(records.map((record) => record.proposedText)).toEqual([
+      'Frischer',
+      'Inhalt',
+    ])
+    expect(records.every((record) => record.status === 'pending')).toBe(true)
+    expect(records.every((record) => record.groupId === 'group-p7')).toBe(true)
+  })
+})
+
+describe('server patch decisions route through the official endpoints (source pins)', () => {
+  const source = readFileSync(
+    fileURLToPath(new URL('./useEditorSuggestions.ts', import.meta.url)),
+    'utf8',
+  )
+
+  it('accept and reject check serverPatch BEFORE the collaboration branch', () => {
+    const accept = source
+      .slice(source.indexOf('async function handleAcceptSuggestion'))
+      .slice(0, 700)
+    expect(accept.indexOf('suggestion.serverPatch')).toBeGreaterThan(-1)
+    expect(accept.indexOf('suggestion.serverPatch')).toBeLessThan(
+      accept.indexOf("contentMode === 'collaboration'"),
+    )
+    const reject = source
+      .slice(source.indexOf('async function handleRejectSuggestion'))
+      .slice(0, 700)
+    expect(reject.indexOf('suggestion.serverPatch')).toBeGreaterThan(-1)
+    expect(reject.indexOf('suggestion.serverPatch')).toBeLessThan(
+      reject.indexOf("contentMode === 'collaboration'"),
+    )
+  })
+
+  it('the decision helper uses apply/reject endpoints and the rebase adoption', () => {
+    const helper = source
+      .slice(source.indexOf('async function decideServerPatch'))
+      .slice(0, 2600)
+    expect(helper).toContain('applyEditorPatch(patchId, document.revision')
+    expect(helper).toContain('rejectEditorPatch(patchId')
+    expect(helper).toContain("type: 'rebaseServerEditorDocument'")
+    expect(helper).not.toContain('applySuggestionToEditor')
   })
 })
